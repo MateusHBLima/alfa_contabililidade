@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "db:migrate:local": "wrangler d1 migrations apply planee-fiscal --local",
     "db:migrate:prod": "wrangler d1 migrations apply planee-fiscal --remote",
-    "test:integracao": "vitest run test/integracao.test.ts"
+    "test:integracao": "vitest run test/integracao.test.ts",
+    "semear:usuario": "node scripts/semear-usuario.mjs"
   },
   "dependencies": {
     "fast-xml-parser": "^4.5.7",

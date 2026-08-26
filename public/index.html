@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Planee Fiscal</title>
+<link rel="stylesheet" href="/estilo.css">
+</head>
+<body>
+
+<!-- ============================================================ LOGIN -->
+<div id="tela-login" class="login-wrap">
+  <form class="login-card" id="form-login">
+    <div class="logo"><span class="mark">PF</span> Planee Fiscal</div>
+    <p class="sub">Tratamento de NF-e de entrada</p>
+    <div id="login-erro" class="login-erro hidden"></div>
+    <div class="campo">
+      <label class="fl" for="login-email">E-mail</label>
+      <input type="email" id="login-email" autocomplete="username" required>
+    </div>
+    <div class="campo">
+      <label class="fl" for="login-senha">Senha</label>
+      <input type="password" id="login-senha" autocomplete="current-password" required>
+    </div>
+    <button class="btn primary" style="width:100%;justify-content:center" id="btn-entrar">Entrar</button>
+  </form>
+</div>
+
+<!-- ============================================================== APP -->
+<div id="tela-app" class="app hidden">
+  <aside class="side">
+    <div class="brand">
+      <div class="logo"><span class="mark">PF</span> Planee Fiscal</div>
+      <small>ALFA Contabilidade</small>
+    </div>
+    <nav id="nav">
+      <div class="navlabel">Escrituração</div>
+      <button data-view="v1" class="active">
+        <span class="num">1</span>
+        <span>Notas recebidas<span class="sub">importar e acompanhar</span></span>
+      </button>
+      <button data-view="v2">
+        <span class="num">2</span>
+        <span>Tratamento<span class="sub">CFOP e descrição por item</span></span>
+      </button>
+      <button data-view="v3">
+        <span class="num">3</span>
+        <span>XML corrigido<span class="sub">conferir e exportar</span></span>
+      </button>
+      <div class="navlabel">Cadastros</div>
+      <button data-view="vEmpresas"><span class="num">E</span><span>Empresas</span></button>
+      <button data-view="vFornecedores"><span class="num">F</span><span>Fornecedores</span></button>
+      <button data-view="vRegras"><span class="num">R</span><span>Padrões aprendidos</span></button>
+    </nav>
+    <div class="side-foot">
+      <span id="rodape-ambiente">—</span><br>
+      <a href="#" id="btn-sair" style="color:#cfdcee">Sair</a>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <div>
+        <label class="fl" for="sel-empresa">Empresa</label>
+        <select id="sel-empresa" style="min-width:280px"></select>
+      </div>
+      <div>
+        <label class="fl" for="sel-competencia">Competência</label>
+        <select id="sel-competencia"><option value="">todas</option></select>
+      </div>
+      <div class="who"><b id="usuario-nome">—</b><span id="usuario-email"></span></div>
+    </div>
+
+    <div class="content">
+
+      <!-- ------------------------------------------------ AMBIENTE 1 -->
+      <section id="v1">
+        <h1>Notas emitidas contra o cliente</h1>
+        <p class="page-desc">Suba os XML das notas que os fornecedores emitiram contra esta empresa.
+          A busca automática na SEFAZ entra na fase 2 do projeto.</p>
+
+        <div class="kpis" id="kpis-notas"></div>
+
+        <div class="card">
+          <header><h2>Importar XML</h2><span class="hint">arquivos .xml — até 200 por vez</span></header>
+          <div class="body">
+            <div class="drop" id="drop">
+              <b>Arraste os arquivos aqui</b>
+              <span class="tiny">ou clique para escolher · NF-e modelo 55</span>
+            </div>
+            <input type="file" id="arquivo-xml" accept=".xml,text/xml" multiple hidden>
+            <div id="log-import" class="log hidden" style="margin-top:12px"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <header><h2>Notas carregadas</h2><span class="hint" id="hint-notas"></span></header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-notas">
+              <thead><tr>
+                <th>Emissão</th><th>Número</th><th>Fornecedor</th><th>Chave</th>
+                <th class="num">Valor</th><th>Itens</th><th>Situação</th><th></th>
+              </tr></thead>
+              <tbody></tbody>
+            </table></div>
+            <div class="vazio hidden" id="vazio-notas">
+              <b>Nenhuma nota ainda</b>Suba os XML acima para começar.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------ AMBIENTE 2 -->
+      <section id="v2" class="hidden">
+        <h1>Tratamento dos itens</h1>
+        <p class="page-desc">CFOP de saída do fornecedor → CFOP de entrada do cliente.
+          O que você corrigir aqui vira padrão para as próximas notas.</p>
+
+        <div id="faixa-resumo"></div>
+
+        <div class="card">
+          <header>
+            <h2 id="titulo-nota">Nenhuma nota selecionada</h2>
+            <span class="hint" id="hint-nota"></span>
+            <div style="margin-left:auto" class="rowflex">
+              <button class="btn sm" id="btn-voltar-notas">← Notas</button>
+              <button class="btn sm primary" id="btn-ver-xml">Ver XML corrigido →</button>
+            </div>
+          </header>
+          <div class="toolbar">
+            <div class="filters" id="filtros">
+              <button data-f="todos" class="on">Todos</button>
+              <button data-f="atencao">Precisa de atenção</button>
+              <button data-f="novo">Produtos novos</button>
+              <button data-f="pronto">Prontos</button>
+            </div>
+            <input type="search" id="busca" placeholder="buscar produto…" style="width:190px">
+            <div class="sep"></div>
+            <select id="bulk-cfop" style="font-size:12px;width:200px"></select>
+            <button class="btn sm" id="btn-bulk-nota">Aplicar na nota toda</button>
+            <button class="btn sm" id="btn-bulk-fornecedor" title="Vira o padrão deste fornecedor para esta empresa">
+              ☆ Fixar para o fornecedor
+            </button>
+          </div>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-itens">
+              <thead><tr>
+                <th style="width:34px">#</th>
+                <th>Produto na nota do fornecedor</th>
+                <th style="width:96px">NCM</th>
+                <th style="width:70px">CFOP orig.</th>
+                <th style="width:250px">Descrição corrigida</th>
+                <th style="width:96px">CFOP entrada</th>
+                <th class="num" style="width:92px">Valor</th>
+                <th style="width:150px">Situação</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table></div>
+            <div class="vazio hidden" id="vazio-itens">
+              <b>Escolha uma nota</b>Volte para o ambiente 1 e clique em “Tratar”.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------ AMBIENTE 3 -->
+      <section id="v3" class="hidden">
+        <h1>XML corrigido</h1>
+        <p class="page-desc">O XML original nunca é alterado — a assinatura do fornecedor seria invalidada.
+          O corrigido é cópia de trabalho para escrituração.</p>
+
+        <div class="grid2">
+          <div class="card">
+            <header><h2>Validações</h2><span class="hint">rodam a cada exportação</span></header>
+            <div class="body"><ul class="checklist" id="lista-validacoes">
+              <li class="tiny">Selecione uma nota no ambiente 2.</li>
+            </ul></div>
+          </div>
+          <div class="card">
+            <header><h2>Exportar</h2></header>
+            <div class="body">
+              <div class="rowflex">
+                <button class="btn primary" id="btn-baixar-xml">⇩ XML corrigido</button>
+                <button class="btn" id="btn-baixar-csv">⇩ Dados de escrituração (.csv)</button>
+              </div>
+              <div class="aviso">
+                O CSV traz CST de entrada, conta contábil e créditos. Esses campos são
+                <b>registrados, não gravados no XML</b> — só CFOP e descrição vão para dentro da nota.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <header><h2>Prévia do XML</h2><span class="hint">tags <span class="mono">xProd</span> e <span class="mono">CFOP</span> destacadas</span></header>
+          <div class="body"><pre class="xml" id="previa-xml">Selecione uma nota.</pre></div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------- EMPRESAS -->
+      <section id="vEmpresas" class="hidden">
+        <h1>Empresas</h1>
+        <p class="page-desc">O perfil fiscal define o CFOP sugerido quando o produto ainda não tem padrão próprio.</p>
+        <div class="card">
+          <header><h2>Cadastradas</h2>
+            <div style="margin-left:auto"><button class="btn sm primary" id="btn-nova-empresa">+ Nova empresa</button></div>
+          </header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-empresas">
+              <thead><tr><th>CNPJ</th><th>Razão social</th><th>UF</th><th>Perfil</th><th>CNAE</th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------- FORNECEDORES -->
+      <section id="vFornecedores" class="hidden">
+        <h1>Fornecedores</h1>
+        <p class="page-desc">Quem manda mais nota é quem dá mais retorno ao fixar um padrão.</p>
+        <div class="card">
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-fornecedores">
+              <thead><tr><th>CNPJ</th><th>Nome</th><th>UF</th><th class="num">Notas</th><th>Última</th><th>Padrão</th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------------- REGRAS -->
+      <section id="vRegras" class="hidden">
+        <h1>Padrões aprendidos</h1>
+        <p class="page-desc">O que o sistema já sabe sobre esta empresa. Padrão fixado pela contabilidade
+          não é rebaixado sozinho; padrão aprendido cai depois de três correções seguidas.</p>
+        <div class="card">
+          <header><h2>Regras</h2>
+            <div style="margin-left:auto" class="filters" id="filtro-regras">
+              <button data-s="0" class="on">Todas</button>
+              <button data-s="1">Suspeitas</button>
+            </div>
+          </header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-regras">
+              <thead><tr><th>Nível</th><th>Chave</th><th>Campo</th><th>Valor</th>
+                <th class="num">Usos</th><th class="num">Correções</th><th>Situação</th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<div id="modal-fundo" class="modal-fundo hidden">
+  <div class="modal">
+    <header id="modal-titulo"></header>
+    <div class="body" id="modal-corpo"></div>
+    <footer>
+      <button class="btn" id="modal-cancelar">Cancelar</button>
+      <button class="btn primary" id="modal-ok">Salvar</button>
+    </footer>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

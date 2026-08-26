@@ -14,6 +14,10 @@ export const PERMISSOES = {
   'notas.importar': { grupo: 'Notas', descricao: 'Subir arquivos XML ou ZIP' },
   'notas.editar_cfop': { grupo: 'Notas', descricao: 'Alterar CFOP (item, lote ou nota inteira)' },
   'notas.editar_descricao': { grupo: 'Notas', descricao: 'Alterar a descrição do produto' },
+  'notas.editar_escrituracao': {
+    grupo: 'Notas',
+    descricao: 'Alterar CST de entrada, conta contábil e créditos',
+  },
   'regras.visualizar': { grupo: 'Regras', descricao: 'Ver as regras aprendidas pelo sistema' },
   'regras.aprovar': { grupo: 'Regras', descricao: 'Promover, rebaixar ou apagar regra' },
   'export.gerar': { grupo: 'Exportação', descricao: 'Gerar e baixar o XML corrigido' },
@@ -46,6 +50,9 @@ export const PAPEIS_SEMENTE: { nome: string; descricao: string; sistema: boolean
       'notas.importar',
       'notas.editar_cfop',
       'notas.editar_descricao',
+      // O supervisor mexe em escrituração; o operador, não. É a decisão fiscal
+      // que exige olho de contador, não o preenchimento do dia a dia.
+      'notas.editar_escrituracao',
       'regras.visualizar',
       'regras.aprovar',
       'export.gerar',
@@ -58,6 +65,17 @@ export const PAPEIS_SEMENTE: { nome: string; descricao: string; sistema: boolean
     sistema: true,
     permissoes: TODAS_PERMISSOES,
   },
+];
+
+/**
+ * Permissões que os campos do template exigem (src/rules/campos.ts).
+ * Existe para que um teste garanta que toda permissão exigida por um campo
+ * está no catálogo E é concedida por algum papel — senão o campo fica inalcançável.
+ */
+export const CAMPOS_PERMISSOES_USADAS: string[] = [
+  'notas.editar_cfop',
+  'notas.editar_descricao',
+  'notas.editar_escrituracao',
 ];
 
 export type Sessao = {

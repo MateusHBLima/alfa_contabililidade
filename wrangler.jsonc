@@ -7,6 +7,13 @@
 
   "observability": { "enabled": true },
 
+  // A tela e a API saem no MESMO deploy. Arquivos de public/ são servidos direto;
+  // o que não casar com arquivo cai no Worker (as rotas /api/* e o fallback de SPA).
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+
   "d1_databases": [
     {
       "binding": "DB",

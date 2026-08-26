@@ -15,6 +15,7 @@ type Env = {
   DB: D1Database;
   XML_ORIGINAL: R2Bucket;
   XML_TRABALHO: R2Bucket;
+  ASSETS: { fetch(req: Request): Promise<Response> };
   SESSION_SECRET: string;
   AUDIT_SEED: string;
   AMBIENTE: string;
@@ -515,5 +516,18 @@ app.get('/api/notas/:id/escrituracao.csv', async (c) => {
 });
 
 app.get('/api/saude', (c) => c.json({ ok: true, ambiente: c.env.AMBIENTE }));
+
+// Rota de API não encontrada devolve JSON, e não a tela — senão o cliente recebe
+// HTML onde esperava erro e o problema aparece como "JSON inválido" três camadas adiante.
+app.all('/api/*', (c) => c.json({ erro: 'rota não encontrada' }, 404));
+
+/** Qualquer outro caminho é a aplicação: serve o arquivo, ou o index.html. */
+app.all('*', async (c) => {
+  const r = await c.env.ASSETS.fetch(c.req.raw);
+  if (r.status !== 404) return r;
+  const url = new URL(c.req.url);
+  url.pathname = '/index.html';
+  return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw));
+});
 
 export default app;

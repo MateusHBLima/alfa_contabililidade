@@ -8,7 +8,7 @@ import { gerarXmlCorrigido, verificarInvariantes } from '../src/nfe/serializer';
 import { parseNFe } from '../src/nfe/parser';
 import { detectarAlertas } from '../src/rules/alertas';
 import { aprender, chavesDoItem, sugerir } from '../src/rules/engine';
-import { TODAS_PERMISSOES, PAPEIS_SEMENTE, type Sessao } from '../src/auth/permissoes';
+import { TODAS_PERMISSOES, type Sessao } from '../src/auth/permissoes';
 import { gerarHashSenha, conferirSenha } from '../src/auth/senha';
 
 /**
@@ -44,22 +44,8 @@ async function semear() {
   db.migrar();
   r2 = new R2Local();
 
-  await db.prepare('INSERT INTO tenants (id, nome, criado_em) VALUES (?,?,?)')
-    .bind('alfa', 'ALFA CONTABILIDADE', new Date().toISOString()).run();
-
-  for (const p of TODAS_PERMISSOES) {
-    await db.prepare('INSERT INTO permissoes (chave, grupo, descricao) VALUES (?,?,?)')
-      .bind(p, 'g', p).run();
-  }
-
-  const admin = PAPEIS_SEMENTE.find((p) => p.nome === 'Admin')!;
-  await db.prepare('INSERT INTO papeis (id, tenant_id, nome, sistema) VALUES (?,?,?,1)')
-    .bind('papel-admin', 'alfa', admin.nome).run();
-  for (const perm of admin.permissoes) {
-    await db.prepare('INSERT INTO papel_permissoes (papel_id, permissao) VALUES (?,?)')
-      .bind('papel-admin', perm).run();
-  }
-
+  // tenant, permissões e papéis vêm da migração 0003 — não duplicamos aqui.
+  // Só o usuário é criado, porque senha não entra em migração.
   await db.prepare(
     'INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, criado_em) VALUES (?,?,?,?,?,?)',
   ).bind('u1', 'alfa', 'contadora@alfacontabil.net', 'Contadora',
@@ -79,11 +65,13 @@ async function semear() {
 beforeEach(semear);
 
 describe('as migrações aplicam num SQLite real', () => {
-  it('cria as 17 tabelas', () => {
+  it('cria as 17 tabelas e já traz a semente', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
     expect(tabelas.length).toBe(17);
+    expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
+    expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(3);
   });
 
   it('as chaves estrangeiras estão ativas e valem', async () => {
