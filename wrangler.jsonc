@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "planee-fiscal",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "observability": { "enabled": true },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "planee-fiscal",
+      "database_id": "PREENCHER_APOS_CRIAR",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      // Object Lock (compliance, 5 anos) precisa ser ativado pelo painel/API.
+      // O bucket guarda o XML assinado do fornecedor: nunca sofre alteracao.
+      "binding": "XML_ORIGINAL",
+      "bucket_name": "planee-xml-original"
+    },
+    {
+      "binding": "XML_TRABALHO",
+      "bucket_name": "planee-xml-trabalho"
+    }
+  ],
+
+  "vars": {
+    "AMBIENTE": "dev"
+  }
+
+  // Segredos (wrangler secret put):
+  //   SESSION_SECRET  - assinatura do cookie de sessao
+  //   AUDIT_SEED      - semente inicial da cadeia de hash da auditoria
+}
