@@ -3,6 +3,21 @@
 Protocolo **V.L.A.E.G.** aplicado a este repositório.
 Este arquivo é lei. Leia-o inteiro antes de escrever qualquer linha de código.
 
+> ## ⛔ Escopo desta sessão: só contabilidade
+>
+> **Aqui se trabalha exclusivamente o Planee Fiscal — a plataforma de NF-e de entrada da
+> ALFA CONTABILIDADE.**
+>
+> O projeto do **livro-caixa do cartório é outro** — outro cliente, outro produto, outra
+> pilha técnica. Ele tem documentos próprios no Projeto Claude
+> (`claude/cartorio-status.md` e `claude/cartorio-livro-caixa-achados.md`) e deve ser
+> tratado em outra conversa.
+>
+> Se o assunto do cartório aparecer aqui, **lembre o usuário desta regra antes de
+> responder.** Misturar os dois foi fonte de confusão real: valores, prazos e escopos
+> são diferentes, e um número do cartório citado como se fosse da ALFA — ou o contrário —
+> vira erro em proposta.
+
 > **Nota de tradução.** O protocolo original foi escrito para Antigravity, com
 > `gemini.md`, ferramentas em Python e `.env`. Este projeto é TypeScript rodando em
 > Cloudflare Workers. O que está abaixo é o **mesmo protocolo, traduzido para a
