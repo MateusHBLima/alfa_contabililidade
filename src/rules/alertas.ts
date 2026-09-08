@@ -246,12 +246,17 @@ export function resumirNota(porItem: { confianca: Confianca; alertas: Alerta[] }
 
   for (const it of porItem) {
     const pior = severidadeMaxima(it.alertas);
-    if (pior === 'critico') criticos += 1;
-    else if (pior === 'atencao') atencao += 1;
-    else if (pior === 'info') info += 1;
+    // Item sem alerta mas sem conhecimento por tras tambem pede olho: o valor ali
+    // e chute do perfil, nao decisao. Contar como tranquilo mentiria no numero que
+    // a tela usa para dizer quanto ja veio pronto.
+    const precisaOlho = it.confianca !== 'alta';
 
     if (it.alertas.some((a) => a.bloqueia)) bloqueia = true;
-    if (pior !== 'critico' && pior !== 'atencao' && it.confianca === 'alta') tranquilos += 1;
+
+    if (pior === 'critico') criticos += 1;
+    else if (pior === 'atencao' || precisaOlho) atencao += 1;
+    else if (pior === 'info') info += 1;
+    else tranquilos += 1;
   }
 
   const total = porItem.length;
@@ -301,7 +306,11 @@ export function estiloDaLinha(confianca: Confianca, alertas: Alerta[]): EstiloLi
   if (alertas.some((a) => a.codigo === 'item_novo')) {
     return { estado: 'novo', icone: '＋', rotulo: 'Produto novo', destacar: true };
   }
-  if (pior === 'atencao' || confianca === 'media') {
+  // `nenhuma` tambem entra aqui, e isso e o ponto: item que o sistema NAO conhece
+  // jamais pode aparecer como pronto. Foi assim que o bug apareceu no primeiro teste
+  // com o sistema rodando - dois itens preenchidos por chute do perfil vinham como
+  // "Pronto", que e exatamente o rotulo que faz o operador passar batido.
+  if (pior === 'atencao' || confianca !== 'alta') {
     return { estado: 'conferir', icone: '●', rotulo: 'Conferir', destacar: true };
   }
   return { estado: 'pronto', icone: '✓', rotulo: 'Pronto', destacar: false };
