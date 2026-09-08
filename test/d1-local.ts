@@ -36,9 +36,21 @@ class Stmt {
     return { results: this.db.prepare(this.sql).all(...this.args) as T[] };
   }
 
-  async run(): Promise<{ success: true }> {
-    this.db.prepare(this.sql).run(...this.args);
-    return { success: true };
+  /**
+   * `meta.changes` importa: o código de produção decide com base nele.
+   *
+   * As escritas condicionais da autenticação — "só avança o contador do TOTP se
+   * ninguém avançou antes", "só gasta o código de recuperação se ele ainda não
+   * foi usado" — perguntam quantas linhas mudaram para saber se venceram a
+   * corrida. Um shim que devolvesse só `{ success: true }` deixaria justamente
+   * essa lógica sem teste, que é onde ela mais precisa de um.
+   */
+  async run(): Promise<{ success: true; meta: { changes: number; last_row_id: number } }> {
+    const r = this.db.prepare(this.sql).run(...this.args);
+    return {
+      success: true,
+      meta: { changes: Number(r?.changes ?? 0), last_row_id: Number(r?.lastInsertRowid ?? 0) },
+    };
   }
 
   executar(): void {

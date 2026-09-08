@@ -215,3 +215,46 @@ describe('resumo da nota — a frase do topo da tela', () => {
     expect(r.tranquilos).toBe(20);
   });
 });
+
+describe('o bug do "Pronto" — encontrado rodando o sistema de verdade', () => {
+  /* Na segunda nota de um fornecedor, itens que o sistema nunca aprendeu vinham
+     preenchidos pelo chute do perfil e marcados como "Pronto" — sem alerta nenhum,
+     porque já não eram produto novo. É o pior erro possível numa tela de conferência:
+     o rótulo que faz o operador passar batido, exatamente na linha que ele deveria
+     olhar. Nenhum teste unitário pegou; só apareceu quando duas notas passaram pelo
+     sistema rodando. */
+
+  it('item sem conhecimento nenhum nunca aparece como pronto', () => {
+    const e = estiloDaLinha('nenhuma', []);
+    expect(e.estado).toBe('conferir');
+    expect(e.destacar).toBe(true);
+  });
+
+  it('item com regra ainda não provada também pede conferência', () => {
+    expect(estiloDaLinha('media', []).estado).toBe('conferir');
+  });
+
+  it('só confiança alta ganha o "Pronto"', () => {
+    expect(estiloDaLinha('alta', []).estado).toBe('pronto');
+  });
+
+  it('o resumo conta como atenção o item preenchido por chute', () => {
+    const r = resumirNota([
+      { confianca: 'alta', alertas: [] },
+      { confianca: 'nenhuma', alertas: [] },   // veio do perfil, sem alerta
+      { confianca: 'nenhuma', alertas: [] },
+    ]);
+    expect(r.atencao).toBe(2);
+    expect(r.tranquilos).toBe(1);
+    expect(r.chamada).not.toContain('Tudo conferido');
+  });
+
+  it('"Tudo conferido" só sai quando tudo é de fato conhecido', () => {
+    const r = resumirNota([
+      { confianca: 'alta', alertas: [] },
+      { confianca: 'alta', alertas: [] },
+    ]);
+    expect(r.chamada).toContain('Tudo conferido');
+    expect(r.tranquilos).toBe(2);
+  });
+});
