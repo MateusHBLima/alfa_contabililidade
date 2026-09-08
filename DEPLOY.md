@@ -7,6 +7,101 @@ Tempo estimado: 15 minutos, sendo 10 esperando a conta ser criada.
 
 ---
 
+## O jeito mais curto: dois cliques
+
+Na raiz do projeto tem um arquivo **`subir.cmd`**. **Dê dois cliques nele.**
+
+Ele faz tudo sozinho: instala as dependências se faltarem, cria as tabelas do banco local,
+cria o usuário administrador e sobe o servidor — e ainda abre o navegador em
+`http://localhost:8787`.
+
+```
+Usuário:  contadora@alfacontabil.net
+Senha:    alfa-contabilidade-2026
+```
+
+**A tela de login já vem preenchida com esse par** — é só dar Enter. Embaixo do botão
+há um bloco *modo local* com os dois valores e um botão de copiar, para quando você
+precisar deles em outro lugar.
+
+Esse bloco **não existe em nada que for publicado**: ele depende de `LOGIN_DEMO`, que
+mora no `.dev.vars`, e o wrangler lê o `.dev.vars` só no `wrangler dev` — nunca envia
+no deploy. Sem essa chave, a rota `/api/local` responde 404 e o bloco fica escondido.
+A trava não é o `AMBIENTE`: esse continua `dev` no `wrangler.jsonc` que vai para
+produção, e trava que depende de alguém lembrar de trocar uma string não é trava.
+
+A senha só existe como hash, no banco local desta máquina. Para usar outro par, rode
+`node scripts\preparar-local.mjs seu@email.com "sua frase de senha longa"` antes.
+
+Deixe a janela preta aberta enquanto estiver usando — fechá-la derruba o servidor.
+`Ctrl+C` encerra.
+
+---
+
+## Atalho: rodar sem conta nenhuma
+
+**Antes de criar conta em lugar algum, você pode ver o sistema funcionando.** O modo local
+do wrangler roda tudo na sua máquina — banco SQLite local, arquivos em disco, sem
+Cloudflare, sem cartão, sem internet além do `npm install`.
+
+```bash
+cd planee-fiscal
+npm install
+npm run db:migrate:local                 # cria as tabelas no banco local
+node scripts/semear-usuario.mjs voce@alfacontabil.net "uma frase de senha longa"
+```
+
+O script imprime dois `INSERT`. Rode-os no banco local:
+
+```bash
+npx wrangler d1 execute planee-fiscal --local --command "<primeiro INSERT>"
+npx wrangler d1 execute planee-fiscal --local --command "<segundo INSERT>"
+```
+
+E suba:
+
+```bash
+npm run dev
+```
+
+Abre em `http://localhost:8787`. Entra com o usuário que você criou, cadastra a empresa,
+sobe um XML e trata. **É o sistema inteiro, de verdade** — o que muda no deploy é só onde
+o banco e os arquivos moram.
+
+Use isso para o primeiro teste com o pessoal e para calibrar o motor de regras com notas
+reais. A conta na Cloudflare só é necessária quando quiserem uma URL pública.
+
+> O que **não** funciona no modo local: nada. Upload, motor de regras, alertas, exportação
+> e auditoria rodam igual. O banco local vive em `.wrangler/state/` e é descartável — apagar
+> essa pasta zera tudo e recomeça.
+
+---
+
+## Publicar: um clique
+
+Depois que a conta na Cloudflare existir e o R2 estiver habilitado, **dê dois cliques em
+`publicar.cmd`** na raiz do projeto.
+
+Ele faz o caminho inteiro, e é **idempotente** — cada passo confere se a coisa já existe
+antes de criar, então parar no meio e rodar de novo continua de onde parou:
+
+1. login na Cloudflare (abre o navegador se precisar)
+2. cria o banco D1 e **escreve o `database_id` no `wrangler.jsonc` sozinho**
+3. cria os dois buckets R2
+4. aplica as migrações em produção
+5. grava `SESSION_SECRET` e `AUDIT_SEED` a partir do `SEGREDOS.txt`
+6. cria o primeiro administrador (pergunta e-mail e senha; o hash é calculado na sua
+   máquina e só o hash viaja)
+7. publica, e imprime a URL
+
+**O que ele deliberadamente NÃO faz:** ativar o Object Lock. Isso é irreversível por cinco
+anos — qualquer XML de teste que estiver no bucket fica lá até 2031. Vai a dedo, pelo
+painel, depois que os testes acabarem.
+
+Os passos manuais abaixo continuam documentados para quando algo sair do script.
+
+---
+
 ## 0. O que você precisa antes
 
 - **Conta na Cloudflare.** O plano gratuito atende a fase 1 inteira.

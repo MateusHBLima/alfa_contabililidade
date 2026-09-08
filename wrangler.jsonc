@@ -18,7 +18,11 @@
     {
       "binding": "DB",
       "database_name": "planee-fiscal",
-      "database_id": "PREENCHER_APOS_CRIAR",
+      // Placeholder com formato válido, de propósito: assim `npm run dev` roda offline,
+      // com um SQLite local, sem conta na Cloudflare. Para publicar, rode
+      // `npx wrangler d1 create planee-fiscal` e substitua pelo id de verdade —
+      // o deploy com este valor falha na cara, dizendo que o banco não existe.
+      "database_id": "d321662d-4ef3-4049-84f8-467488be426b",
       "migrations_dir": "migrations"
     }
   ],
@@ -36,8 +40,12 @@
     }
   ],
 
+  // O padrao e producao de proposito. O wrangler dev sobrescreve pelo .dev.vars,
+  // que so existe na maquina de quem desenvolve. O contrario - padrao "dev" e
+  // lembrar de trocar antes de publicar - depende de memoria humana, e um dia
+  // alguem esquece e a producao se anuncia como ambiente de teste.
   "vars": {
-    "AMBIENTE": "dev"
+    "AMBIENTE": "producao"
   }
 
   // Segredos (wrangler secret put):

@@ -10,3 +10,5 @@ coverage/
 .vscode/
 .idea/
 SEGREDOS.txt
+.cf-token
+.cf-token.txt

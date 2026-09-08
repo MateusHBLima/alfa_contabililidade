@@ -44,7 +44,7 @@ Quando a regra não estiver escrita, pergunte. Não infira.
 |---|---|
 | **V — Visão** | ✅ concluído · respostas na §2 deste arquivo |
 | **L — Link** | ✅ concluído · nenhuma API externa na fase 1 (§4) |
-| **A — Arquitetura** | 🔄 em curso · núcleo e API prontos, 139 testes; falta a tela |
+| **A — Arquitetura** | 🔄 em curso · núcleo, API e tela prontos, 144 testes; falta a tela de administração |
 | **E — Estilo** | ⬜ a fazer · protótipo validado existe como referência |
 | **G — Gatilho** | ⬜ bloqueado · depende de conta Cloudflare |
 
@@ -142,7 +142,7 @@ Na fase 1 não há serviço externo para verificar. O "link" a testar é outro, 
 - **`test/integracao.test.ts`** exerce o ciclo completo: cadastrar → importar → aprender →
   segunda nota vir pronta → exportar → conferir a cadeia de auditoria.
 
-**Rode `npm test` antes de qualquer deploy.** 139 testes. Se algum quebrar, o link está
+**Rode `npm test` antes de qualquer deploy.** 144 testes. Se algum quebrar, o link está
 quebrado — não prossiga.
 
 Segredos: **nunca em arquivo**. `wrangler secret put` em produção, `.dev.vars` (ignorado
@@ -269,11 +269,54 @@ Quando algo falha:
 
 ### Erros já encontrados, e o que ensinaram
 
+*Seis dos sete só apareceram quando o sistema foi executado de verdade — não em teste
+de função isolada. Rodar antes de entregar não é zelo, é o único jeito de achar esta
+categoria de erro. E o quinto ensina que **rodar não basta: é preciso rodar pelo caminho
+que o usuário vai usar.***
+
 **Corrigir um item gravava o padrão do fornecedor inteiro.** Marcar um chocolate como
 substituição tributária transformaria em ST tudo daquele atacadista. Corrigido: nível 5
 só aprende por pedido explícito. **Lição:** erro de composição não aparece em teste de
 função isolada — só quando duas notas passam pelo sistema em sequência. Por isso o teste
 de integração existe e roda em todo `npm test`.
+
+**O item que ninguém conhecia aparecia como "Pronto".** Na segunda nota de um
+fornecedor, os itens que a contadora ainda não tinha ensinado vinham preenchidos pelo
+chute do perfil e — por já não serem "produto novo" — chegavam sem alerta nenhum e com o
+rótulo verde. O resumo do topo dizia "Tudo conferido". Era o pior erro possível numa tela
+de conferência: o rótulo que faz o operador pular justamente a linha que ele deveria
+olhar. **Lição:** um estado de UI derivado de duas variáveis erra na combinação que
+ninguém pensou em testar. `estiloDaLinha` só tratava `media`; `nenhuma` caía no `else` e
+virava "Pronto". Agora só `alta` ganha o verde, e o resumo conta como atenção todo item
+sem conhecimento por trás.
+
+**O `/api/saude` exigia autenticação.** O `DEPLOY.md` manda dar `curl` nele para conferir
+se o serviço subiu, e ele respondia 401 — serviço no ar lido como serviço quebrado.
+**Lição:** middleware que protege por prefixo pega rotas que não deviam ser protegidas.
+
+**O `subir.cmd` travava numa pergunta que eu nunca vi.** O wrangler pergunta *"About to
+apply 3 migration(s)... continue?"* e espera um `Y`. Executando pelo terminal aqui isso
+nunca apareceu — sem TTY, o wrangler não pergunta. Apareceu no primeiro duplo-clique do
+usuário, que é exatamente o caminho que escrevemos para ele usar. **Lição:** testar num
+terminal sem TTY não é testar o caminho do usuário. Todo script destinado a duplo-clique
+roda com `CI=true` para que ferramenta nenhuma pare esperando resposta.
+
+**O login respondia "erro interno" e nada mais.** O `.dev.vars` está no `.gitignore` —
+corretamente, é onde moram os segredos. Só que isso significa que **toda máquina que
+clona o repositório começa sem ele**, e sem `SESSION_SECRET` o HMAC do cookie estoura
+três camadas abaixo do `onError`, que traduz qualquer exceção para "erro interno". Uma
+tela de login dizendo isso não dá a ninguém o que fazer em seguida. **Lição:** arquivo
+de configuração que o `.gitignore` esconde é configuração que a próxima máquina não vai
+ter — quem prepara o ambiente cria; e todo caminho que depende de configuração checa
+antes e **diz o nome do que falta**, em vez de deixar a exceção virar 500 genérico.
+
+**O campo de senha aparecia vazio — às vezes.** O bloco do modo local preenchia o
+formulário assim que `/api/local` respondia; o boot, que roda em paralelo e cai em
+`mostrarLogin()` quando não há sessão, limpava o campo. Quem chegasse primeiro decidia o
+resultado, e nos meus dois primeiros testes ele foi diferente. **Lição:** duas rotinas
+assíncronas escrevendo no mesmo campo é corrida, não bug intermitente — o conserto é uma
+função só, chamada pelas duas, e não um `setTimeout`. Verificado rodando o carregamento
+três vezes seguidas.
 
 **O catálogo de permissões divergiu entre o TypeScript e o SQL.** Os campos de escrituração
 exigiam `notas.editar_escrituracao`, que não existia no catálogo — a API teria bloqueado a
