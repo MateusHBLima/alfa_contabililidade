@@ -14,7 +14,7 @@
 import { webcrypto as crypto } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 
-const ITERACOES = 600_000;
+const ITERACOES = 100_000;   // teto do runtime de Workers; ver src/auth/senha.ts
 
 async function gerarHashSenha(senha) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
