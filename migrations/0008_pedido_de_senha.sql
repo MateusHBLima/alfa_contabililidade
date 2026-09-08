@@ -1,0 +1,14 @@
+-- "Esqueci minha senha", sem serviço de e-mail.
+--
+-- O caminho clássico é mandar um link com token para o e-mail da pessoa. Não
+-- temos como enviar e-mail ainda, e inventar isso agora seria acrescentar um
+-- serviço externo, uma chave a mais para vazar e um domínio a configurar — para
+-- um escritório onde todo mundo se fala.
+--
+-- Então o pedido fica registrado e aparece na tela de usuários: o administrador
+-- vê "pediu nova senha", clica em Senha e entrega a provisória. A pessoa é
+-- obrigada a trocá-la no primeiro acesso, como em qualquer conta nova.
+--
+-- Uma coluna e não uma tabela porque um pedido pendente por pessoa é tudo o que
+-- faz sentido: pedir três vezes é o mesmo pedido, feito por alguém impaciente.
+ALTER TABLE usuarios ADD COLUMN senha_solicitada_em TEXT;
