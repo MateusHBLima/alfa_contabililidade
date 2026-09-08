@@ -182,3 +182,80 @@ pre.xml mark{background:#f0b429;color:#1a1005;border-radius:2px;padding:0 2px}
   padding:9px 11px;font-size:12px;margin-top:10px}
 .vazio{padding:34px 16px;text-align:center;color:var(--muted)}
 .vazio b{display:block;color:var(--txt);font-size:14px;margin-bottom:4px}
+
+/* Selo de escopo no título das telas que são por empresa. O menu agrupava
+   Empresas, Fornecedores e Padrões sob "Cadastros", o que fazia as três
+   parecerem listas globais — só a primeira é. A separação sempre existiu no
+   banco (UNIQUE tenant + empresa + CNPJ); faltava a tela dizer isso. */
+.escopo-empresa {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: .5rem;
+  padding: .18rem .55rem;
+  border-radius: 999px;
+  background: #eef3fa;
+  border: 1px solid #d3e0ef;
+  color: #2c4a72;
+  font-size: .68em;
+  font-weight: 600;
+  letter-spacing: .01em;
+  white-space: nowrap;
+}
+
+/* Cartão de credenciais do modo local, na tela de login. Deliberadamente
+   discreto e rotulado: quem vê a tela precisa entender num relance que isso
+   é andaime de desenvolvimento, não parte do produto. */
+.cartao-local {
+  margin-top: 1.1rem;
+  padding: .75rem .85rem;
+  border: 1px dashed #c9d6e6;
+  border-radius: 10px;
+  background: #f7fafd;
+}
+.cartao-local-topo { display: flex; align-items: center; gap: .5rem; margin-bottom: .55rem; }
+.selo-local {
+  font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: #6b7f99; background: #e7eef7; border-radius: 999px; padding: .16rem .5rem;
+}
+.cartao-local-topo .btn { margin-left: auto; }
+.cartao-local dl { margin: 0; display: grid; grid-template-columns: auto 1fr auto; gap: .35rem .6rem; align-items: center; }
+.cartao-local dt { font-size: .73rem; color: #6b7f99; white-space: nowrap; }
+.cartao-local dd { margin: 0; min-width: 0; display: contents; }
+.cartao-local code {
+  font-size: .74rem; color: #24405f; background: #fff; border: 1px solid #dfe8f2;
+  border-radius: 5px; padding: .16rem .35rem; user-select: all;
+  overflow-x: auto; white-space: nowrap; min-width: 0;
+}
+.cartao-local .copiar {
+  border: 0; background: none; padding: 0; cursor: pointer;
+  font-size: .7rem; color: #3a6ea5; text-decoration: underline; flex: none;
+}
+.cartao-local-nota { margin: .55rem 0 0; font-size: .7rem; color: #8194ab; line-height: 1.35; }
+
+/* Caixinhas de permissão, agrupadas por tela. A leitura tem de ser rápida:
+   quem confere um papel precisa bater o olho e ver o que está marcado. */
+.perm-grupo { margin-bottom: .9rem; }
+.perm-grupo h4 {
+  margin: 0 0 .35rem; font-size: .72rem; text-transform: uppercase;
+  letter-spacing: .06em; color: #6b7f99;
+}
+.perm-item {
+  display: flex; align-items: flex-start; gap: .5rem;
+  padding: .28rem .4rem; border-radius: 6px; font-size: .84rem;
+}
+.perm-item:hover { background: #f2f6fb; }
+.perm-item input { margin-top: .18rem; flex: none; }
+.perm-item .d { color: #5a6b80; font-size: .78rem; }
+.perm-item.bloqueada { opacity: .5; }
+.perm-item.excecao-mais { background: #eef7ee; }
+.perm-item.excecao-menos { background: #fdf0ef; }
+.senha-provisoria {
+  background: #fff; border: 1px solid #dfe8f2; border-radius: 6px;
+  padding: .5rem .7rem; font-size: 1.05rem; letter-spacing: .06em;
+  user-select: all; text-align: center; margin: .5rem 0;
+}
+
+/* Pedido esperando liberação: tem de saltar da lista. É a única linha da tela
+   que exige uma decisão de alguém, e não uma consulta. */
+.linha-pendente { background: #fff6e5; }
+.linha-pendente td { border-top: 1px solid #f0dcb0; border-bottom: 1px solid #f0dcb0; }

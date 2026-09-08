@@ -15,6 +15,8 @@ const estado = {
   eu: null,
   empresas: [],
   empresaId: null,
+  demo: null,   // par de teste do modo local, quando /api/local responde
+  desafioMfa: null,
   competencia: '',
   notas: [],
   notaAberta: null,
@@ -30,12 +32,27 @@ async function api(caminho, opcoes = {}) {
     headers: opcoes.body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
     ...opcoes,
   });
-  if (r.status === 401) {
+  // O 401 do PRÓPRIO login significa "e-mail ou senha inválidos" — não sessão
+  // vencida. A mensagem errada manda o usuário procurar o problema no lugar
+  // errado. Foi bug de verdade: a primeira tentativa de entrar em produção
+  // mostrou "sessão expirada" para quem nunca tinha tido sessão nenhuma.
+  // As duas etapas do login ficam de fora: 401 nelas quer dizer "credencial
+  // errada", não "sessão vencida". Tratar igual mandava o usuário de volta para
+  // a primeira tela, com os campos limpos, ao errar um dígito do código — e a
+  // mensagem "sessão expirada" o fazia procurar o problema no lugar errado.
+  const ROTAS_DE_ENTRADA = ['/api/login', '/api/login/mfa'];
+  if (r.status === 401 && !ROTAS_DE_ENTRADA.includes(caminho)) {
     mostrarLogin();
     throw new Error('sessão expirada');
   }
   const ct = r.headers.get('Content-Type') ?? '';
   const corpo = ct.includes('json') ? await r.json() : await r.text();
+  // Senha redefinida por um administrador: o servidor recusa tudo até a troca.
+  // A tela abre o formulário em vez de mostrar um 403 seco em cada clique.
+  if (r.status === 403 && corpo && corpo.deveTrocarSenha) {
+    if (!$('#modal-fundo').classList.contains('hidden')) { /* já está aberto */ }
+    else abrirTrocaDeSenha(true);
+  }
   if (!r.ok) throw Object.assign(new Error(corpo?.erro ?? 'erro'), { dados: corpo, status: r.status });
   return corpo;
 }
@@ -57,11 +74,24 @@ $('#form-login').addEventListener('submit', async (e) => {
   btn.disabled = true;
   $('#login-erro').classList.add('hidden');
   try {
-    await api('/api/login', {
+    const r = await api('/api/login', {
       method: 'POST',
       body: JSON.stringify({ email: $('#login-email').value.trim(), senha: $('#login-senha').value }),
     });
+
+    // Senha certa, sessão ainda não. Pedimos o segundo fator sem sair da tela.
+    if (r && r.mfaRequerido) {
+      estado.desafioMfa = r.desafio;
+      $('#passo-mfa').classList.remove('hidden');
+      $('#login-email').disabled = true;
+      $('#login-senha').disabled = true;
+      $('#btn-entrar').classList.add('hidden');
+      $('#mfa-codigo').focus();
+      return;
+    }
+
     await iniciar();
+    if (r && r.deveTrocarSenha) abrirTrocaDeSenha(true);
   } catch (err) {
     $('#login-erro').textContent = err.message || 'não foi possível entrar';
     $('#login-erro').classList.remove('hidden');
@@ -70,34 +100,367 @@ $('#form-login').addEventListener('submit', async (e) => {
   }
 });
 
+/* Credenciais de teste na tela de login.
+   So aparece se /api/local responder — o que exige LOGIN_DEMO no .dev.vars, que
+   nao sobe em deploy nenhum. Em producao o fetch da 404 e nada acontece. */
+(async function cartaoLocal() {
+  try {
+    const r = await fetch('/api/local');
+    if (!r.ok) return;
+    const { email, senha } = await r.json();
+    if (!email || !senha) return;
+
+    $('#demo-email').textContent = email;
+    $('#demo-senha').textContent = senha;
+    $('#cartao-local').classList.remove('hidden');
+
+    estado.demo = { email, senha };
+    $('#btn-preencher').addEventListener('click', preencherDemo);
+    preencherDemo();   // ja chega preenchido: um Enter e voce esta dentro
+
+    for (const b of $$('#cartao-local .copiar')) {
+      b.addEventListener('click', async () => {
+        const texto = $('#' + b.dataset.alvo).textContent;
+        try { await navigator.clipboard.writeText(texto); } catch {
+          // clipboard bloqueado (http sem localhost, permissao negada): seleciona
+          // o texto para o Ctrl+C funcionar. Botao que nao faz nada e pior que
+          // botao que faz metade.
+          const faixa = document.createRange();
+          faixa.selectNodeContents($('#' + b.dataset.alvo));
+          const sel = getSelection(); sel.removeAllRanges(); sel.addRange(faixa);
+        }
+        const antes = b.textContent;
+        b.textContent = 'copiado';
+        setTimeout(() => { b.textContent = antes; }, 1200);
+      });
+    }
+  } catch { /* sem rota, sem cartao */ }
+})();
+
+/* Trocar senha dentro do app.
+   Faltava, e a falta apareceu do pior jeito: a senha do primeiro admin em
+   producao foi digitada as cegas, sem confirmacao, e a unica saida era um
+   script na maquina de quem publicou. */
+function abrirTrocaDeSenha(forcado = false) {
+  abrirModal(forcado ? 'Defina uma senha nova' : 'Trocar senha', `
+    ${forcado ? '<p class="page-desc">Sua senha precisa ser trocada antes de continuar.</p>' : ''}
+    <div class="campo">
+      <label class="fl" for="ts-atual">Senha atual</label>
+      <input type="password" id="ts-atual" autocomplete="current-password">
+    </div>
+    <div class="campo">
+      <label class="fl" for="ts-nova">Senha nova</label>
+      <input type="password" id="ts-nova" autocomplete="new-password">
+    </div>
+    <div class="campo">
+      <label class="fl" for="ts-confirma">Repita a senha nova</label>
+      <input type="password" id="ts-confirma" autocomplete="new-password">
+    </div>
+    <p class="page-desc">Pelo menos 12 caracteres. Uma frase longa vale mais que
+      símbolo estranho — e você não vai anotá-la num papel.</p>
+    <p class="page-desc"><b>Todas as sessões abertas serão encerradas</b>, aqui e em
+      qualquer outro computador. Menos esta.</p>
+  `, async () => {
+    const atual = $('#ts-atual').value;
+    const nova = $('#ts-nova').value;
+    // Confere aqui tambem: erro de digitacao nao precisa de ida ao servidor,
+    // e foi exatamente o que fez a senha do primeiro admin sair errada.
+    if (nova !== $('#ts-confirma').value) throw new Error('as duas senhas novas não batem');
+    if (!atual || !nova) throw new Error('preencha os três campos');
+    await api('/api/trocar-senha', {
+      method: 'POST',
+      body: JSON.stringify({ senhaAtual: atual, senhaNova: nova }),
+    });
+    alerta('Senha trocada. As outras sessões foram encerradas.');
+  });
+}
+
+$('#btn-trocar-senha').addEventListener('click', (e) => {
+  e.preventDefault();
+  abrirTrocaDeSenha();
+});
+
+/* ------------------------------------------------------------------ cadastro */
+
+/** Três formulários no mesmo cartão: entrar, pedir acesso, esquecer a senha. */
+function mostrarFormulario(qual) {
+  for (const [id, nome] of [['#form-login', 'login'], ['#form-cadastro', 'cadastro'], ['#form-esqueci', 'esqueci']]) {
+    $(id).classList.toggle('hidden', nome !== qual);
+  }
+  for (const p of ['cadastro', 'esqueci']) {
+    $(`#${p}-erro`).classList.add('hidden');
+    $(`#${p}-ok`).classList.add('hidden');
+    $(`#${p}-campos`).classList.remove('hidden');
+  }
+}
+const mostrarCadastro = (mostrar) => mostrarFormulario(mostrar ? 'cadastro' : 'login');
+
+$('#link-esqueci').addEventListener('click', (e) => { e.preventDefault(); mostrarFormulario('esqueci'); });
+$('#btn-voltar-login3').addEventListener('click', (e) => { e.preventDefault(); mostrarFormulario('login'); });
+$('#btn-voltar-login4').addEventListener('click', () => mostrarFormulario('login'));
+
+$('#btn-esqueci').addEventListener('click', async (e) => {
+  e.preventDefault();
+  const btn = $('#btn-esqueci');
+  btn.disabled = true;
+  $('#esqueci-erro').classList.add('hidden');
+  try {
+    const r = await api('/api/esqueci', {
+      method: 'POST', body: JSON.stringify({ email: $('#esq-email').value.trim() }),
+    });
+    $('#esqueci-campos').classList.add('hidden');
+    $('#esqueci-msg').textContent = r.mensagem;
+    $('#esqueci-ok').classList.remove('hidden');
+  } catch (err) {
+    $('#esqueci-erro').textContent = err.message || 'não foi possível registrar o pedido';
+    $('#esqueci-erro').classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#link-criar-conta').addEventListener('click', (e) => { e.preventDefault(); mostrarCadastro(true); });
+
+// Link de convite abre direto no cadastro, com o código já preenchido: quem
+// recebe o link não precisa entender o que fazer com um código solto.
+(() => {
+  const codigo = new URLSearchParams(location.search).get('convite');
+  if (!codigo) return;
+  $('#cad-convite').value = codigo;
+  mostrarFormulario('cadastro');
+})();
+$('#btn-voltar-login').addEventListener('click', (e) => { e.preventDefault(); mostrarCadastro(false); });
+$('#btn-voltar-login2').addEventListener('click', () => mostrarCadastro(false));
+
+$('#btn-cadastrar').addEventListener('click', async (e) => {
+  e.preventDefault();
+  const btn = $('#btn-cadastrar');
+  const erro = (m) => {
+    $('#cadastro-erro').textContent = m;
+    $('#cadastro-erro').classList.remove('hidden');
+  };
+  $('#cadastro-erro').classList.add('hidden');
+
+  const senha = $('#cad-senha').value;
+  // Confere aqui as duas senhas: é erro de digitação, não precisa de servidor —
+  // e no cadastro ele custa caro, porque a pessoa fica com uma conta cuja senha
+  // não é a que ela pensa, esperando aprovação para descobrir isso.
+  if (senha !== $('#cad-senha2').value) return erro('as duas senhas não são iguais');
+  if (!$('#cad-nome').value.trim()) return erro('informe seu nome');
+
+  btn.disabled = true;
+  try {
+    const r = await api('/api/cadastrar', {
+      method: 'POST',
+      body: JSON.stringify({
+        nome: $('#cad-nome').value.trim(),
+        email: $('#cad-email').value.trim(),
+        senha,
+        convite: $('#cad-convite').value.trim() || undefined,
+      }),
+    });
+    $('#cadastro-campos').classList.add('hidden');
+    $('#cadastro-msg').textContent = r.mensagem;
+    $('#cadastro-ok').classList.remove('hidden');
+  } catch (err) {
+    erro(err.message || 'não foi possível registrar o pedido');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#btn-mfa').addEventListener('click', async () => {
+  const btn = $('#btn-mfa');
+  btn.disabled = true;
+  $('#login-erro').classList.add('hidden');
+  try {
+    const r = await api('/api/login/mfa', {
+      method: 'POST',
+      body: JSON.stringify({ desafio: estado.desafioMfa, codigo: $('#mfa-codigo').value }),
+    });
+    await iniciar();
+    if (r && r.deveTrocarSenha) abrirTrocaDeSenha(true);
+  } catch (err) {
+    $('#login-erro').textContent = err.message || 'código não confere';
+    $('#login-erro').classList.remove('hidden');
+    // Desafio vencido ou gasto: a mensagem manda começar de novo, e sem isto não
+    // existia controle nenhum para isso — os campos ficavam travados e o botão
+    // Entrar escondido. Só F5 resolvia.
+    if (err && err.dados && err.dados.expirado) mostrarLogin();
+    else $('#mfa-codigo').select();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Enter no campo do código confirma, em vez de reenviar a senha.
+$('#mfa-codigo').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#btn-mfa').click(); }
+});
+
+/* ---------------------------------------------------------------- segurança */
+
+async function abrirSeguranca() {
+  const est = await api('/api/mfa');
+
+  if (est.ativo) {
+    abrirModal('Segundo fator', `
+      <p class="page-desc"><b>Está ligado.</b> Confirmado em
+        ${est.confirmadoEm ? new Date(est.confirmadoEm).toLocaleDateString('pt-BR') : '—'}.
+        Códigos de recuperação ainda válidos: <b>${est.codigosRestantes}</b>.</p>
+      <p class="page-desc">Para desligar, confirme sua senha e um código do aplicativo.
+        As duas coisas, porque desligar a proteção não pode ser mais fácil do que usá-la.</p>
+      <div class="campo">
+        <label class="fl" for="sg-senha">Sua senha</label>
+        <input type="password" id="sg-senha" autocomplete="current-password">
+      </div>
+      <div class="campo">
+        <label class="fl" for="sg-codigo">Código do aplicativo</label>
+        <input type="text" id="sg-codigo" inputmode="numeric" maxlength="6" placeholder="000000">
+      </div>
+    `, async () => {
+      await api('/api/mfa/desativar', {
+        method: 'POST',
+        body: JSON.stringify({ senha: $('#sg-senha').value, codigo: $('#sg-codigo').value }),
+      });
+      alerta('Segundo fator desligado.');
+    });
+    $('#modal-ok').textContent = 'Desligar';
+    return;
+  }
+
+  const ini = await api('/api/mfa/iniciar', { method: 'POST' });
+  abrirModal('Ligar o segundo fator', `
+    <p class="page-desc">Abra seu aplicativo autenticador (Google Authenticator, Authy,
+      1Password, o que você usar) e cadastre esta chave:</p>
+    <p style="text-align:center;margin:.6rem 0">
+      <code style="font-size:1.05rem;letter-spacing:.08em;user-select:all;background:#fff;
+        border:1px solid #dfe8f2;border-radius:6px;padding:.4rem .6rem;display:inline-block">
+        ${esc(ini.segredoLegivel)}</code>
+    </p>
+    <p class="page-desc">No aplicativo, escolha <b>“inserir chave manualmente”</b> ou
+      <b>“inserir código de configuração”</b>. O nome da conta pode ser qualquer coisa.</p>
+    <div class="campo">
+      <label class="fl" for="sg-conf">Digite o código que o aplicativo mostrar</label>
+      <input type="text" id="sg-conf" inputmode="numeric" maxlength="6" placeholder="000000">
+    </div>
+    <p class="page-desc">Só depois que este código conferir é que o segundo fator liga —
+      assim um erro de cadastro aparece agora, e não no próximo login.</p>
+  `, async () => {
+    const r = await api('/api/mfa/confirmar', {
+      method: 'POST', body: JSON.stringify({ codigo: $('#sg-conf').value }),
+    });
+    mostrarCodigosRecuperacao(r.codigosRecuperacao);
+  });
+  $('#modal-ok').textContent = 'Confirmar';
+}
+
+function mostrarCodigosRecuperacao(codigos) {
+  // Aparecem UMA vez. Só o hash fica no banco — nem administrador vê de novo.
+  setTimeout(() => {
+    abrirModal('Guarde estes códigos agora', `
+      <p class="page-desc"><b>Segundo fator ligado.</b> Estes oito códigos são a sua
+        saída se o celular sumir. Cada um serve uma vez.</p>
+      <p class="page-desc"><b>Eles não aparecem de novo</b> — no banco fica só o
+        embaralhado deles. Copie para onde você guarda senhas, ou imprima.</p>
+      <pre style="background:#fff;border:1px solid #dfe8f2;border-radius:6px;padding:.7rem;
+        font-size:.95rem;line-height:1.8;user-select:all;text-align:center">${codigos.map(esc).join('\n')}</pre>
+    `, async () => {});
+    $('#modal-cancelar').classList.add('hidden');
+    $('#modal-ok').textContent = 'Guardei';
+  }, 30);
+}
+
+$('#btn-seguranca').addEventListener('click', (e) => {
+  e.preventDefault();
+  abrirSeguranca().catch((err) => alerta(err.message));
+});
+
 $('#btn-sair').addEventListener('click', async (e) => {
   e.preventDefault();
-  try { await api('/api/logout', { method: 'POST' }); } catch {}
-  mostrarLogin();
+  // Só mostra o login DEPOIS de o servidor confirmar. O `catch {}` seguido de
+  // mostrarLogin() pintava a tela de deslogado sem revogar a sessão: numa
+  // máquina compartilhada, a próxima pessoa dava F5 e entrava com o cookie
+  // ainda válido. É o mesmo padrão de engolir erro, agora no cliente.
+  try {
+    await api('/api/logout', { method: 'POST' });
+    mostrarLogin();
+  } catch (err) {
+    alerta('Não consegui encerrar a sessão no servidor. '
+      + 'Você continua conectado — tente de novo antes de deixar este computador.');
+  }
 });
+
+/* Preenche o formulario com o par de teste do modo local, se houver.
+   Fica separado de proposito: o cartao chama na carga e o mostrarLogin chama
+   depois de sair, e as duas coisas acontecem em ordem imprevisivel. */
+function preencherDemo() {
+  if (!estado.demo) return false;
+  $('#login-email').value = estado.demo.email;
+  $('#login-senha').value = estado.demo.senha;
+  return true;
+}
 
 function mostrarLogin() {
   $('#tela-app').classList.add('hidden');
   $('#tela-login').classList.remove('hidden');
-  $('#login-senha').value = '';
+  // Desfaz a segunda etapa: voltar ao login com os campos travados e o botão
+  // sumido deixaria a tela num beco sem saída.
+  estado.desafioMfa = null;
+  $('#passo-mfa').classList.add('hidden');
+  $('#mfa-codigo').value = '';
+  $('#login-email').disabled = false;
+  $('#login-senha').disabled = false;
+  $('#btn-entrar').classList.remove('hidden');
+  // Limpar a senha ao voltar para o login e correto — mas no modo local a tela
+  // deve voltar pronta. Foi bug de verdade: o cartao preenchia na carga e o
+  // boot, que roda depois e cai aqui quando nao ha sessao, apagava o campo.
+  // O resultado dependia de qual fetch terminava primeiro.
+  if (!preencherDemo()) $('#login-senha').value = '';
 }
 
 // ------------------------------------------------------------------ shell
 
 $$('#nav button').forEach((b) => b.addEventListener('click', () => irPara(b.dataset.view)));
 
+/* Fornecedores e padroes sao POR EMPRESA — o banco sempre separou
+   (UNIQUE tenant + empresa + CNPJ), mas a tela nao dizia, e um menu chamado
+   "Cadastros" com as tres juntas dava a entender que a lista era global.
+   Agora o titulo dessas telas carrega o nome da empresa selecionada. */
+function nomeEmpresaAtual() {
+  const e = (estado.empresas || []).find((x) => x.id === estado.empresaId);
+  return e ? e.razao_social : null;
+}
+
+function marcarEscopo() {
+  const nome = nomeEmpresaAtual();
+  for (const id of ['#escopo-fornecedores', '#escopo-regras']) {
+    const el = $(id);
+    if (el) el.textContent = nome ? `de ${nome}` : 'nenhuma empresa selecionada';
+  }
+}
+
 function irPara(view) {
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
-  ['v1', 'v2', 'v3', 'vEmpresas', 'vFornecedores', 'vRegras'].forEach((v) =>
+  ['v1', 'v2', 'v3', 'vEmpresas', 'vFornecedores', 'vRegras', 'vUsuarios', 'vPapeis'].forEach((v) =>
     $('#' + v).classList.toggle('hidden', v !== view));
+  marcarEscopo();
   if (view === 'vEmpresas') renderEmpresas();
   if (view === 'vFornecedores') carregarFornecedores();
   if (view === 'vRegras') carregarRegras();
+  if (view === 'vUsuarios') carregarUsuarios();
+  if (view === 'vPapeis') carregarPapeis();
 }
 
 $('#sel-empresa').addEventListener('change', async (e) => {
   estado.empresaId = e.target.value;
   estado.notaAberta = null;
+  marcarEscopo();
+  // Trocar de empresa nao pode deixar na tela a lista da empresa anterior.
+  const aberta = ['vFornecedores', 'vRegras']
+    .find((v) => !$('#' + v).classList.contains('hidden'));
+  if (aberta === 'vFornecedores') await carregarFornecedores();
+  if (aberta === 'vRegras') await carregarRegras();
   await carregarNotas();
 });
 
@@ -115,8 +478,17 @@ async function iniciar() {
   $('#tela-login').classList.add('hidden');
   $('#tela-app').classList.remove('hidden');
 
-  const podeAdmin = estado.eu.permissoes.includes('empresas.gerenciar');
-  $('#btn-nova-empresa').classList.toggle('hidden', !podeAdmin);
+  // A tela esconde; o servidor decide. Estas linhas são conveniência, não
+  // segurança — cada rota confere a permissão por conta própria.
+  const pode = (p) => estado.eu.permissoes.includes(p);
+  $('#btn-nova-empresa').classList.toggle('hidden', !pode('empresas.criar'));
+  $('#btn-novo-usuario').classList.toggle('hidden', !pode('usuarios.criar'));
+  $('#btn-convidar').classList.toggle('hidden', !pode('usuarios.convidar'));
+  $('#btn-novo-papel').classList.toggle('hidden', !pode('papeis.gerenciar'));
+  for (const [botao, permissao] of [['vUsuarios', 'usuarios.visualizar'], ['vPapeis', 'papeis.gerenciar']]) {
+    const b = document.querySelector(`#nav button[data-view="${botao}"]`);
+    if (b) b.classList.toggle('hidden', !pode(permissao));
+  }
 
   await carregarEmpresas();
   montarSeletorCfop();
@@ -134,6 +506,7 @@ async function carregarEmpresas() {
     .map((e) => `<option value="${e.id}">${esc(e.razao_social)} — ${esc(e.cnpj)}</option>`)
     .join('');
   estado.empresaId = estado.empresas[0].id;
+  marcarEscopo();
   await carregarNotas();
 }
 
@@ -527,6 +900,425 @@ $('#btn-nova-empresa').addEventListener('click', () => {
   });
 });
 
+/* ---------------------------------------------------------------- administração
+ *
+ * Duas telas: quem entra (Usuários) e o que cada conjunto de gente pode (Papéis).
+ * O papel resolve quase tudo; a exceção por pessoa existe porque o resto é gente.
+ */
+
+let catalogoPermissoes = null;   // { grupo: [{chave, descricao, podeConceder}] }
+let papeisCache = [];
+
+async function catalogo() {
+  if (!catalogoPermissoes) catalogoPermissoes = await api('/api/permissoes');
+  return catalogoPermissoes;
+}
+
+/**
+ * Monta as caixinhas agrupadas por tela.
+ * `excecoes` é um Map permissao -> true/false, usado só na tela de usuário:
+ * ali a caixinha mostra o que o PAPEL dá, e a marcação do usuário por cima.
+ */
+function montarCaixinhas(grupos, marcadas, { doPapel = null, prefixo = 'perm' } = {}) {
+  return Object.entries(grupos).map(([grupo, itens]) => `
+    <div class="perm-grupo">
+      <h4>${esc(grupo)}</h4>
+      ${itens.map((it) => {
+        const herdada = doPapel ? doPapel.has(it.chave) : false;
+        const marcada = marcadas.has(it.chave);
+        let classe = '';
+        if (doPapel) {
+          if (marcada && !herdada) classe = 'excecao-mais';
+          else if (!marcada && herdada) classe = 'excecao-menos';
+        }
+        if (!it.podeConceder) classe += ' bloqueada';
+        return `
+        <label class="perm-item ${classe}">
+          <input type="checkbox" data-perm="${esc(it.chave)}" id="${prefixo}-${esc(it.chave)}"
+            ${marcada ? 'checked' : ''} ${it.podeConceder ? '' : 'disabled'}>
+          <span>${esc(it.descricao)}
+            ${doPapel && herdada ? '<span class="d">— vem do papel</span>' : ''}
+            ${it.podeConceder ? '' : '<span class="d">— você não tem esta permissão</span>'}
+          </span>
+        </label>`;
+      }).join('')}
+    </div>`).join('');
+}
+
+const permsMarcadas = () =>
+  [...$$('#modal-corpo input[data-perm]')].filter((i) => i.checked).map((i) => i.dataset.perm);
+
+/* ----------------------------------------------------------------- papéis */
+
+async function carregarPapeis() {
+  papeisCache = await api('/api/papeis');
+  const podeEditar = estado.eu.permissoes.includes('papeis.gerenciar');
+  $('#tbl-papeis tbody').innerHTML = papeisCache.map((p) => `<tr>
+    <td><b>${esc(p.nome)}</b>${p.sistema ? ' <span class="d">(sistema)</span>' : ''}</td>
+    <td>${esc(p.descricao ?? '')}</td>
+    <td class="num">${p.n_permissoes}</td>
+    <td class="num">${p.n_usuarios}</td>
+    <td>${podeEditar && !p.sistema
+      ? `<button class="btn sm" data-papel="${esc(p.id)}">Editar</button>`
+      : '<span class="d">—</span>'}</td>
+  </tr>`).join('') || '<tr><td colspan="5" class="vazio">Nenhum papel.</td></tr>';
+
+  for (const b of $$('#tbl-papeis button[data-papel]')) {
+    b.addEventListener('click', () => editarPapel(papeisCache.find((x) => x.id === b.dataset.papel)));
+  }
+}
+
+async function editarPapel(papel) {
+  const grupos = await catalogo();
+  const marcadas = new Set(papel ? papel.permissoes : []);
+  abrirModal(papel ? `Papel: ${papel.nome}` : 'Novo papel', `
+    <div class="campo">
+      <label class="fl" for="pp-nome">Nome</label>
+      <input type="text" id="pp-nome" maxlength="40" value="${esc(papel?.nome ?? '')}"
+             placeholder="Fiscal Jr, Só leitura, Estagiário...">
+    </div>
+    <div class="campo">
+      <label class="fl" for="pp-desc">Para que serve</label>
+      <input type="text" id="pp-desc" maxlength="200" value="${esc(papel?.descricao ?? '')}">
+    </div>
+    <p class="page-desc">Marque o que este papel pode fazer. O que estiver esmaecido é
+      permissão que <b>você</b> não tem — ninguém concede o que não possui.</p>
+    ${montarCaixinhas(grupos, marcadas, { prefixo: 'pp' })}
+  `, async () => {
+    const corpo = {
+      nome: $('#pp-nome').value.trim(),
+      descricao: $('#pp-desc').value.trim() || null,
+      permissoes: permsMarcadas(),
+    };
+    if (corpo.nome.length < 2) throw new Error('dê um nome ao papel');
+    await api(papel ? `/api/papeis/${papel.id}` : '/api/papeis', {
+      method: papel ? 'PUT' : 'POST', body: JSON.stringify(corpo),
+    });
+    await carregarPapeis();
+  });
+}
+
+$('#btn-novo-papel').addEventListener('click', () => editarPapel(null).catch((e) => alerta(e.message)));
+
+/* --------------------------------------------------------------- usuários */
+
+async function carregarUsuarios() {
+  const us = await api('/api/usuarios');
+  const podeEditar = estado.eu.permissoes.includes('usuarios.editar');
+  const podeDesativar = estado.eu.permissoes.includes('usuarios.desativar');
+  const podeSenha = estado.eu.permissoes.includes('usuarios.redefinir_senha');
+
+  const podeAprovar = estado.eu.permissoes.includes('usuarios.aprovar');
+  const pendentes = us.filter((u) => u.pendente).length;
+  const pediramSenha = us.filter((u) => u.pediuSenha).length;
+  const avisos = [];
+  if (pendentes) {
+    avisos.push(pendentes === 1
+      ? '1 pessoa pediu acesso e está esperando liberação.'
+      : `${pendentes} pessoas pediram acesso e estão esperando liberação.`);
+  }
+  if (pediramSenha) {
+    avisos.push(pediramSenha === 1
+      ? '1 pessoa esqueceu a senha e está esperando uma provisória.'
+      : `${pediramSenha} pessoas esqueceram a senha e estão esperando uma provisória.`);
+  }
+  $('#aviso-pendentes').classList.toggle('hidden', avisos.length === 0);
+  $('#aviso-pendentes').textContent = avisos.join(' ');
+
+  $('#tbl-usuarios tbody').innerHTML = us.map((u) => `<tr${u.pendente || u.pediuSenha ? ' class="linha-pendente"' : (u.ativo ? '' : ' style="opacity:.55"')}>
+    <td><b>${esc(u.nome)}</b></td>
+    <td>${esc(u.email)}</td>
+    <td>${esc(u.papel ?? '—')}</td>
+    <td>${u.excecoes > 0 ? `${u.excecoes} ajuste(s)` : '<span class="d">—</span>'}</td>
+    <td>${u.mfa ? '✓ ligado' : '<span class="d">não</span>'}</td>
+    <td>${u.ultimo_login ? new Date(u.ultimo_login).toLocaleDateString('pt-BR') : '<span class="d">nunca</span>'}</td>
+    <td>${u.pendente ? '<b>esperando liberação</b>'
+      : u.pediuSenha ? '<b>esqueceu a senha</b>'
+      : (u.ativo ? 'ativo' : 'desativado')}${u.deveTrocarSenha ? ' <span class="d">(senha provisória)</span>' : ''}</td>
+    <td style="white-space:nowrap">
+      ${u.pendente && podeAprovar ? `<button class="btn primary sm" data-aprovar="${esc(u.id)}">Liberar</button>
+        <button class="btn sm" data-recusar="${esc(u.id)}">Recusar</button>` : ''}
+      ${!u.pendente && podeEditar ? `<button class="btn sm" data-editar="${esc(u.id)}">Editar</button>` : ''}
+      ${!u.pendente && podeSenha ? `<button class="btn ${u.pediuSenha ? 'primary ' : ''}sm" data-senha="${esc(u.id)}">Senha</button>` : ''}
+      ${!u.pendente && podeDesativar ? `<button class="btn sm" data-ativo="${esc(u.id)}" data-para="${u.ativo ? '0' : '1'}">${u.ativo ? 'Desativar' : 'Reativar'}</button>` : ''}
+    </td>
+  </tr>`).join('') || '<tr><td colspan="8" class="vazio">Nenhum usuário.</td></tr>';
+
+  for (const b of $$('#tbl-usuarios button[data-editar]')) {
+    b.addEventListener('click', () => editarUsuario(b.dataset.editar).catch((e) => alerta(e.message)));
+  }
+  for (const b of $$('#tbl-usuarios button[data-aprovar]')) {
+    b.addEventListener('click', () => aprovarPedido(b.dataset.aprovar).catch((e) => alerta(e.message)));
+  }
+  for (const b of $$('#tbl-usuarios button[data-recusar]')) {
+    b.addEventListener('click', async () => {
+      if (!confirm('Recusar este pedido? A conta é apagada e a pessoa pode pedir de novo.')) return;
+      try {
+        await api(`/api/usuarios/${b.dataset.recusar}/recusar`, { method: 'POST' });
+        await carregarUsuarios();
+      } catch (e) { alerta(e.message); }
+    });
+  }
+  for (const b of $$('#tbl-usuarios button[data-senha]')) {
+    b.addEventListener('click', () => redefinirSenhaDe(b.dataset.senha).catch((e) => alerta(e.message)));
+  }
+  for (const b of $$('#tbl-usuarios button[data-ativo]')) {
+    b.addEventListener('click', async () => {
+      const ativar = b.dataset.para === '1';
+      if (!confirm(ativar ? 'Reativar este usuário?'
+        : 'Desativar este usuário? As sessões dele caem na hora.')) return;
+      try {
+        await api(`/api/usuarios/${b.dataset.ativo}/ativo`, {
+          method: 'POST', body: JSON.stringify({ ativo: ativar }),
+        });
+        await carregarUsuarios();
+      } catch (e) { alerta(e.message); }
+    });
+  }
+}
+
+async function editarUsuario(id) {
+  const grupos = await catalogo();
+  if (!papeisCache.length) papeisCache = await api('/api/papeis');
+  const u = id ? await api(`/api/usuarios/${id}`) : null;
+  const empresas = estado.empresas ?? [];
+
+  const papelSelecionado = () => papeisCache.find((p) => p.id === $('#us-papel').value);
+
+  abrirModal(u ? `Usuário: ${u.nome}` : 'Novo usuário', `
+    <div class="campo">
+      <label class="fl" for="us-nome">Nome</label>
+      <input type="text" id="us-nome" value="${esc(u?.nome ?? '')}">
+    </div>
+    <div class="campo">
+      <label class="fl" for="us-email">E-mail</label>
+      <input type="email" id="us-email" value="${esc(u?.email ?? '')}" ${u ? 'disabled' : ''}>
+      ${u ? '<span class="d">o e-mail identifica a conta e não muda</span>' : ''}
+    </div>
+    <div class="campo">
+      <label class="fl" for="us-papel">Papel</label>
+      <select id="us-papel">
+        ${papeisCache.map((p) => `<option value="${esc(p.id)}" ${u?.papelId === p.id ? 'selected' : ''}>${esc(p.nome)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="campo">
+      <label class="fl">Clientes que esta pessoa enxerga</label>
+      ${empresas.length === 0 ? '<span class="d">nenhuma empresa cadastrada ainda</span>'
+        : empresas.map((e) => `
+        <label class="perm-item">
+          <input type="checkbox" data-empresa="${esc(e.id)}" ${u?.empresas?.includes(e.id) ? 'checked' : ''}>
+          <span>${esc(e.razao_social)}</span>
+        </label>`).join('')}
+      <p class="page-desc">Nenhum marcado: a pessoa só vê tudo se o papel dela tiver
+        “ver TODOS os clientes”. Senão, não vê nada — e isso é proposital.</p>
+    </div>
+    <h3 style="margin:1rem 0 .4rem;font-size:.9rem">Ajustes só para esta pessoa</h3>
+    <p class="page-desc">Verde = a mais do que o papel dá. Vermelho = tirado do papel.
+      Se estiver mexendo muito aqui, provavelmente falta um papel novo.</p>
+    <div id="us-perms"></div>
+  `, async () => {
+    const corpo = {
+      nome: $('#us-nome').value.trim(),
+      papelId: $('#us-papel').value,
+      empresas: [...$$('#modal-corpo input[data-empresa]')].filter((i) => i.checked).map((i) => i.dataset.empresa),
+      excecoes: [],
+    };
+    // A exceção é a DIFERENÇA entre o que está marcado e o que o papel dá.
+    // Guardar a lista inteira faria a pessoa parar de acompanhar mudanças no
+    // papel dela — que é justamente o motivo de o papel existir.
+    const doPapel = new Set(papelSelecionado()?.permissoes ?? []);
+    for (const i of $$('#modal-corpo input[data-perm]')) {
+      const p = i.dataset.perm;
+      if (i.checked && !doPapel.has(p)) corpo.excecoes.push({ permissao: p, concedida: true });
+      if (!i.checked && doPapel.has(p)) corpo.excecoes.push({ permissao: p, concedida: false });
+    }
+    if (corpo.nome.length < 2) throw new Error('informe o nome');
+
+    if (u) {
+      await api(`/api/usuarios/${u.id}`, { method: 'PUT', body: JSON.stringify(corpo) });
+      alerta('Salvo. As sessões desta pessoa foram encerradas para a mudança valer agora.');
+    } else {
+      corpo.email = $('#us-email').value.trim();
+      const r = await api('/api/usuarios', { method: 'POST', body: JSON.stringify(corpo) });
+      mostrarSenhaProvisoria(r.email, r.senhaProvisoria);
+    }
+    await carregarUsuarios();
+  });
+
+  // Redesenha as caixinhas quando o papel muda: o efeito de trocar de papel
+  // tem de ser visível ANTES de salvar.
+  const desenhar = () => {
+    const doPapel = new Set(papelSelecionado()?.permissoes ?? []);
+    const marcadas = new Set(doPapel);
+    for (const e of (u?.excecoes ?? [])) {
+      if (e.concedida) marcadas.add(e.permissao); else marcadas.delete(e.permissao);
+    }
+    $('#us-perms').innerHTML = montarCaixinhas(grupos, marcadas, { doPapel, prefixo: 'us' });
+  };
+  desenhar();
+  $('#us-papel').addEventListener('change', desenhar);
+}
+
+/**
+ * Liberar um pedido é a mesma decisão de criar um usuário — quem entra e com que
+ * poder — então a tela é a mesma: papel, clientes e ajustes. A diferença é que a
+ * senha já existe: quem se cadastrou escolheu a dela.
+ */
+async function aprovarPedido(id) {
+  const grupos = await catalogo();
+  if (!papeisCache.length) papeisCache = await api('/api/papeis');
+  const u = await api(`/api/usuarios/${id}`);
+  const empresas = estado.empresas ?? [];
+  const papelSelecionado = () => papeisCache.find((p) => p.id === $('#ap-papel').value);
+
+  abrirModal(`Liberar acesso de ${u.nome}`, `
+    <p class="page-desc"><b>${esc(u.email)}</b> pediu acesso e escolheu a própria senha.
+      Defina o papel e o que ela enxerga.</p>
+    <div class="campo">
+      <label class="fl" for="ap-papel">Papel</label>
+      <select id="ap-papel">
+        ${papeisCache.map((p) => `<option value="${esc(p.id)}">${esc(p.nome)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="campo">
+      <label class="fl">Clientes que esta pessoa enxerga</label>
+      ${empresas.length === 0 ? '<span class="d">nenhuma empresa cadastrada ainda</span>'
+        : empresas.map((e) => `
+        <label class="perm-item">
+          <input type="checkbox" data-empresa="${esc(e.id)}"><span>${esc(e.razao_social)}</span>
+        </label>`).join('')}
+    </div>
+    <h3 style="margin:1rem 0 .4rem;font-size:.9rem">Ajustes só para esta pessoa</h3>
+    <div id="ap-perms"></div>
+  `, async () => {
+    const doPapel = new Set(papelSelecionado()?.permissoes ?? []);
+    const excecoes = [];
+    for (const i of $$('#modal-corpo input[data-perm]')) {
+      const p = i.dataset.perm;
+      if (i.checked && !doPapel.has(p)) excecoes.push({ permissao: p, concedida: true });
+      if (!i.checked && doPapel.has(p)) excecoes.push({ permissao: p, concedida: false });
+    }
+    await api(`/api/usuarios/${id}/aprovar`, {
+      method: 'POST',
+      body: JSON.stringify({
+        papelId: $('#ap-papel').value,
+        empresas: [...$$('#modal-corpo input[data-empresa]')].filter((i) => i.checked).map((i) => i.dataset.empresa),
+        excecoes,
+      }),
+    });
+    await carregarUsuarios();
+  });
+  $('#modal-ok').textContent = 'Liberar';
+
+  const desenhar = () => {
+    const doPapel = new Set(papelSelecionado()?.permissoes ?? []);
+    $('#ap-perms').innerHTML = montarCaixinhas(grupos, new Set(doPapel), { doPapel, prefixo: 'ap' });
+  };
+  desenhar();
+  $('#ap-papel').addEventListener('change', desenhar);
+}
+
+function mostrarSenhaProvisoria(email, senha) {
+  setTimeout(() => {
+    abrirModal('Usuário criado', `
+      <p class="page-desc">Passe esta senha para <b>${esc(email)}</b>. Ela é provisória:
+        a pessoa é obrigada a trocá-la no primeiro acesso, e a partir daí nem você
+        sabe qual é.</p>
+      <div class="senha-provisoria">${esc(senha)}</div>
+      <p class="page-desc"><b>Não aparece de novo.</b> Se perder, use o botão “Senha”
+        na lista para gerar outra.</p>
+    `, async () => {});
+    $('#modal-cancelar').classList.add('hidden');
+    $('#modal-ok').textContent = 'Copiei';
+  }, 30);
+}
+
+async function redefinirSenhaDe(id) {
+  const u = await api(`/api/usuarios/${id}`);
+  abrirModal(`Redefinir a senha de ${u.nome}`, `
+    <p class="page-desc">A pessoa vai receber uma senha provisória e será obrigada a
+      trocá-la no primeiro acesso. As sessões dela caem agora.</p>
+    <div class="campo">
+      <label class="fl" for="rs-nova">Senha provisória</label>
+      <input type="text" id="rs-nova" value="${esc(gerarSenhaProvisoria())}">
+      <span class="d">pode editar; mínimo 12 caracteres</span>
+    </div>
+    <div class="campo">
+      <label class="fl" for="rs-minha">Confirme a SUA senha</label>
+      <input type="password" id="rs-minha" autocomplete="current-password">
+      <span class="d">redefinir a senha de outra pessoa dá acesso à conta dela</span>
+    </div>
+  `, async () => {
+    await api(`/api/usuarios/${id}/redefinir-senha`, {
+      method: 'POST',
+      body: JSON.stringify({
+        senhaProvisoria: $('#rs-nova').value, minhaSenha: $('#rs-minha').value,
+      }),
+    });
+    const senha = $('#rs-nova').value;
+    mostrarSenhaProvisoria(u.email, senha);
+    await carregarUsuarios();
+  });
+}
+
+function gerarSenhaProvisoria() {
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  return [...crypto.getRandomValues(new Uint8Array(14))].map((b) => A[b % A.length]).join('');
+}
+
+async function gerarConvite() {
+  if (!papeisCache.length) papeisCache = await api('/api/papeis');
+  abrirModal('Gerar convite', `
+    <p class="page-desc">Quem abrir este link entra <b>na hora</b>, já com o papel escolhido —
+      ninguém precisa aprovar. Mande no grupo do escritório.</p>
+    <div class="campo">
+      <label class="fl" for="cv-papel">Papel de quem entrar</label>
+      <select id="cv-papel">
+        ${papeisCache.map((p) => `<option value="${esc(p.id)}">${esc(p.nome)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="rowflex">
+      <div style="flex:1"><label class="fl" for="cv-usos">Quantas pessoas podem usar</label>
+        <input type="number" id="cv-usos" value="3" min="1" max="50" style="width:100%"></div>
+      <div style="flex:1"><label class="fl" for="cv-horas">Vale por (horas)</label>
+        <input type="number" id="cv-horas" value="72" min="1" max="720" style="width:100%"></div>
+    </div>
+    <p class="page-desc">O prazo e o limite de usos existem para o link não virar porta
+      permanente. Se sobrar convite sem usar, ele vence sozinho.</p>
+  `, async () => {
+    const r = await api('/api/convites', {
+      method: 'POST',
+      body: JSON.stringify({
+        papelId: $('#cv-papel').value,
+        usos: Number($('#cv-usos').value),
+        horas: Number($('#cv-horas').value),
+      }),
+    });
+    mostrarConvite(r);
+  });
+  $('#modal-ok').textContent = 'Gerar';
+}
+
+function mostrarConvite(r) {
+  const link = `${location.origin}/?convite=${encodeURIComponent(r.codigo)}`;
+  setTimeout(() => {
+    abrirModal('Convite gerado', `
+      <p class="page-desc">Mande este link para até <b>${r.usos} pessoa(s)</b>. Quem abrir
+        entra como <b>${esc(r.papel)}</b>, sem passar por aprovação. Vale ${r.horas} horas.</p>
+      <div class="senha-provisoria" style="font-size:.9rem">${esc(link)}</div>
+      <p class="page-desc">Se preferir passar só o código: <b>${esc(r.codigo)}</b></p>
+      <p class="page-desc"><b>Não aparece de novo</b> — no banco fica só o embaralhado dele.
+        Convite perdido se gera outro.</p>
+    `, async () => {});
+    $('#modal-cancelar').classList.add('hidden');
+    $('#modal-ok').textContent = 'Copiei';
+  }, 30);
+}
+
+$('#btn-convidar').addEventListener('click', () => gerarConvite().catch((e) => alerta(e.message)));
+
+$('#btn-novo-usuario').addEventListener('click', () => editarUsuario(null).catch((e) => alerta(e.message)));
+
 // ------------------------------------------------------------------ fornecedores e regras
 
 async function carregarFornecedores() {
@@ -582,6 +1374,11 @@ function abrirModal(titulo, html, aoSalvar) {
   $('#modal-titulo').textContent = titulo;
   $('#modal-corpo').innerHTML = html;
   acaoModal = aoSalvar;
+  // Volta ao padrão antes de abrir. A tela de códigos de recuperação esconde o
+  // Cancelar e troca o rótulo do botão; sem este reset, o próximo modal a abrir
+  // herdaria isso e apareceria sem saída — bug que só se vê duas telas adiante.
+  $('#modal-cancelar').classList.remove('hidden');
+  $('#modal-ok').textContent = 'Salvar';
   $('#modal-fundo').classList.remove('hidden');
 }
 

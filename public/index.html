@@ -23,6 +23,115 @@
       <input type="password" id="login-senha" autocomplete="current-password" required>
     </div>
     <button class="btn primary" style="width:100%;justify-content:center" id="btn-entrar">Entrar</button>
+
+    <!-- Segunda etapa. Só aparece quando o servidor pede o código: a senha
+         sozinha não abriu sessão nenhuma até aqui. -->
+    <div id="passo-mfa" class="hidden">
+      <div class="campo">
+        <label class="fl" for="mfa-codigo">Código do aplicativo</label>
+        <input type="text" id="mfa-codigo" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="14" placeholder="000000">
+      </div>
+      <button type="button" class="btn primary" style="width:100%;justify-content:center"
+              id="btn-mfa">Confirmar</button>
+      <p class="page-desc" style="margin-top:.6rem">
+        Perdeu o celular? Use um dos códigos de recuperação que você guardou.
+      </p>
+    </div>
+
+    <p class="page-desc" style="text-align:center;margin:.9rem 0 0">
+      <a href="#" id="link-esqueci">Esqueci minha senha</a>
+      &nbsp;·&nbsp;
+      <a href="#" id="link-criar-conta">Criar conta</a>
+    </p>
+
+    <!-- So aparece quando o servidor responde /api/local, o que exige LOGIN_DEMO
+         no .dev.vars. Em qualquer deploy a rota devolve 404 e este bloco fica
+         escondido para sempre. -->
+    <div id="cartao-local" class="cartao-local hidden">
+      <div class="cartao-local-topo">
+        <span class="selo-local">modo local</span>
+        <button type="button" class="btn sm" id="btn-preencher">Preencher</button>
+      </div>
+      <dl>
+        <dt>E-mail</dt><dd><code id="demo-email"></code>
+          <button type="button" class="copiar" data-alvo="demo-email" title="copiar">copiar</button></dd>
+        <dt>Senha</dt><dd><code id="demo-senha"></code>
+          <button type="button" class="copiar" data-alvo="demo-senha" title="copiar">copiar</button></dd>
+      </dl>
+      <p class="cartao-local-nota">Este bloco existe só na sua máquina — em qualquer
+        publicação ele desaparece sozinho.</p>
+    </div>
+  </form>
+
+  <!-- Esqueci a senha. Sem serviço de e-mail, o pedido vai para a tela de
+       usuários e um administrador entrega a senha provisória. -->
+  <form class="login-card hidden" id="form-esqueci">
+    <div class="logo"><span class="mark">PF</span> Planee Fiscal</div>
+    <p class="sub">Esqueci minha senha</p>
+    <div id="esqueci-erro" class="login-erro hidden"></div>
+    <div id="esqueci-ok" class="hidden">
+      <p class="page-desc" id="esqueci-msg"></p>
+      <button type="button" class="btn" style="width:100%;justify-content:center"
+              id="btn-voltar-login4">Voltar</button>
+    </div>
+    <div id="esqueci-campos">
+      <p class="page-desc">Um administrador do escritório vai gerar uma senha provisória
+        para você. Não mandamos link por e-mail — assim não existe link de redefinição
+        circulando por caixa de entrada nenhuma.</p>
+      <div class="campo">
+        <label class="fl" for="esq-email">Seu e-mail</label>
+        <input type="email" id="esq-email" autocomplete="username">
+      </div>
+      <button class="btn primary" style="width:100%;justify-content:center"
+              id="btn-esqueci">Pedir nova senha</button>
+      <p class="page-desc" style="text-align:center;margin:.9rem 0 0">
+        <a href="#" id="btn-voltar-login3">Voltar</a>
+      </p>
+    </div>
+  </form>
+
+  <!-- Cadastro. A conta nasce pendente: existe, tem senha, e não faz nada até
+       um administrador liberar. -->
+  <form class="login-card hidden" id="form-cadastro">
+    <div class="logo"><span class="mark">PF</span> Planee Fiscal</div>
+    <p class="sub">Pedir acesso</p>
+    <div id="cadastro-erro" class="login-erro hidden"></div>
+    <div id="cadastro-ok" class="hidden">
+      <p class="page-desc" id="cadastro-msg"></p>
+      <button type="button" class="btn" style="width:100%;justify-content:center"
+              id="btn-voltar-login2">Voltar</button>
+    </div>
+    <div id="cadastro-campos">
+      <div class="campo">
+        <label class="fl" for="cad-nome">Seu nome</label>
+        <input type="text" id="cad-nome" autocomplete="name">
+      </div>
+      <div class="campo">
+        <label class="fl" for="cad-email">E-mail</label>
+        <input type="email" id="cad-email" autocomplete="username">
+      </div>
+      <div class="campo">
+        <label class="fl" for="cad-senha">Senha</label>
+        <input type="password" id="cad-senha" autocomplete="new-password">
+      </div>
+      <div class="campo">
+        <label class="fl" for="cad-senha2">Repita a senha</label>
+        <input type="password" id="cad-senha2" autocomplete="new-password">
+      </div>
+      <div class="campo">
+        <label class="fl" for="cad-convite">Código de convite <span class="d">(opcional)</span></label>
+        <input type="text" id="cad-convite" placeholder="ABCD-EFGH-JKLM">
+        <span class="d">Com convite você entra na hora. Sem, alguém precisa liberar.</span>
+      </div>
+      <p class="page-desc">Pelo menos 12 caracteres. Uma frase longa vale mais que
+        símbolo estranho — e você não vai anotá-la num papel.</p>
+      <button class="btn primary" style="width:100%;justify-content:center"
+              id="btn-cadastrar">Pedir acesso</button>
+      <p class="page-desc" style="text-align:center;margin:.9rem 0 0">
+        <a href="#" id="btn-voltar-login">Já tenho conta</a>
+      </p>
+    </div>
   </form>
 </div>
 
@@ -47,13 +156,21 @@
         <span class="num">3</span>
         <span>XML corrigido<span class="sub">conferir e exportar</span></span>
       </button>
-      <div class="navlabel">Cadastros</div>
-      <button data-view="vEmpresas"><span class="num">E</span><span>Empresas</span></button>
-      <button data-view="vFornecedores"><span class="num">F</span><span>Fornecedores</span></button>
-      <button data-view="vRegras"><span class="num">R</span><span>Padrões aprendidos</span></button>
+      <div class="navlabel">Cadastro geral</div>
+      <button data-view="vEmpresas"><span class="num">E</span><span>Empresas<span class="sub">todos os clientes</span></span></button>
+      <div class="navlabel">Da empresa selecionada</div>
+      <button data-view="vFornecedores"><span class="num">F</span><span>Fornecedores<span class="sub">só desta empresa</span></span></button>
+      <button data-view="vRegras"><span class="num">R</span><span>Padrões aprendidos<span class="sub">só desta empresa</span></span></button>
+      <div class="navlabel">Administração</div>
+      <button data-view="vUsuarios"><span class="num">U</span><span>Usuários<span class="sub">quem entra e o que pode</span></span></button>
+      <button data-view="vPapeis"><span class="num">P</span><span>Papéis<span class="sub">conjuntos de permissões</span></span></button>
     </nav>
     <div class="side-foot">
       <span id="rodape-ambiente">—</span><br>
+      <a href="#" id="btn-seguranca" style="color:#cfdcee">Segurança</a>
+      &nbsp;·&nbsp;
+      <a href="#" id="btn-trocar-senha" style="color:#cfdcee">Trocar senha</a>
+      &nbsp;·&nbsp;
       <a href="#" id="btn-sair" style="color:#cfdcee">Sair</a>
     </div>
   </aside>
@@ -216,8 +333,10 @@
 
       <!-- ---------------------------------------------- FORNECEDORES -->
       <section id="vFornecedores" class="hidden">
-        <h1>Fornecedores</h1>
-        <p class="page-desc">Quem manda mais nota é quem dá mais retorno ao fixar um padrão.</p>
+        <h1>Fornecedores <span class="escopo-empresa" id="escopo-fornecedores"></span></h1>
+        <p class="page-desc">Cada empresa tem a sua própria lista: o mesmo atacadista pode ser
+          rotina para um cliente e exceção para outro, e o padrão de um nunca vaza para o outro.
+          Quem manda mais nota é quem dá mais retorno ao fixar um padrão.</p>
         <div class="card">
           <div class="body tight">
             <div class="scroll"><table id="tbl-fornecedores">
@@ -228,9 +347,54 @@
         </div>
       </section>
 
+      <!-- ------------------------------------------------- USUÁRIOS -->
+      <section id="vUsuarios" class="hidden">
+        <h1>Usuários</h1>
+        <p class="page-desc">Duas portas, e as duas passam por aqui. <b>Você cria a conta</b>
+          — o sistema gera uma senha provisória que a pessoa troca no primeiro acesso, então
+          nem quem criou sabe a senha definitiva dela. Ou <b>a pessoa se cadastra</b> na tela
+          de entrada e escolhe a própria senha; a conta fica esperando você liberar, sem papel
+          nenhum e sem conseguir entrar.</p>
+        <div id="aviso-pendentes" class="hidden" style="background:#fff6e5;border:1px solid #f0dcb0;
+          border-radius:8px;padding:.6rem .8rem;margin-bottom:.8rem;font-size:.86rem;color:#7a5a1e"></div>
+        <div class="card">
+          <header><h2>Quem tem acesso</h2>
+            <button class="btn sm" id="btn-convidar" style="margin-left:auto">🔗 Gerar convite</button>
+            <button class="btn primary sm" id="btn-novo-usuario">+ Novo usuário</button>
+          </header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-usuarios">
+              <thead><tr><th>Nome</th><th>E-mail</th><th>Papel</th><th>Exceções</th>
+                <th>2º fator</th><th>Último acesso</th><th>Situação</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------------- PAPÉIS -->
+      <section id="vPapeis" class="hidden">
+        <h1>Papéis</h1>
+        <p class="page-desc">Um papel é um conjunto de permissões com nome. Em vez de marcar
+          caixinhas para cada pessoa, você define o papel uma vez e o aplica a quantas
+          quiser — e para saber o que alguém pode, basta olhar o papel dela.</p>
+        <div class="card">
+          <header><h2>Papéis do escritório</h2>
+            <button class="btn primary sm" id="btn-novo-papel" style="margin-left:auto">+ Novo papel</button>
+          </header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-papeis">
+              <thead><tr><th>Papel</th><th>Descrição</th><th class="num">Permissões</th>
+                <th class="num">Pessoas</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
       <!-- --------------------------------------------------- REGRAS -->
       <section id="vRegras" class="hidden">
-        <h1>Padrões aprendidos</h1>
+        <h1>Padrões aprendidos <span class="escopo-empresa" id="escopo-regras"></span></h1>
         <p class="page-desc">O que o sistema já sabe sobre esta empresa. Padrão fixado pela contabilidade
           não é rebaixado sozinho; padrão aprendido cai depois de três correções seguidas.</p>
         <div class="card">
