@@ -112,7 +112,12 @@ async function importarUma(
   const nota = parseNFe(arq.conteudo);
 
   if (await repo.notaExiste(nota.chave)) {
-    return { arquivo: arq.nome, status: 'duplicada', chave: nota.chave };
+    // Nota sem item e sobra de uma importacao que falhou. Deixar passar como
+    // "duplicada" prenderia o arquivo para sempre.
+    const eraOrfa = await repo.limparNotaSemItens(nota.chave);
+    if (!eraOrfa) {
+      return { arquivo: arq.nome, status: 'duplicada', chave: nota.chave };
+    }
   }
 
   // Aviso, nao bloqueio: nota de outro CNPJ pode ser engano de pasta, mas tambem pode
@@ -133,7 +138,11 @@ async function importarUma(
   const notaId = repo.novoId();
   const tenant = repo.contexto.sessao.tenantId;
 
-  await repo.bd
+  // A nota so e gravada junto com os itens, num batch unico (o batch do D1 e
+  // atomico). Antes ela entrava primeiro: se o motor de regras falhasse depois,
+  // sobrava uma nota sem item nenhum na tela - foi o que aconteceu com a
+  // primeira nota real de 20 itens.
+  const insertNota = repo.bd
     .prepare(
       `INSERT INTO notas
          (id, tenant_id, empresa_id, chave, numero, serie, modelo, emit_cnpj, emit_nome,
@@ -146,10 +155,7 @@ async function importarUma(
       nota.emit.cnpj, nota.emit.nome, nota.emit.uf, nota.dest.cnpj, nota.dhEmi,
       nota.competencia, nota.vNF, nota.protocolo, chaveR2, hash, loteId, origem,
       repo.agora(), repo.contexto.sessao.usuarioId,
-    )
-    .run();
-
-  await repo.registrarFornecedor(empresa.id, nota.emit.cnpj, nota.emit.nome, nota.emit.uf);
+    );
 
   // --- motor de regras: uma consulta para a nota inteira -----------------
   const todasChaves = nota.itens.flatMap((it) => chavesDoItem(it, nota.emit.cnpj));
@@ -213,7 +219,9 @@ async function importarUma(
     );
   }
 
-  await repo.bd.batch(inserts);
+  await repo.bd.batch([insertNota, ...inserts]);
+
+  await repo.registrarFornecedor(empresa.id, nota.emit.cnpj, nota.emit.nome, nota.emit.uf);
 
   return {
     arquivo: arq.nome,
