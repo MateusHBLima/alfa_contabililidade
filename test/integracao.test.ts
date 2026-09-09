@@ -1114,6 +1114,110 @@ describe('permissões por verbo e administração', () => {
     cookieAdmin = (r.headers.get('Set-Cookie') ?? '').split(';')[0]!;
   });
 
+  /* Apagar nota e apagar empresa nasceram de um aperto real: os dados do
+     primeiro teste com nota de verdade ficaram presos em produção, sem tela
+     nenhuma para tirá-los. Quem deixa importar precisa deixar desfazer. */
+
+  // Sem o helper `req`: FormData precisa definir o proprio content-type com o
+  // boundary, e o helper forca application/json.
+  const subirNota = async (empresaId: string, xml = XML, ck = cookieAdmin) => {
+    const fd = new FormData();
+    fd.append('arquivos', new File([xml], 'n.xml', { type: 'text/xml' }));
+    return app.fetch(
+      new Request(`http://x/api/empresas/${empresaId}/importar`, {
+        method: 'POST', body: fd, headers: { Cookie: ck },
+      }),
+      ambiente(),
+    );
+  };
+
+  const criarEmpresa = async () => {
+    const r = await req('/api/empresas', {
+      method: 'POST',
+      body: JSON.stringify({
+        cnpj: '11222333000181', razaoSocial: 'CLIENTE TESTE', uf: 'SC', perfil: 'revenda',
+      }),
+    });
+    return (await r.json() as { id: string }).id;
+  };
+
+  it('apagar nota leva itens e XML junto, mas preserva as regras aprendidas', async () => {
+    const empresaId = await criarEmpresa();
+    await subirNota(empresaId);
+    const notaId = db.consultar('SELECT id FROM notas')[0].id;
+
+    // Aprende alguma coisa antes, para provar que a regra sobrevive.
+    const itemId = db.consultar('SELECT id FROM itens LIMIT 1')[0].id;
+    await req(`/api/itens/${itemId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1556' }], fixar: true }),
+    });
+    const regrasAntes = db.consultar('SELECT * FROM regras').length;
+    expect(regrasAntes).toBeGreaterThan(0);
+
+    const r = await req(`/api/notas/${notaId}`, { method: 'DELETE' });
+    expect(r.status).toBe(200);
+
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
+    expect(db.consultar('SELECT * FROM itens')).toHaveLength(0);
+    // A regra é conhecimento do escritório sobre o fornecedor, não da nota.
+    expect(db.consultar('SELECT * FROM regras')).toHaveLength(regrasAntes);
+    expect(
+      db.consultar("SELECT * FROM auditoria WHERE acao = 'excluir' AND entidade = 'nota'"),
+    ).toHaveLength(1);
+  });
+
+  it('quem não tem notas.apagar não apaga nota', async () => {
+    const empresaId = await criarEmpresa();
+    await subirNota(empresaId);
+    const notaId = db.consultar('SELECT id FROM notas')[0].id;
+
+    const papel = await req('/api/papeis', {
+      method: 'POST',
+      body: JSON.stringify({
+        nome: 'Só trata',
+        permissoes: ['notas.visualizar', 'notas.importar', 'empresas.visualizar'],
+      }),
+    });
+    const { id: papelId } = await papel.json() as { id: string };
+    const novo = await req('/api/usuarios', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'op@alfacontabil.net', nome: 'Op', papelId }),
+    });
+    const { senhaProvisoria } = await novo.json() as { senhaProvisoria: string };
+    const login = await entrar('op@alfacontabil.net', senhaProvisoria);
+    const ck = (login.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+
+    const r = await req(`/api/notas/${notaId}`, { method: 'DELETE' }, ck);
+    expect(r.status).toBe(403);
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(1);
+  });
+
+  it('apagar empresa exige o CNPJ digitado — e então leva tudo dela', async () => {
+    const empresaId = await criarEmpresa();
+    await subirNota(empresaId);
+
+    const semConfirmar = await req(`/api/empresas/${empresaId}`, { method: 'DELETE' });
+    expect(semConfirmar.status).toBe(400);
+    expect(await semConfirmar.json()).toMatchObject({ cnpjEsperado: '11222333000181' });
+    expect(db.consultar('SELECT * FROM empresas')).toHaveLength(1);
+
+    const errado = await req(`/api/empresas/${empresaId}?confirmar=99999999999999`, { method: 'DELETE' });
+    expect(errado.status).toBe(400);
+
+    const certo = await req(`/api/empresas/${empresaId}?confirmar=11.222.333/0001-81`, { method: 'DELETE' });
+    expect(certo.status).toBe(200);
+
+    expect(db.consultar('SELECT * FROM empresas')).toHaveLength(0);
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
+    expect(db.consultar('SELECT * FROM itens')).toHaveLength(0);
+    expect(db.consultar('SELECT * FROM regras')).toHaveLength(0);
+    expect(db.consultar('SELECT * FROM fornecedores')).toHaveLength(0);
+    expect(
+      db.consultar("SELECT * FROM auditoria WHERE acao = 'excluir' AND entidade = 'empresa'"),
+    ).toHaveLength(1);
+  });
+
   it('o papel Admin tem TODAS as permissões do catálogo — sem buraco', async () => {
     const { results } = await db
       .prepare(
