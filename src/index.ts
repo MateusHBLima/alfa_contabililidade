@@ -1779,6 +1779,107 @@ app.get('/api/empresas/:id/regras', async (c) => {
 
 // ------------------------------------------------------------------ exportação
 
+// Apagar nota: some com os itens, o XML guardado no R2 e a nota. As REGRAS
+// aprendidas ficam — elas sao conhecimento do escritorio sobre o fornecedor, nao
+// pertencem a nota que por acaso as ensinou. Quem quiser tirar a regra tem
+// `regras.apagar` para isso.
+app.delete('/api/notas/:id', async (c) => {
+  const s = c.get('sessao');
+  exigir(s, 'notas.apagar');
+  const id = c.req.param('id');
+
+  const nota = await c.env.DB
+    .prepare('SELECT id, chave, numero, r2_original FROM notas WHERE tenant_id = ? AND id = ?')
+    .bind(s.tenantId, id)
+    .first<any>();
+  if (!nota) return c.json({ erro: 'nota não encontrada' }, 404);
+
+  // A auditoria vem ANTES: se o R2 falhar, o registro de que alguem mandou
+  // apagar nao pode sumir junto.
+  await new Auditoria(c.env.DB, c.env.AUDIT_SEED).registrar({
+    tenantId: s.tenantId, usuarioId: s.usuarioId, usuarioEmail: s.email,
+    acao: 'excluir', entidade: 'nota', entidadeId: id,
+    campo: 'chave', valorAntes: nota.chave, valorDepois: null,
+    origem: 'manual', ip: c.req.header('CF-Connecting-IP') ?? null,
+    requestId: c.req.header('CF-Ray') ?? null,
+  });
+
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM itens WHERE tenant_id = ? AND nota_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM notas WHERE tenant_id = ? AND id = ?').bind(s.tenantId, id),
+  ]);
+
+  if (nota.r2_original) {
+    // O arquivo some depois das linhas: XML orfao no R2 e desperdicio, linha
+    // apontando para arquivo que nao existe e erro na tela.
+    try {
+      await c.env.XML_ORIGINAL.delete(nota.r2_original);
+    } catch {
+      // Nao desfaz a exclusao por causa do arquivo.
+    }
+  }
+
+  return c.json({ ok: true });
+});
+
+// Apagar empresa: leva junto notas, itens, XMLs, regras e fornecedores dela.
+// Destrutivo de verdade — por isso exige o CNPJ digitado, como confirmacao.
+app.delete('/api/empresas/:id', async (c) => {
+  const s = c.get('sessao');
+  exigir(s, 'empresas.apagar');
+  const id = c.req.param('id');
+
+  const empresa = await c.env.DB
+    .prepare('SELECT id, cnpj, razao_social FROM empresas WHERE tenant_id = ? AND id = ?')
+    .bind(s.tenantId, id)
+    .first<any>();
+  if (!empresa) return c.json({ erro: 'empresa não encontrada' }, 404);
+
+  const confirmacao = (c.req.query('confirmar') ?? '').replace(/\D/g, '');
+  if (confirmacao !== empresa.cnpj) {
+    return c.json(
+      { erro: 'para apagar, confirme o CNPJ do cliente', cnpjEsperado: empresa.cnpj },
+      400,
+    );
+  }
+
+  const { results: notas } = await c.env.DB
+    .prepare('SELECT id, r2_original FROM notas WHERE tenant_id = ? AND empresa_id = ?')
+    .bind(s.tenantId, id)
+    .all<any>();
+
+  await new Auditoria(c.env.DB, c.env.AUDIT_SEED).registrar({
+    tenantId: s.tenantId, usuarioId: s.usuarioId, usuarioEmail: s.email,
+    acao: 'excluir', entidade: 'empresa', entidadeId: id,
+    campo: 'razao_social', valorAntes: `${empresa.razao_social} (${notas.length} nota(s))`,
+    valorDepois: null, origem: 'manual', ip: c.req.header('CF-Connecting-IP') ?? null,
+    requestId: c.req.header('CF-Ray') ?? null,
+  });
+
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      'DELETE FROM itens WHERE tenant_id = ? AND nota_id IN (SELECT id FROM notas WHERE tenant_id = ? AND empresa_id = ?)',
+    ).bind(s.tenantId, s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM notas WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM regras WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM fornecedores WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM lotes_importacao WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM usuario_empresas WHERE empresa_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM empresas WHERE tenant_id = ? AND id = ?').bind(s.tenantId, id),
+  ]);
+
+  for (const n of notas) {
+    if (!n.r2_original) continue;
+    try {
+      await c.env.XML_ORIGINAL.delete(n.r2_original);
+    } catch {
+      // idem
+    }
+  }
+
+  return c.json({ ok: true, notasApagadas: notas.length });
+});
+
 app.get('/api/notas/:id/xml-corrigido', async (c) => {
   exigir(c.get('sessao'), 'notas.exportar');
   const repo = c.get('repo');
