@@ -607,12 +607,38 @@ function renderNotas() {
       <td class="num">${moeda(n.valor_total)}</td>
       <td class="num">${n.total_itens ?? 0}</td>
       <td>${selo}</td>
-      <td><button class="btn sm primary" data-nota="${n.id}">Tratar →</button></td>
+      <td class="acoes">
+        <button class="btn sm primary" data-nota="${n.id}">Tratar →</button>
+        ${pode('notas.apagar') ? `<button class="btn sm perigo" data-apagar-nota="${n.id}" title="Apagar esta nota">Apagar</button>` : ''}
+      </td>
     </tr>`;
   }).join('');
 
   $$('#tbl-notas button[data-nota]').forEach((b) =>
     b.addEventListener('click', () => abrirNota(b.dataset.nota)));
+
+  $$('#tbl-notas button[data-apagar-nota]').forEach((b) =>
+    b.addEventListener('click', () => apagarNota(b.dataset.apagarNota)));
+}
+
+/**
+ * Apagar nota. Some com os itens e com o XML guardado; as REGRAS aprendidas
+ * ficam, porque são conhecimento do escritório sobre o fornecedor e não
+ * pertencem à nota que por acaso as ensinou.
+ */
+function apagarNota(id) {
+  const n = estado.notas.find((x) => x.id === id);
+  abrirModal('Apagar nota', `
+    <p>Apagar a nota <b>${esc(n?.numero ?? '')}</b> de ${esc(n?.emit_nome ?? '')}?</p>
+    <p class="porque">Somem a nota, os ${n?.total_itens ?? 0} itens e o XML arquivado.
+      As regras já aprendidas com ela continuam valendo.</p>
+    <p class="porque">Não dá para desfazer.</p>
+  `, async () => {
+    await api('/api/notas/' + id, { method: 'DELETE' });
+    await carregarNotas();
+  });
+  $('#modal-ok').textContent = 'Apagar';
+  $('#modal-ok').classList.add('perigo');
 }
 
 // ------------------------------------------------------------------ ambiente 2
@@ -843,7 +869,37 @@ function renderEmpresas() {
     <td>${esc(e.uf ?? '—')}</td>
     <td><span class="tag info">${esc(e.perfil)}</span></td>
     <td class="mono tiny">${esc(e.cnae_principal ?? '—')}</td>
-  </tr>`).join('') || '<tr><td colspan="5" class="vazio">Nenhuma empresa cadastrada.</td></tr>';
+    <td class="acoes">${pode('empresas.apagar')
+      ? `<button class="btn sm perigo" data-apagar-empresa="${esc(e.id)}">Apagar</button>` : ''}</td>
+  </tr>`).join('') || '<tr><td colspan="6" class="vazio">Nenhuma empresa cadastrada.</td></tr>';
+
+  $$('#tbl-empresas button[data-apagar-empresa]').forEach((b) =>
+    b.addEventListener('click', () => apagarEmpresa(b.dataset.apagarEmpresa)));
+}
+
+/**
+ * Apagar empresa leva junto notas, itens, XMLs, regras e fornecedores dela.
+ * Por isso pede o CNPJ digitado: é a diferença entre um clique errado e uma
+ * decisão. O servidor confere de novo — a tela não é a guarda.
+ */
+function apagarEmpresa(id) {
+  const e = estado.empresas.find((x) => x.id === id);
+  abrirModal('Apagar cliente', `
+    <p>Apagar <b>${esc(e?.razao_social ?? '')}</b> e <b>tudo</b> que pertence a ele:
+      notas, itens, XMLs arquivados, regras aprendidas e fornecedores.</p>
+    <p class="porque">Não dá para desfazer. Se a intenção é só parar de usar,
+      desative o cliente em vez de apagar.</p>
+    <label class="fl" style="margin-top:11px">Digite o CNPJ para confirmar</label>
+    <input type="text" id="apagar-cnpj" placeholder="${esc(e?.cnpj ?? '')}" style="width:100%">
+  `, async () => {
+    const digitado = ($('#apagar-cnpj').value || '').replace(/\D/g, '');
+    if (digitado !== (e?.cnpj ?? '')) throw new Error('o CNPJ digitado não confere');
+    await api(`/api/empresas/${id}?confirmar=${digitado}`, { method: 'DELETE' });
+    await carregarEmpresas();
+    await carregarNotas();
+  });
+  $('#modal-ok').textContent = 'Apagar';
+  $('#modal-ok').classList.add('perigo');
 }
 
 $('#btn-nova-empresa').addEventListener('click', () => {
@@ -1379,6 +1435,7 @@ function abrirModal(titulo, html, aoSalvar) {
   // herdaria isso e apareceria sem saída — bug que só se vê duas telas adiante.
   $('#modal-cancelar').classList.remove('hidden');
   $('#modal-ok').textContent = 'Salvar';
+  $('#modal-ok').classList.remove('perigo');
   $('#modal-fundo').classList.remove('hidden');
 }
 

@@ -259,3 +259,13 @@ pre.xml mark{background:#f0b429;color:#1a1005;border-radius:2px;padding:0 2px}
    que exige uma decisão de alguém, e não uma consulta. */
 .linha-pendente { background: #fff6e5; }
 .linha-pendente td { border-top: 1px solid #f0dcb0; border-bottom: 1px solid #f0dcb0; }
+
+/* Ações destrutivas. Vermelho de propósito e nunca como botão padrão: apagar
+   nota e apagar cliente não são operação de rotina. */
+.btn.perigo {
+  background: #b42318;
+  border-color: #b42318;
+  color: #fff;
+}
+.btn.perigo:hover { background: #912018; border-color: #912018; }
+td.acoes { display: flex; gap: 6px; justify-content: flex-end; }
