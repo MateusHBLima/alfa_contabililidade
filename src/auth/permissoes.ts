@@ -36,6 +36,9 @@ export const PERMISSOES = {
     descricao: 'Alterar CST de entrada, conta contábil e créditos',
   },
   'notas.exportar': { grupo: 'Notas', descricao: 'Gerar e baixar o XML corrigido e a escrituração' },
+  // Destruicao tem chave propria: quem trata nota o dia inteiro nao precisa poder
+  // apagar. Serve para engano de importacao e dado de teste.
+  'notas.apagar': { grupo: 'Notas', descricao: 'Apagar uma nota importada e tudo que veio com ela' },
 
   // ---------------------------------------------------------------- regras
   'regras.visualizar': { grupo: 'Regras', descricao: 'Ver as regras aprendidas pelo sistema' },
@@ -50,6 +53,8 @@ export const PERMISSOES = {
   'empresas.criar': { grupo: 'Empresas', descricao: 'Cadastrar um cliente novo' },
   'empresas.editar': { grupo: 'Empresas', descricao: 'Alterar dados e perfil fiscal de um cliente' },
   'empresas.desativar': { grupo: 'Empresas', descricao: 'Desativar um cliente' },
+  // Desativar e o caminho normal; apagar e para cadastro errado e teste.
+  'empresas.apagar': { grupo: 'Empresas', descricao: 'Apagar um cliente e todas as notas dele' },
   // Sem esta, a pessoa só enxerga os clientes ligados a ela em `usuario_empresas`.
   // Num escritório com 300 clientes, "vê todos" é decisão, não padrão — e antes
   // ela vinha de carona em `empresas.gerenciar`, sem nome próprio.
