@@ -18,11 +18,23 @@ type DatabaseSync = any;
 
 type Bind = string | number | null;
 
+/** Limite de parametros por consulta no Cloudflare D1. */
+export const MAX_PARAMETROS_D1 = 100;
+
 class Stmt {
   private args: Bind[] = [];
   constructor(private db: DatabaseSync, private sql: string) {}
 
   bind(...args: unknown[]): Stmt {
+    // O D1 de verdade recusa mais de 100 parametros por consulta. O SQLite local
+    // aceita quase mil, e foi por isso que uma nota de 20 itens passou em 300
+    // testes aqui e quebrou em producao com "too many SQL variables".
+    // O teste so vale se o dublê for tao rigoroso quanto o original.
+    if (args.length > MAX_PARAMETROS_D1) {
+      throw new Error(
+        `D1_ERROR: too many SQL variables: ${args.length} (limite ${MAX_PARAMETROS_D1})`,
+      );
+    }
     this.args = args.map(normalizar);
     return this;
   }

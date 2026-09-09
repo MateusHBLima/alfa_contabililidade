@@ -131,6 +131,82 @@ describe('importar uma nota de verdade', () => {
     });
   });
 
+  /**
+   * A primeira nota real do cliente tinha 20 itens e derrubou a importação em
+   * produção com "D1_ERROR: too many SQL variables". A nota de teste tinha 3,
+   * e o SQLite local aceitava quase mil parâmetros — a suíte ficou verde
+   * enquanto o cliente via erro na tela.
+   *
+   * Este teste monta uma nota grande de propósito. Com o dublê agora recusando
+   * mais de 100 parâmetros por consulta, ele falha se alguém voltar a montar
+   * uma consulta proporcional ao número de itens.
+   */
+  it('nota grande importa inteira — a consulta de regras não cresce sem limite', async () => {
+    const itens = Array.from({ length: 40 }, (_, i) => {
+      const n = i + 1;
+      return `<det nItem="${n}">
+        <prod><cProd>P${n}</cProd><cEAN>789100010${String(n).padStart(4, '0')}</cEAN>
+          <xProd>PRODUTO ${n}</xProd><NCM>1806${String(n % 90).padStart(2, '0')}</NCM>
+          <CFOP>5102</CFOP><uCom>UN</uCom><qCom>1.0000</qCom>
+          <vUnCom>10.00</vUnCom><vProd>10.00</vProd></prod>
+        <imposto><ICMS><ICMS00><CST>00</CST></ICMS00></ICMS></imposto>
+      </det>`;
+    }).join('\n');
+
+    const grande = XML
+      .replace(/<det nItem="1">[\s\S]*<\/det>/, itens)
+      .replace(CHAVE_ORIGINAL, CHAVE_ORIGINAL.slice(0, 42) + '99')
+      .replace('<nNF>504767</nNF>', '<nNF>504768</nNF>');
+
+    const r = await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'grande.xml', conteudo: grande },
+    ]);
+
+    expect(r.arquivos[0]!.status).toBe('importada');
+    expect(r.importadas).toBe(1);
+    expect(r.arquivos[0]!.itens).toBe(40);
+    expect(db.consultar('SELECT * FROM itens')).toHaveLength(40);
+  });
+
+  /**
+   * Quando a importação falha no meio, não pode sobrar nota sem item na tela —
+   * foi exatamente o que o cliente viu: "0 importadas, 1 recusada" e a nota
+   * listada com 0 itens.
+   */
+  it('importação que falha não deixa nota órfã', async () => {
+    const quebrado = { ...(r2 as any), put: async () => { throw new Error('R2 fora do ar'); } };
+
+    const r = await importarArquivos(repo, quebrado as any, empresaId, [
+      { nome: 'n.xml', conteudo: XML },
+    ]);
+
+    expect(r.importadas).toBe(0);
+    expect(r.recusadas).toBe(1);
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
+  });
+
+  it('nota órfã de uma falha anterior não bloqueia o reenvio do arquivo', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+
+    // Reproduz o estado que o cliente viu em produção: a nota ficou na tela,
+    // sem item nenhum, porque a gravação dos itens falhou.
+    db.consultar('DELETE FROM itens');
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(1);
+
+    const r = await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+
+    expect(r.arquivos[0]!.status).toBe('importada');
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(1);
+    expect(db.consultar('SELECT * FROM itens')).toHaveLength(3);
+  });
+
+  it('nota completa continua sendo recusada como duplicada', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+    const r = await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+    expect(r.arquivos[0]!.status).toBe('duplicada');
+    expect(db.consultar('SELECT * FROM itens')).toHaveLength(3);
+  });
+
   it('grava nota, itens, fornecedor e o XML no R2', async () => {
     const r = await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'nota.xml', conteudo: XML }]);
 
