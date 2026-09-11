@@ -26,6 +26,19 @@ const estado = {
 
 // ------------------------------------------------------------------ api
 
+/**
+ * O que a pessoa logada pode. Vive aqui no escopo do módulo, e não dentro de uma
+ * função, porque as telas de lista também precisam dela — quando isto era um
+ * `const` local, `renderNotas` e `renderEmpresas` quebravam com
+ * "pode is not defined" e a tabela aparecia vazia, sem erro visível.
+ *
+ * Esconder botão é conveniência, não segurança: cada rota confere a permissão
+ * por conta própria no servidor.
+ */
+function pode(p) {
+  return !!estado.eu?.permissoes?.includes(p);
+}
+
 async function api(caminho, opcoes = {}) {
   const r = await fetch(caminho, {
     credentials: 'same-origin',
@@ -480,7 +493,6 @@ async function iniciar() {
 
   // A tela esconde; o servidor decide. Estas linhas são conveniência, não
   // segurança — cada rota confere a permissão por conta própria.
-  const pode = (p) => estado.eu.permissoes.includes(p);
   $('#btn-nova-empresa').classList.toggle('hidden', !pode('empresas.criar'));
   $('#btn-novo-usuario').classList.toggle('hidden', !pode('usuarios.criar'));
   $('#btn-convidar').classList.toggle('hidden', !pode('usuarios.convidar'));
