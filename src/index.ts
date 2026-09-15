@@ -1795,7 +1795,22 @@ app.patch('/api/itens/:id', async (c) => {
   const candidatas = await repo.carregarRegrasCandidatas(empresa.id, chaves);
 
   // Aplicar a todo o fornecedor = aprender só no nível 5 (padrão do fornecedor).
-  const apenasNiveis = corpo.escopo === 'fornecedor' ? ([5] as const).slice() : undefined;
+  //
+  // Fixar UM item ("é sempre assim") é outra coisa e precisa ser contido: sem
+  // limite, `fixar` gravaria regra fixa também no nível 6 - mesmo NCM, QUALQUER
+  // fornecedor - e uma regra fixada nasce verde e nunca é rebaixada. NCM é
+  // classificação tributária, não produto: dezenas de mercadorias diferentes
+  // dividem o mesmo. A contadora aponta uma linha e diz "esse aqui é assim";
+  // ela não está falando de tudo que compartilha o NCM, nem dos outros
+  // fornecedores. Por isso o item fixado só grava o que identifica AQUELE
+  // produto DAQUELE fornecedor: nível 1 (código do produto) e nível 2 (código
+  // de barras). Fora isso, a invariante 5 seria contornada por um botão.
+  const apenasNiveis =
+    corpo.escopo === 'fornecedor'
+      ? ([5] as const).slice()
+      : corpo.fixar
+        ? ([1, 2] as const).slice()
+        : undefined;
 
   for (const m of validadas) {
     const sugestaoAnterior = sugerir(m.campo, item, candidatas, contexto);
