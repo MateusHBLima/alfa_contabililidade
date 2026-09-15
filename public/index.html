@@ -213,6 +213,11 @@
         <div class="card">
           <header><h2>Notas carregadas</h2><span class="hint" id="hint-notas"></span></header>
           <div class="body tight">
+            <div class="filters" id="filtros-notas">
+              <button data-fn="todas" class="on">Todas</button>
+              <button data-fn="tratar">A tratar</button>
+              <button data-fn="tratadas">Tratadas</button>
+            </div>
             <div class="scroll"><table id="tbl-notas">
               <thead><tr>
                 <th>Emissão</th><th>Número</th><th>Fornecedor</th><th>Chave</th>
@@ -250,6 +255,7 @@
               <button data-f="atencao">Precisa de atenção</button>
               <button data-f="novo">Produtos novos</button>
               <button data-f="pronto">Prontos</button>
+              <button data-f="conferido">Conferidos</button>
             </div>
             <input type="search" id="busca" placeholder="buscar produto…" style="width:190px">
             <div class="sep"></div>
@@ -258,6 +264,11 @@
             <button class="btn sm" id="btn-bulk-fornecedor" title="Vira o padrão deste fornecedor para esta empresa">
               ☆ Fixar para o fornecedor
             </button>
+            <button class="btn sm ok" id="btn-conferir-visiveis"
+                    title="Marca como conferido tudo o que está aparecendo na lista">
+              ✓ Conferir os que estão na tela
+            </button>
+            <span id="aviso-salvo" class="aviso-salvo hidden" role="status" aria-live="polite"></span>
           </div>
           <div class="body tight">
             <div class="scroll"><table id="tbl-itens">
@@ -270,6 +281,7 @@
                 <th style="width:96px">CFOP entrada</th>
                 <th class="num" style="width:92px">Valor</th>
                 <th style="width:150px">Situação</th>
+                <th style="width:104px"></th>
               </tr></thead>
               <tbody></tbody>
             </table></div>

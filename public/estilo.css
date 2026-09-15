@@ -269,3 +269,15 @@ pre.xml mark{background:#f0b429;color:#1a1005;border-radius:2px;padding:0 2px}
 }
 .btn.perigo:hover { background: #912018; border-color: #912018; }
 td.acoes { display: flex; gap: 6px; justify-content: flex-end; }
+
+/* Conferido: a linha que uma pessoa assinou. Verde e discreta — já resolvida,
+   não precisa puxar o olho. */
+.selo-conferido{color:var(--ok)}          .selo-conferido .ic{background:var(--ok-soft);color:var(--ok)}
+tr.estado-conferido{background:transparent}
+tr.estado-conferido td{opacity:.78}
+
+/* O aviso que substitui o botão "salvar" que não existe. */
+.aviso-salvo{
+  font-size:12px;font-weight:600;color:var(--ok);background:var(--ok-soft);
+  border-radius:99px;padding:3px 10px;white-space:nowrap;
+}

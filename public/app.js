@@ -12,6 +12,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const estado = {
+  filtroNotas: 'todas',
   eu: null,
   empresas: [],
   empresaId: null,
@@ -606,7 +607,23 @@ function renderNotas() {
 
   $('#hint-notas').textContent = estado.notas.length ? `${estado.notas.length} nota(s)` : '';
 
-  corpo.innerHTML = estado.notas.map((n) => {
+  // Empresa com 200 notas nao se trata num dia. Separar o que ja passou por gente
+  // do que ainda nao passou foi o primeiro pedido da contadora depois de usar.
+  const tratada = (n) => (n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens;
+  const visiveis = estado.notas.filter((n) => {
+    if (estado.filtroNotas === 'tratar') return !tratada(n);
+    if (estado.filtroNotas === 'tratadas') return tratada(n);
+    return true;
+  });
+
+  if (visiveis.length === 0) {
+    corpo.innerHTML = `<tr><td colspan="8" class="vazio">${
+      estado.filtroNotas === 'tratadas' ? 'Nenhuma nota tratada ainda.' : 'Nenhuma nota pendente.'
+    }</td></tr>`;
+    return;
+  }
+
+  corpo.innerHTML = visiveis.map((n) => {
     const pendentes = (n.total_itens ?? 0) - (n.itens_revisados ?? 0);
     const selo = pendentes === 0 && n.total_itens > 0
       ? '<span class="tag ok">✓ tratada</span>'
@@ -658,6 +675,13 @@ function apagarNota(id) {
 $('#btn-voltar-notas').addEventListener('click', () => irPara('v1'));
 $('#btn-ver-xml').addEventListener('click', () => { irPara('v3'); renderXml(); });
 $('#busca').addEventListener('input', (e) => { estado.busca = e.target.value.toLowerCase(); renderItens(); });
+$$('#filtros-notas button').forEach((b) => b.addEventListener('click', () => {
+  $$('#filtros-notas button').forEach((x) => x.classList.remove('on'));
+  b.classList.add('on');
+  estado.filtroNotas = b.dataset.fn;
+  renderNotas();
+}));
+
 $$('#filtros button').forEach((b) => b.addEventListener('click', () => {
   $$('#filtros button').forEach((x) => x.classList.remove('on'));
   b.classList.add('on');
@@ -702,6 +726,7 @@ function itensVisiveis() {
     if (estado.filtro === 'atencao') return e === 'bloqueado' || e === 'conferir';
     if (estado.filtro === 'novo') return e === 'novo';
     if (estado.filtro === 'pronto') return e === 'pronto';
+    if (estado.filtro === 'conferido') return e === 'conferido';
     return true;
   });
 }
@@ -763,8 +788,21 @@ function linhaItem(i) {
     <td class="num">${moeda(i.valor_total)}</td>
     <td>
       <span class="selo selo-${est.estado}"><span class="ic">${est.icone}</span>${esc(est.rotulo)}</span>
+      ${i.revisado ? `<span class="porque">${esc(quemConferiu(i))}</span>` : ''}
+    </td>
+    <td>
+      ${i.revisado
+        ? `<button class="btn sm sutil" data-desconferir="${i.id}" title="Voltar a marcar como pendente">desfazer</button>`
+        : `<button class="btn sm ok" data-conferir="${i.id}">✓ Conferido</button>`}
     </td>
   </tr>`;
+}
+
+/** "conferido por fulano, hoje 14:12" — quem assinou aquela linha. */
+function quemConferiu(i) {
+  const quem = i.revisado_por_nome ? ` por ${i.revisado_por_nome}` : '';
+  const quando = i.revisado_em ? ' · ' + dataCurta(i.revisado_em) : '';
+  return `conferido${quem}${quando}`;
 }
 
 async function salvarCampo(itemId, campo, valor) {
@@ -773,7 +811,51 @@ async function salvarCampo(itemId, campo, valor) {
       method: 'PATCH',
       body: JSON.stringify({ mudancas: [{ campo, valor }] }),
     });
+    avisarSalvo();
     await recarregarNota();
+  } catch (e) {
+    alerta(e.message);
+  }
+}
+
+/**
+ * Não existe botão "salvar" porque o sistema grava a cada alteração. Só que
+ * gravar em silêncio é igual a não gravar, do ponto de vista de quem usa: a
+ * contadora terminou quatro notas sem saber se tinha ficado salvo. Este aviso
+ * é a diferença entre as duas coisas.
+ */
+let sumirAviso = null;
+function avisarSalvo(texto = 'Salvo') {
+  const el = $('#aviso-salvo');
+  if (!el) return;
+  el.textContent = '✓ ' + texto;
+  el.classList.remove('hidden');
+  clearTimeout(sumirAviso);
+  sumirAviso = setTimeout(() => el.classList.add('hidden'), 2200);
+}
+
+/** Conferir = "olhei e concordo". Não muda valor nenhum; marca que houve gente. */
+async function conferirItens(ids) {
+  if (!estado.notaAberta || ids.length === 0) return;
+  try {
+    const r = await api(`/api/notas/${estado.notaAberta.nota.id}/conferir`, {
+      method: 'POST',
+      body: JSON.stringify({ itens: ids }),
+    });
+    avisarSalvo(r.conferidos === 1 ? '1 item conferido' : `${r.conferidos} itens conferidos`);
+    await recarregarNota();
+    await carregarNotas();
+  } catch (e) {
+    alerta(e.message);
+  }
+}
+
+async function desconferirItem(id) {
+  try {
+    await api(`/api/itens/${id}/desconferir`, { method: 'POST' });
+    avisarSalvo('Voltou para pendente');
+    await recarregarNota();
+    await carregarNotas();
   } catch (e) {
     alerta(e.message);
   }
@@ -784,6 +866,19 @@ async function recarregarNota() {
   estado.notaAberta = await api(`/api/notas/${estado.notaAberta.nota.id}`);
   renderItens();
 }
+
+document.addEventListener('click', (ev) => {
+  const c = ev.target.closest('[data-conferir]');
+  if (c) return conferirItens([c.dataset.conferir]);
+  const d = ev.target.closest('[data-desconferir]');
+  if (d) return desconferirItem(d.dataset.desconferir);
+});
+
+$('#btn-conferir-visiveis').addEventListener('click', () => {
+  const pendentes = itensVisiveis().filter((i) => !i.revisado);
+  if (pendentes.length === 0) return alerta('Tudo que está na tela já foi conferido.');
+  conferirItens(pendentes.map((i) => i.id));
+});
 
 $('#btn-bulk-nota').addEventListener('click', () => aplicarEmLote('item'));
 $('#btn-bulk-fornecedor').addEventListener('click', () => aplicarEmLote('fornecedor'));
