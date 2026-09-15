@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 
 const APP = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 
-const COMPARTILHADOS = ['pode', 'esc', 'moeda', 'dataCurta', 'selinhoProcedencia'];
+const COMPARTILHADOS = ['pode', 'esc', 'moeda', 'dataCurta', 'selinhoProcedencia', 'podeFixar'];
 
 describe('tela: helpers compartilhados', () => {
   for (const nome of COMPARTILHADOS) {
@@ -150,5 +150,36 @@ describe('a tela desenha tudo que o servidor manda', () => {
     for (const e of ['pronto', 'padrao', 'aprendido']) {
       expect(filtro[1]!, `filtro Prontos ignora "${e}"`).toContain(`'${e}'`);
     }
+  });
+});
+
+
+/**
+ * "É sempre assim" é um botão que cria regra verde na hora. O escopo dele é a
+ * única coisa que separa "esse produto é assim" de "carimbei o fornecedor
+ * inteiro sem querer" — que é literalmente um bug que já aconteceu neste
+ * projeto (ver §9 da constituição).
+ */
+describe('tela: o botão de fixar padrão do produto', () => {
+  it('só aparece para quem tem a permissão', () => {
+    expect(APP).toContain("pode('regras.fixar')");
+  });
+
+  it('não aparece sem CFOP preenchido, nem no que já é padrão fixado', () => {
+    const fn = APP.slice(APP.indexOf('function podeFixar'), APP.indexOf('function podeFixar') + 300);
+    expect(fn).toContain('cfop_novo');
+    expect(fn).toContain("'fixada'");
+  });
+
+  it('pede confirmação antes, e diz que não toca nos outros itens', () => {
+    const fn = APP.slice(APP.indexOf('async function fixarProduto'), APP.indexOf('async function fixarProduto') + 1200);
+    expect(fn).toContain('confirm(');
+    expect(fn).toMatch(/Não altera nenhum outro item/);
+  });
+
+  it('manda escopo de item, nunca de fornecedor', () => {
+    const fn = APP.slice(APP.indexOf('async function fixarProduto'), APP.indexOf('async function fixarProduto') + 1200);
+    expect(fn).toContain('fixar: true');
+    expect(fn, 'fixarProduto não pode mandar escopo de fornecedor').not.toContain("escopo: 'fornecedor'");
   });
 });

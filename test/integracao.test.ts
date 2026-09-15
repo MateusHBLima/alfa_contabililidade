@@ -2305,3 +2305,151 @@ describe('convite: entrar já liberado, sem ninguém aprovar', () => {
     expect(u!.convite_id).toBeTruthy();
   });
 });
+
+describe('"é sempre assim": a contadora fixa um produto, não o mundo', () => {
+  /* Pedido do Mateus: "preciso de um botão que salve o padrão que ela colocar".
+     O sistema já aprendia de toda correção — só que a regra nasce amarela de
+     propósito (ver uma vez não é saber) e leva umas quatro notas para ficar
+     verde. Faltava ela poder dizer "tenho certeza" e pular essa fila. */
+
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+
+  const SENHA = 'uma frase de senha longa';
+  let ck = '';
+  const req = (c: string, o: RequestInit = {}) =>
+    app.fetch(new Request(`http://x${c}`, {
+      ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+    }), ambiente());
+
+  const subir = async (empresaId: string, xml = XML) => {
+    const fd = new FormData();
+    fd.append('arquivos', new File([xml], 'n.xml', { type: 'text/xml' }));
+    return app.fetch(new Request(`http://x/api/empresas/${empresaId}/importar`, {
+      method: 'POST', body: fd, headers: { Cookie: ck },
+    }), ambiente());
+  };
+
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: SENHA }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  });
+
+  const criar = async () => {
+    const r = await req('/api/empresas', {
+      method: 'POST',
+      body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'MERCADO PILOTO', uf: 'SC', perfil: 'revenda' }),
+    });
+    return (await r.json() as any).id;
+  };
+
+  it('fixa o produto e a próxima nota já chega verde — sem esperar quatro notas', async () => {
+    const empresaId = await criar();
+    await subir(empresaId);
+    const nota1 = db.consultar('SELECT id FROM notas ORDER BY criado_em')[0].id;
+    const c1 = await (await req(`/api/notas/${nota1}`)).json() as any;
+
+    const r = await req(`/api/itens/${c1.itens[0].id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1403' }], fixar: true }),
+    });
+    expect(r.status).toBe(200);
+
+    await subir(empresaId, outraNota(XML, '91'));
+    const id2 = db.consultar('SELECT id FROM notas WHERE chave = ?', parseNFe(outraNota(XML, '91')).chave)[0].id;
+    const c2 = await (await req(`/api/notas/${id2}`)).json() as any;
+
+    expect(c2.itens[0].cfop_novo).toBe('1403');
+    expect(c2.itens[0].procedencia.fonte).toBe('fixada');
+    expect(c2.itens[0].estilo.estado).toBe('padrao');
+  });
+
+  it('e NÃO fixa nada no nível do NCM — regra genérica não vira verde por um botão', async () => {
+    // NCM é classificação tributária, não produto: dezenas de mercadorias
+    // diferentes dividem o mesmo. Fixar um chocolate não pode carimbar tudo
+    // que compartilha o NCM, de qualquer fornecedor. É a invariante 5.
+    const empresaId = await criar();
+    await subir(empresaId);
+    const nota1 = db.consultar('SELECT id FROM notas ORDER BY criado_em')[0].id;
+    const c1 = await (await req(`/api/notas/${nota1}`)).json() as any;
+
+    await req(`/api/itens/${c1.itens[0].id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1403' }], fixar: true }),
+    });
+
+    const regras = db.consultar('SELECT nivel, fixada FROM regras WHERE campo = ?', 'cfop');
+    const niveis = [...new Set(regras.map((x: any) => x.nivel))].sort();
+    expect(niveis).toEqual([1, 2]);           // fornecedor+produto e fornecedor+EAN
+    expect(niveis).not.toContain(6);          // NCM, qualquer fornecedor
+    expect(niveis).not.toContain(5);          // padrão do fornecedor inteiro
+    expect(regras.every((x: any) => x.fixada === 1)).toBe(true);
+  });
+
+  it('corrigir sem fixar continua aprendendo largo, e amarelo', async () => {
+    // A trava vale só para o botão. A correção normal segue como era: aprende
+    // em todos os níveis implícitos, e nasce amarela.
+    const empresaId = await criar();
+    await subir(empresaId);
+    const nota1 = db.consultar('SELECT id FROM notas ORDER BY criado_em')[0].id;
+    const c1 = await (await req(`/api/notas/${nota1}`)).json() as any;
+
+    await req(`/api/itens/${c1.itens[0].id}`, {
+      method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1403' }] }),
+    });
+
+    const regras = db.consultar('SELECT nivel, fixada FROM regras WHERE campo = ?', 'cfop');
+    expect([...new Set(regras.map((x: any) => x.nivel))].length).toBeGreaterThan(2);
+    expect(regras.every((x: any) => x.fixada === 0)).toBe(true);
+  });
+
+  it('fixar exige a permissão própria', async () => {
+    const empresaId = await criar();
+    await subir(empresaId);
+    const nota1 = db.consultar('SELECT id FROM notas ORDER BY criado_em')[0].id;
+    const c1 = await (await req(`/api/notas/${nota1}`)).json() as any;
+
+    const papel = await req('/api/papeis', {
+      method: 'POST',
+      body: JSON.stringify({
+        nome: 'Sem fixar',
+        // `empresas.todas` porque sem recorte de empresa o repositório recusa
+        // antes de chegar na permissão que este teste quer exercitar.
+        permissoes: ['notas.visualizar', 'notas.editar_cfop', 'empresas.visualizar', 'empresas.todas'],
+      }),
+    });
+    const { id: papelId } = await papel.json() as any;
+    const novo = await req('/api/usuarios', {
+      method: 'POST',
+      body: JSON.stringify({ nome: 'Aux', email: 'aux@alfacontabil.net', papelId }),
+    });
+    const { senhaProvisoria } = await novo.json() as any;
+
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'aux@alfacontabil.net', senha: senhaProvisoria }),
+    }), ambiente());
+    const ck2 = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    await app.fetch(new Request('http://x/api/trocar-senha', {
+      method: 'POST', headers: { 'content-type': 'application/json', Cookie: ck2 },
+      body: JSON.stringify({ senhaAtual: senhaProvisoria, senhaNova: 'outra frase longa 7' }),
+    }), ambiente());
+    const l2 = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'aux@alfacontabil.net', senha: 'outra frase longa 7' }),
+    }), ambiente());
+    const ck3 = (l2.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+
+    const r = await app.fetch(new Request(`http://x/api/itens/${c1.itens[0].id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json', Cookie: ck3 },
+      body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1403' }], fixar: true }),
+    }), ambiente());
+    expect(r.status).toBe(403);
+  });
+});
