@@ -291,14 +291,27 @@ export function severidadeMaxima(alertas: Alerta[]): Severidade | null {
  * O olho tem que ser puxado so para o que precisa de acao.
  */
 export type EstiloLinha = {
-  estado: 'bloqueado' | 'conferir' | 'novo' | 'pronto';
+  estado: 'bloqueado' | 'conferir' | 'novo' | 'pronto' | 'conferido';
   icone: string;
   rotulo: string;
   destacar: boolean;
 };
 
-export function estiloDaLinha(confianca: Confianca, alertas: Alerta[]): EstiloLinha {
+export function estiloDaLinha(
+  confianca: Confianca,
+  alertas: Alerta[],
+  revisado = false,
+): EstiloLinha {
   const pior = severidadeMaxima(alertas);
+
+  // Divergencia critica continua gritando mesmo depois de conferida: ela nao fala
+  // do preenchimento, fala de algo que mudou no mundo (NCM reclassificado, item
+  // que entrou em ST). Fora isso, quem conferiu manda - a pessoa e a autoridade,
+  // nao a origem do dado. Sem isto, a contadora confere a nota inteira e a tela
+  // continua dizendo "Conferir" em tudo, como se ela nao tivesse feito nada.
+  if (revisado && pior !== 'critico') {
+    return { estado: 'conferido', icone: '✓', rotulo: 'Conferido', destacar: false };
+  }
 
   if (pior === 'critico') {
     return { estado: 'bloqueado', icone: '▲', rotulo: 'Resolver', destacar: true };
