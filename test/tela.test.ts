@@ -132,6 +132,19 @@ describe('a tela desenha tudo que o servidor manda', () => {
     }
   });
 
+  it('o seletor de mês não se alimenta das notas já filtradas', () => {
+    // Bug real: as opções saíam de `estado.notas`, que é o RESULTADO da busca.
+    // Escolher setembro apagava agosto da lista, e quem não descobrisse o
+    // caminho de volta concluía que as notas de agosto tinham sumido. Opção de
+    // filtro vem do universo inteiro — aqui, de /competencias.
+    expect(APP).toContain('/competencias');
+    expect(APP).not.toContain('estado.notas.map((n) => n.competencia)');
+  });
+
+  it('mês sem ano não filtra nada — "setembro" de qual exercício?', () => {
+    expect(APP).toContain('ano && mes ?');
+  });
+
   it('o filtro "Prontos" não esconde o que o sistema acertou sozinho', () => {
     const filtro = APP.match(/estado\.filtro === 'pronto'\) return ([^;]+);/)!;
     for (const e of ['pronto', 'padrao', 'aprendido']) {

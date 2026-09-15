@@ -1580,6 +1580,71 @@ describe('permissões por verbo e administração', () => {
     expect(ultimo.estilo.rotulo).toContain('Aprendido');
   });
 
+  /* "Tem empresas aqui, por exemplo, que são 200 notas e que a gente também não
+     vai fazer tudo no mesmo dia" — a contadora, no primeiro uso real. Achar a
+     nota certa daqui a um ano é o problema que ano e mês resolvem. */
+  it('filtra por mês e por ano, e o ano pega os doze meses', async () => {
+    const empresaId = await criarEmpresa();
+
+    // Três notas: duas em agosto de 2026, uma em setembro.
+    const meses: [string, string][] = [
+      ['71', '2026-08-10T09:00:00-03:00'],
+      ['72', '2026-08-22T09:00:00-03:00'],
+      ['73', '2026-09-03T09:00:00-03:00'],
+    ];
+    for (const [serie, data] of meses) {
+      const xml = outraNota(XML, serie)
+        .replace('<dhEmi>2026-08-14T09:31:00-03:00</dhEmi>', `<dhEmi>${data}</dhEmi>`);
+      expect((await subirNota(empresaId, xml)).status).toBe(200);
+    }
+
+    const buscar = async (q: string) =>
+      (await (await req(`/api/empresas/${empresaId}/notas${q}`)).json()) as any[];
+
+    expect(await buscar('')).toHaveLength(3);
+    expect(await buscar('?competencia=2026-08')).toHaveLength(2);
+    expect(await buscar('?competencia=2026-09')).toHaveLength(1);
+    // O ano inteiro, sem escolher mês.
+    expect(await buscar('?competencia=2026')).toHaveLength(3);
+    expect(await buscar('?competencia=2025')).toHaveLength(0);
+  });
+
+  /* O seletor de mês se destruía sozinho: as opções saíam das notas JÁ
+     filtradas, então escolher setembro apagava agosto da lista. Quem não
+     descobrisse que precisava voltar em "todas" concluiria que as notas de
+     agosto tinham sumido do sistema. As opções vêm do universo inteiro. */
+  it('a lista de competências não depende do filtro em vigor', async () => {
+    const empresaId = await criarEmpresa();
+    for (const [serie, data] of [
+      ['81', '2026-08-10T09:00:00-03:00'],
+      ['82', '2026-09-03T09:00:00-03:00'],
+    ] as [string, string][]) {
+      await subirNota(
+        empresaId,
+        outraNota(XML, serie).replace('<dhEmi>2026-08-14T09:31:00-03:00</dhEmi>', `<dhEmi>${data}</dhEmi>`),
+      );
+    }
+
+    const comps = await (await req(`/api/empresas/${empresaId}/competencias`)).json() as any[];
+    expect(comps.map((c) => c.competencia)).toEqual(['2026-09', '2026-08']);
+    expect(comps.every((c) => c.notas === 1)).toBe(true);
+
+    // E continua o mesmo com um mês selecionado — é esse o ponto.
+    const filtrado = await (await req(`/api/empresas/${empresaId}/notas?competencia=2026-09`)).json() as any[];
+    expect(filtrado).toHaveLength(1);
+    const depois = await (await req(`/api/empresas/${empresaId}/competencias`)).json() as any[];
+    expect(depois.map((c) => c.competencia)).toEqual(['2026-09', '2026-08']);
+  });
+
+  it('competências exige permissão de ver nota', async () => {
+    const empresaId = await criarEmpresa();
+    const semNada = await app.fetch(
+      new Request(`http://x/api/empresas/${empresaId}/competencias`),
+      ambiente(),
+    );
+    expect(semNada.status).toBe(401);
+  });
+
   it('o padrão que ela mandou fixar chega como "Padrão seu", não como "Aprendido"', async () => {
     const empresaId = await criarEmpresa();
     await subirNota(empresaId);
