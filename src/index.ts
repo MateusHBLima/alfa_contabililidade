@@ -1729,6 +1729,13 @@ app.patch('/api/itens/:id', async (c) => {
     validadas.push({ campo: m.campo, valor: m.valor });
   }
 
+  // Fixar o padrao do fornecedor vale para tudo que vier dele, inclusive o que
+  // ninguem viu ainda - e por isso tem permissao propria no catalogo. So que
+  // nenhuma rota exigia essa permissao: quem podia editar CFOP de um item podia,
+  // de quebra, fixar o padrao do fornecedor inteiro. A permissao existia no papel
+  // e nao valia nada na pratica.
+  if (corpo.fixar || corpo.escopo === 'fornecedor') exigir(sessao, 'regras.fixar');
+
   const item = {
     nItem: linha.n_item, cProd: linha.c_prod, cEAN: linha.c_ean, xProd: linha.x_prod_original,
     NCM: linha.ncm, CEST: linha.cest, CFOP: linha.cfop_original, uCom: linha.unidade,
