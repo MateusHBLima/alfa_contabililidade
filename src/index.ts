@@ -1665,6 +1665,11 @@ app.get('/api/notas/:id', async (c) => {
   const procedenciaDe = (origem: string | null): Procedencia => {
     if (typeof origem !== 'string') return { fonte: 'nenhuma' };
     if (origem === 'perfil') return { fonte: 'perfil' };
+    // 'manual' e 'manual:fixada' sao o que alguem digitou nesta nota. Sem este
+    // caso a linha que a contadora acabou de preencher voltava SEM marca nenhuma -
+    // visto em producao: nota tratada por ela, sete linhas, procedencia "nenhuma"
+    // nas sete. O trabalho dela sumia exatamente na tela feita para mostra-lo.
+    if (origem.startsWith('manual')) return { fonte: 'manual' };
     if (!origem.startsWith('regra:')) return { fonte: 'nenhuma' };
     const ficha = fichas.get(origem.slice('regra:'.length));
     if (!ficha) return { fonte: 'nenhuma' };
@@ -1704,6 +1709,7 @@ app.get('/api/notas/:id', async (c) => {
   const resumo = resumirNota(
     itens.map((i: any) => ({
       confianca: i.confianca, alertas: i.alertas, procedencia: i.procedencia,
+      revisado: i.revisado === 1,
     })),
   );
 
