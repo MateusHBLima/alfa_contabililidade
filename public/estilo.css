@@ -344,3 +344,7 @@ tr.nota-andando td:first-child{box-shadow:inset 3px 0 0 var(--primary-2)}
    nenhuma — visto em produção, numa nota tratada por ela: sete linhas, sete
    "nenhuma". O trabalho dela sumia justamente na tela feita para mostrá-lo. */
 .proc-manual{background:var(--primary-soft);color:var(--primary-2)}
+
+/* Tabela vazia por causa de filtro: a mensagem vem com a saída junto. Dizer
+   "nada aqui" sem oferecer o caminho de volta é meio aviso. */
+td.vazio .btn{display:block;margin:10px auto 0}

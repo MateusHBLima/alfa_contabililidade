@@ -777,6 +777,35 @@ function renderItens() {
     (r.aprendizado ? `<div class="placar">📚 ${esc(r.aprendizado)}</div>` : '');
 
   const lista = itensVisiveis();
+
+  // Filtro que nao casa nada tem que DIZER isso. Sem esta linha a tabela some e
+  // fica um retangulo branco: nenhum erro, nenhuma mensagem, a nota inteira
+  // aparentemente vazia. E a mesma forma do bug do `pode()` - a tela nao quebra,
+  // ela mente calada, e quem esta usando conclui que perdeu o trabalho.
+  // Visto em producao: nota com 7 itens conferidos, filtro "Prontos", tela em branco.
+  if (lista.length === 0) {
+    const porque = estado.busca
+      ? `Nenhum item com “${esc(estado.busca)}”.`
+      : {
+          atencao:   'Nenhum item pedindo atenção — a nota está em dia.',
+          novo:      'Nenhum produto novo nesta nota.',
+          pronto:    'Nenhum item veio pronto do sistema. Os que você já conferiu estão em “Conferidos”.',
+          conferido: 'Nenhum item conferido ainda.',
+        }[estado.filtro] ?? 'Nenhum item nesta situação.';
+    corpo.innerHTML =
+      `<tr><td colspan="9" class="vazio">${esc(porque)}
+        <button class="btn sm" id="limpar-filtro-itens">Ver todos os ${n.itens.length} itens</button>
+      </td></tr>`;
+    $('#limpar-filtro-itens')?.addEventListener('click', () => {
+      estado.filtro = 'todos';
+      estado.busca = '';
+      $('#busca').value = '';
+      $$('#filtros button').forEach((x) => x.classList.toggle('on', x.dataset.f === 'todos'));
+      renderItens();
+    });
+    return;
+  }
+
   corpo.innerHTML = lista.map((i) => linhaItem(i)).join('');
 
   $$('#tbl-itens [data-campo]').forEach((el) => {
