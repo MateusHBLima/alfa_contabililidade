@@ -639,6 +639,16 @@ function renderNotas() {
       pronta: '<span class="tag ok">✓ tratada</span>',
     }[estagio];
 
+    // O botão diz o que resta fazer. Azul de "Tratar" numa nota pronta convida
+    // para um trabalho que já foi feito; e quem parou no meio precisa saber que
+    // é para continuar, não para começar de novo.
+    const acao = {
+      vazia: { rotulo: 'Abrir →', classe: '', dica: 'Nota sem itens' },
+      nova: { rotulo: 'Tratar →', classe: 'primary', dica: 'Começar a tratar esta nota' },
+      andando: { rotulo: 'Continuar →', classe: 'primary', dica: `Faltam ${pendentes} item(ns)` },
+      pronta: { rotulo: 'Ver →', classe: '', dica: 'Abrir para conferir ou ajustar' },
+    }[estagio];
+
     return `<tr class="nota-${estagio}">
       <td>${dataCurta(n.dh_emi)}</td>
       <td class="mono">${esc(n.numero)}</td>
@@ -648,7 +658,7 @@ function renderNotas() {
       <td class="num">${n.total_itens ?? 0}</td>
       <td>${selo}</td>
       <td class="acoes">
-        <button class="btn sm primary" data-nota="${n.id}">Tratar →</button>
+        <button class="btn sm ${acao.classe}" data-nota="${n.id}" title="${acao.dica}">${acao.rotulo}</button>
         ${pode('notas.apagar') ? `<button class="btn sm perigo" data-apagar-nota="${n.id}" title="Apagar esta nota">Apagar</button>` : ''}
       </td>
     </tr>`;
