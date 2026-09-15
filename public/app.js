@@ -1106,6 +1106,44 @@ $('#btn-conferir-visiveis').addEventListener('click', () => {
   conferirItens(pendentes.map((i) => i.id));
 });
 
+/**
+ * Salvar o padrao de TODOS de uma vez - cada um com o SEU proprio CFOP.
+ *
+ * Nao confundir com "Fixar para o fornecedor", que aplica UM CFOP escolhido a
+ * tudo que estiver na tela. Aqui nenhum valor muda: o que ja esta preenchido
+ * vira padrao daquele produto. E o caminho normal numa nota grande - o leiaute
+ * da NF-e admite ate 990 itens, e ninguem clica 990 vezes.
+ *
+ * Uma requisicao so. A versao obvia seria um laco de requisicoes aqui no
+ * navegador, uma por item: minutos numa nota grande, e uma falha no meio deixa
+ * metade feito sem ninguem saber.
+ */
+$('#btn-fixar-visiveis').addEventListener('click', async () => {
+  if (!estado.notaAberta) return;
+  const alvos = itensVisiveis().filter((i) => podeFixar(i));
+  if (alvos.length === 0) {
+    return alerta('Não há item para salvar: ou já são padrão, ou estão sem CFOP.');
+  }
+
+  const semCfop = itensVisiveis().filter((i) => !String(i.cfop_novo ?? '').trim()).length;
+  if (!confirm(
+    `Salvar o CFOP de ${alvos.length} item(ns) como padrão de cada produto?\n\n` +
+    'Cada item guarda o SEU próprio CFOP — nenhum valor é alterado.\n' +
+    'A partir da próxima nota deste fornecedor eles já vêm preenchidos.' +
+    (semCfop > 0 ? `\n\n${semCfop} item(ns) sem CFOP serão pulados.` : ''),
+  )) return;
+
+  try {
+    const r = await api(`/api/notas/${estado.notaAberta.nota.id}/fixar-padrao`, {
+      method: 'POST', body: JSON.stringify({ itens: alvos.map((i) => i.id) }),
+    });
+    avisarSalvo(`${r.fixados} padrão(ões) salvo(s)`);
+    await recarregarNota();
+  } catch (e) {
+    alerta('Não consegui salvar os padrões: ' + e.message);
+  }
+});
+
 $('#btn-bulk-nota').addEventListener('click', () => aplicarEmLote('item'));
 $('#btn-bulk-fornecedor').addEventListener('click', () => aplicarEmLote('fornecedor'));
 
