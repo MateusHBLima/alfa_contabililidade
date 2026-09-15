@@ -270,14 +270,29 @@ pre.xml mark{background:#f0b429;color:#1a1005;border-radius:2px;padding:0 2px}
 .btn.perigo:hover { background: #912018; border-color: #912018; }
 td.acoes { display: flex; gap: 6px; justify-content: flex-end; }
 
-/* Conferido: a linha que uma pessoa assinou. Verde e discreta — já resolvida,
-   não precisa puxar o olho. */
+/* Conferido: a linha que uma pessoa já assinou.
+   Segue a mesma convenção das outras — fundo tingido e tarja de 3px na
+   esquerda — porque foi pedido explícito de quem usa: "se tivesse um jeito de
+   ir aparecendo de outra cor o que eu já fiz". Numa nota de 20 itens tratada
+   ao longo do dia, saber onde parou é metade do trabalho.
+
+   O verde é o mais lavado da paleta e o texto não perde contraste: marcar
+   progresso é um trabalho diferente de pedir atenção, e a linha resolvida não
+   pode competir com a que ainda precisa de olho. */
 .selo-conferido{color:var(--ok)}          .selo-conferido .ic{background:var(--ok-soft);color:var(--ok)}
-tr.estado-conferido{background:transparent}
-tr.estado-conferido td{opacity:.78}
+tr.estado-conferido{background:#f3faf7}
+tr.estado-conferido td:first-child{box-shadow:inset 3px 0 0 var(--ok)}
 
 /* O aviso que substitui o botão "salvar" que não existe. */
 .aviso-salvo{
   font-size:12px;font-weight:600;color:var(--ok);background:var(--ok-soft);
   border-radius:99px;padding:3px 10px;white-space:nowrap;
 }
+
+/* A lista de notas também precisa mostrar o progresso: a contadora trata uma
+   empresa de 200 notas ao longo de vários dias, e sem isto tudo que não estava
+   100% aparecia igual a nunca tocada. Tarja à esquerda, mesma convenção da
+   tabela de itens. */
+tr.nota-pronta{background:#f3faf7}
+tr.nota-pronta td:first-child{box-shadow:inset 3px 0 0 var(--ok)}
+tr.nota-andando td:first-child{box-shadow:inset 3px 0 0 var(--primary-2)}

@@ -624,11 +624,22 @@ function renderNotas() {
   }
 
   corpo.innerHTML = visiveis.map((n) => {
-    const pendentes = (n.total_itens ?? 0) - (n.itens_revisados ?? 0);
-    const selo = pendentes === 0 && n.total_itens > 0
-      ? '<span class="tag ok">✓ tratada</span>'
-      : `<span class="tag warn">${pendentes} a revisar</span>`;
-    return `<tr>
+    const total = n.total_itens ?? 0;
+    const feitos = n.itens_revisados ?? 0;
+    const pendentes = total - feitos;
+
+    // Três estados, não dois. "Comecei e parei no meio" é o caso normal numa
+    // empresa de 200 notas, e era exatamente o que não dava para ver: tudo que
+    // não estava 100% aparecia igual a nunca tocada.
+    const estagio = total === 0 ? 'vazia' : feitos === 0 ? 'nova' : pendentes === 0 ? 'pronta' : 'andando';
+    const selo = {
+      vazia: '<span class="tag mut">sem itens</span>',
+      nova: `<span class="tag warn">${pendentes} a revisar</span>`,
+      andando: `<span class="tag info">${feitos} de ${total} conferidos</span>`,
+      pronta: '<span class="tag ok">✓ tratada</span>',
+    }[estagio];
+
+    return `<tr class="nota-${estagio}">
       <td>${dataCurta(n.dh_emi)}</td>
       <td class="mono">${esc(n.numero)}</td>
       <td>${esc(n.emit_nome ?? n.emit_cnpj)}<span class="porque">${esc(n.emit_cnpj)}</span></td>
