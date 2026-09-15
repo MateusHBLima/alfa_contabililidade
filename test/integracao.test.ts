@@ -1664,17 +1664,55 @@ describe('permissões por verbo e administração', () => {
     )[0].id;
 
     const corpo = await (await req(`/api/notas/${segundaId}`)).json() as any;
+    const item = corpo.itens[0];
 
     // Fixar é decisão, não palpite: a regra nasce verde na hora, sem esperar
     // histórico. A procedência do item diz isso já na nota seguinte.
-    expect(corpo.itens[0].procedencia.fonte).toBe('fixada');
-    expect(corpo.itens[0].cfop_novo).toBe('1403');
+    expect(item.procedencia.fonte).toBe('fixada');
+    expect(item.cfop_novo).toBe('1403');
 
-    // E mesmo assim a LINHA ainda pede conferência, porque a confiança do item
-    // exige CFOP e descrição, e a descrição ninguém ensinou ainda. Ou seja: se a
-    // marca "veio de você" morasse só dentro do estado da linha, ela quase nunca
-    // apareceria — que é exatamente o buraco que a contadora relatou.
-    expect(corpo.itens[0].estilo.estado).toBe('conferir');
+    // E a LINHA fica pronta. Antes não ficava: a confiança exigia CFOP *e*
+    // descrição, então a contadora dava a ordem mais forte que o sistema aceita
+    // e a linha continuava dizendo "Conferir" para sempre. Quem decide se a
+    // linha está pronta é o CFOP, que é a decisão fiscal.
+    expect(item.estilo.estado).toBe('padrao');
+    expect(item.estilo.rotulo).toBe('Padrão seu');
+    expect(item.estilo.destacar).toBe(false);
+
+    // A descrição pendente não some da tela — mas vive no topo da nota, não em
+    // cada linha: nas notas reais da ALFA eram 38 de 38, e aviso em 100% das
+    // linhas não informa, só ensina a pessoa a ignorar aviso.
+    expect(item.descricaoDoFornecedor).toBe(true);
+    expect(corpo.resumo.semDescricaoPadrao).toBeGreaterThan(0);
+    // e a descrição pendente não tira ESTE item da conta de prontos — os outros
+    // dois continuam pedindo atenção porque ninguém ensinou o CFOP deles.
+    expect(corpo.resumo.tranquilos).toBe(1);
+  });
+
+  it('descrição ensinada tira o aviso, e a linha continua pronta', async () => {
+    const empresaId = await criarEmpresa();
+    await subirNota(empresaId);
+    const primeira = db.consultar('SELECT id FROM notas ORDER BY criado_em')[0].id;
+    const c1 = await (await req(`/api/notas/${primeira}`)).json() as any;
+
+    await req(`/api/itens/${c1.itens[0].id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        mudancas: [
+          { campo: 'cfop', valor: '1403' },
+          { campo: 'descricao', valor: 'CHOCOLATE AO LEITE POTE 200G' },
+        ],
+        fixar: true,
+      }),
+    });
+
+    await subirNota(empresaId, outraNota(XML, '59'));
+    const id = db.consultar('SELECT id FROM notas WHERE chave = ?', parseNFe(outraNota(XML, '59')).chave)[0].id;
+    const corpo = await (await req(`/api/notas/${id}`)).json() as any;
+
+    expect(corpo.itens[0].x_prod_novo).toBe('CHOCOLATE AO LEITE POTE 200G');
+    expect(corpo.itens[0].descricaoDoFornecedor).toBe(false);
+    expect(corpo.itens[0].estilo.destacar).toBe(false);
   });
 });
 

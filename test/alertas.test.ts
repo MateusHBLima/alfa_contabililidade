@@ -452,3 +452,44 @@ describe('o que a própria contadora digitou também é trabalho dela', () => {
     expect(r.aprendizado).toBe('1 de 2 itens vieram do que vocês já ensinaram');
   });
 });
+
+describe('descrição ainda do fornecedor: informa no topo, não em cada linha', () => {
+  // A contadora mandava fixar o padrão do fornecedor — a ordem mais forte que o
+  // sistema aceita — e a linha continuava "Conferir" na nota seguinte, e na
+  // outra, para sempre, porque a confiança exigia CFOP *e* descrição. Agora quem
+  // decide é o CFOP, que é a decisão fiscal.
+  //
+  // E o que falta não vira alerta por linha: medido nas notas reais da ALFA,
+  // 38 de 38 itens estavam sem descrição padronizada. Aviso em 100% das linhas
+  // não informa, só ensina a pessoa a ignorar aviso.
+
+  it('CFOP resolvido deixa a linha pronta, mesmo sem descrição padronizada', () => {
+    const e = estiloDaLinha('alta', [], false, { fonte: 'fixada' });
+    expect(e.estado).toBe('padrao');
+    expect(e.destacar).toBe(false);
+  });
+
+  it('o resumo conta quantos itens ainda estão com a descrição do fornecedor', () => {
+    const r = resumirNota([
+      { confianca: 'alta', alertas: [], descricaoDoFornecedor: true },
+      { confianca: 'alta', alertas: [], descricaoDoFornecedor: true },
+      { confianca: 'alta', alertas: [], descricaoDoFornecedor: false },
+    ]);
+    expect(r.semDescricaoPadrao).toBe(2);
+    expect(r.tranquilos).toBe(3);
+  });
+
+  it('e isso não tira ninguém da conta de prontos', () => {
+    const r = resumirNota([
+      { confianca: 'alta', alertas: [], descricaoDoFornecedor: true },
+      { confianca: 'alta', alertas: [], descricaoDoFornecedor: true },
+    ]);
+    expect(r.chamada).toContain('Tudo conferido');
+    expect(r.atencao).toBe(0);
+  });
+
+  it('nota toda padronizada não tem nada a informar', () => {
+    const r = resumirNota([{ confianca: 'alta', alertas: [], descricaoDoFornecedor: false }]);
+    expect(r.semDescricaoPadrao).toBe(0);
+  });
+});
