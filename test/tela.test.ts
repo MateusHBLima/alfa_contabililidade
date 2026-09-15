@@ -183,3 +183,34 @@ describe('tela: o botão de fixar padrão do produto', () => {
     expect(fn, 'fixarProduto não pode mandar escopo de fornecedor').not.toContain("escopo: 'fornecedor'");
   });
 });
+
+
+describe('tela: salvar o padrão de todos de uma vez', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+
+  it('o botão existe', () => {
+    expect(HTML).toContain('btn-fixar-visiveis');
+  });
+
+  it('é UMA requisição, não um laço de requisições no navegador', () => {
+    // A versão óbvia seria um PATCH por item. Numa nota de 990 isso é minutos,
+    // e uma falha no meio deixa metade feito sem ninguém saber.
+    const i = APP.indexOf("$('#btn-fixar-visiveis')");
+    const fn = APP.slice(i, i + 1600);
+    expect(fn).toContain('/fixar-padrao');
+    expect(fn, 'não pode haver laço de requisições aqui').not.toMatch(/for\s*\([^)]*\)\s*\{[^}]*await api/);
+  });
+
+  it('avisa quantos, e que nenhum valor muda', () => {
+    const i = APP.indexOf("$('#btn-fixar-visiveis')");
+    const fn = APP.slice(i, i + 1600);
+    expect(fn).toContain('confirm(');
+    expect(fn).toMatch(/nenhum valor é alterado/);
+  });
+
+  it('não some em silêncio quando não há o que salvar', () => {
+    const i = APP.indexOf("$('#btn-fixar-visiveis')");
+    const fn = APP.slice(i, i + 1600);
+    expect(fn).toMatch(/Não há item para salvar/);
+  });
+});
