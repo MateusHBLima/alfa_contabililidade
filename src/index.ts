@@ -1676,7 +1676,7 @@ app.get('/api/notas/:id', async (c) => {
       regraSuspeita: usouRegraSuspeita,
     });
 
-    return { ...i, alertas, estilo: estiloDaLinha(i.confianca, alertas) };
+    return { ...i, alertas, estilo: estiloDaLinha(i.confianca, alertas, i.revisado === 1) };
   });
 
   const resumo = resumirNota(
@@ -1700,7 +1700,8 @@ app.patch('/api/itens/:id', async (c) => {
 
   const corpo = z
     .object({
-      mudancas: z.array(z.object({ campo: z.string(), valor: z.string() })).min(1),
+      // Vazio e valido de proposito: e o "conferi e concordo com o que esta ai".
+      mudancas: z.array(z.object({ campo: z.string(), valor: z.string() })).default([]),
       fixar: z.boolean().default(false),
       escopo: z.enum(['item', 'fornecedor']).default('item'),
     })
@@ -1763,6 +1764,40 @@ app.patch('/api/itens/:id', async (c) => {
     validadas.map((m) => ({ ...m, origem: corpo.fixar ? 'manual:fixada' : 'manual' })),
   );
 
+  return c.json({ ok: true });
+});
+
+/**
+ * Conferir itens sem alterar valor nenhum.
+ *
+ * Nasceu do primeiro uso real: a contadora abriu as notas, conferiu item a item,
+ * concordou com o que o motor tinha preenchido — e o sistema entendeu que ela não
+ * tinha feito nada, porque nenhum valor mudou. Todas as notas voltaram como
+ * "a revisar". Concordar é a ação mais comum que ela faz, e precisava existir.
+ */
+app.post('/api/notas/:id/conferir', async (c) => {
+  const sessao = c.get('sessao');
+  exigir(sessao, 'notas.visualizar');
+
+  const corpo = z
+    .object({ itens: z.array(z.string()).max(500).optional() })
+    .parse(await c.req.json().catch(() => ({})));
+
+  const repo = c.get('repo');
+  const r = await repo.obterNotaComItens(c.req.param('id'));
+  if (!r) return c.json({ erro: 'nota não encontrada' }, 404);
+
+  // Sem lista = a nota inteira.
+  const ids = corpo.itens ?? r.itens.map((i: any) => i.id);
+  const conferidos = await repo.conferirItens(r.nota.id, ids);
+
+  return c.json({ ok: true, conferidos });
+});
+
+/** Desfaz a conferência de um item — o "me arrependi, quero olhar de novo". */
+app.post('/api/itens/:id/desconferir', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  await c.get('repo').desconferirItem(c.req.param('id'));
   return c.json({ ok: true });
 });
 
