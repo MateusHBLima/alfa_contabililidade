@@ -36,3 +36,49 @@ describe('tela: helpers compartilhados', () => {
     }
   });
 });
+
+/**
+ * Permissão sem rota que a exija é decoração.
+ *
+ * O administrador marca "pode apagar regra" num papel, entrega para alguém, e
+ * nada acontece — nem para liberar, nem para impedir. A caixinha parece um
+ * controle e não controla. Foi assim que `regras.fixar` ficou: qualquer pessoa
+ * que pudesse editar o CFOP de um item podia, de quebra, fixar o padrão do
+ * fornecedor inteiro.
+ *
+ * Este teste não exige que tudo esteja pronto — exige que a dívida seja
+ * declarada. Permissão nova sem rota quebra a suíte; permissão que já se sabe
+ * pendente entra na lista abaixo, com motivo.
+ */
+describe('catálogo de permissões x rotas', () => {
+  const SERVIDOR = ['../src/index.ts', '../src/db/repo.ts', '../src/rules/campos.ts']
+    .map((f) => readFileSync(new URL(f, import.meta.url), 'utf8'))
+    .join('\n');
+
+  const CATALOGO = readFileSync(new URL('../src/auth/permissoes.ts', import.meta.url), 'utf8');
+
+  /** Ainda sem rota, de propósito e com data para resolver. */
+  const PENDENTES = new Set([
+    // Precisam de endpoint novo: hoje as regras só podem ser lidas.
+    'regras.aprovar',
+    'regras.apagar',
+    // Desativar cliente ainda não tem rota própria (só apagar, que é outra coisa).
+    'empresas.desativar',
+    // A trilha é gravada a cada alteração e ainda não há como consultá-la.
+    'auditoria.visualizar',
+  ]);
+
+  it('toda permissão do catálogo é exigida por alguma rota', () => {
+    const chaves = [...CATALOGO.matchAll(/^ {2}'([a-z_]+\.[a-z_]+)':/gm)].map((m) => m[1]!);
+    expect(chaves.length).toBeGreaterThan(20);
+
+    const orfas = chaves.filter((k) => !SERVIDOR.includes(`'${k}'`) && !PENDENTES.has(k));
+    expect(orfas, `permissão sem rota que a exija: ${orfas.join(', ')}`).toEqual([]);
+  });
+
+  it('a lista de pendentes não cresce sem alguém reparar', () => {
+    // Se uma pendente foi resolvida, tire-a da lista — o teste avisa.
+    const resolvidas = [...PENDENTES].filter((k) => SERVIDOR.includes(`'${k}'`));
+    expect(resolvidas, `já tem rota, tire de PENDENTES: ${resolvidas.join(', ')}`).toEqual([]);
+  });
+});
