@@ -251,7 +251,12 @@ export type ResumoNota = {
 };
 
 export function resumirNota(
-  porItem: { confianca: Confianca; alertas: Alerta[]; procedencia?: Procedencia }[],
+  porItem: {
+    confianca: Confianca;
+    alertas: Alerta[];
+    procedencia?: Procedencia;
+    revisado?: boolean;
+  }[],
 ): ResumoNota {
   let criticos = 0;
   let atencao = 0;
@@ -267,15 +272,24 @@ export function resumirNota(
     // Só conta como ensinado o que a contabilidade pôs ali, de propósito ou por
     // correção anterior. Chute do perfil nunca entra nesta conta - senão o número
     // que mede o produto mediria o palpite do sistema sobre si mesmo.
-    if (fonte === 'fixada' || fonte === 'aprendida') ensinados += 1;
+    if (fonte === 'fixada' || fonte === 'aprendida' || fonte === 'manual') ensinados += 1;
     // Item sem alerta mas sem conhecimento por tras tambem pede olho: o valor ali
     // e chute do perfil, nao decisao. Contar como tranquilo mentiria no numero que
     // a tela usa para dizer quanto ja veio pronto.
-    const precisaOlho = it.confianca !== 'alta';
+    //
+    // Quem conferiu manda, pelo MESMO criterio de estiloDaLinha: divergencia
+    // critica continua contando, o resto nao. Sem isto o topo da nota contradiz as
+    // proprias linhas - em producao havia uma nota com as 7 linhas dizendo
+    // "Conferido" e a faixa dizendo "7 itens para conferir - 0 de 7 ja prontos".
+    // E a mesma queixa do primeiro uso real, agora vinda do resumo em vez do banco:
+    // a pessoa termina o trabalho e a tela diz que ela nao fez nada.
+    const conferido = it.revisado === true && pior !== 'critico';
+    const precisaOlho = !conferido && it.confianca !== 'alta';
 
     if (it.alertas.some((a) => a.bloqueia)) bloqueia = true;
 
     if (pior === 'critico') criticos += 1;
+    else if (conferido) tranquilos += 1;
     else if (pior === 'atencao' || precisaOlho) atencao += 1;
     else if (pior === 'info') info += 1;
     else tranquilos += 1;
@@ -338,6 +352,8 @@ export type EstiloLinha = {
  *
  *   'fixada'    - a contabilidade mandou que fosse assim, de proposito
  *   'aprendida' - o sistema guardou de uma correcao anterior dela
+ *   'manual'    - alguem digitou ali, nesta nota, e o sistema ainda nao
+ *                 transformou isso em regra que casasse com este item
  *   'perfil'    - chute pelo perfil fiscal da empresa; ninguem ensinou nada
  *   'nenhuma'   - veio do XML do fornecedor, ou esta vazio
  *
@@ -348,7 +364,7 @@ export type EstiloLinha = {
  * invisivel para quem usa.
  */
 export type Procedencia = {
-  fonte: 'fixada' | 'aprendida' | 'perfil' | 'nenhuma';
+  fonte: 'fixada' | 'aprendida' | 'manual' | 'perfil' | 'nenhuma';
   /** quantas vezes a regra ja foi usada; so faz sentido em 'aprendida' */
   usos?: number;
 };
