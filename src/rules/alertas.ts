@@ -60,6 +60,14 @@ export type ContextoAlerta = {
   confianca: Confianca;
   /** a regra que preencheu está marcada como suspeita? */
   regraSuspeita: boolean;
+  /**
+   * A descrição padronizada ainda é a que veio do fornecedor?
+   *
+   * Não impede a linha de ficar pronta — quem decide isso é o CFOP, que é a
+   * decisão fiscal. Mas some da tela seria mentir sobre o que falta, então vira
+   * informação: a linha carrega o aviso sem pedir ação.
+   */
+  descricaoDoFornecedor?: boolean;
   /** desvio de preço aceito antes de alertar (padrão 30%) */
   toleranciaPreco?: number;
 };
@@ -234,6 +242,18 @@ export type ResumoNota = {
   tranquilos: number;
   /** itens preenchidos por conhecimento que a contabilidade ensinou */
   ensinados: number;
+  /**
+   * Itens cuja descrição ainda é a que o fornecedor escreveu.
+   *
+   * Não trava nada — quem decide se a linha está pronta é o CFOP, que é a
+   * decisão fiscal. Mas some da tela seria mentir sobre o que falta.
+   *
+   * Vive no resumo e não na linha de propósito: medido nas notas reais da ALFA,
+   * 38 de 38 itens estavam nesta situação. Um aviso que aparece em 100% das
+   * linhas não informa, só ensina a pessoa a ignorar aviso — e aí ele deixa de
+   * funcionar nas três linhas em que importava.
+   */
+  semDescricaoPadrao: number;
   bloqueiaExportacao: boolean;
   /** frase única para o topo da tela */
   chamada: string;
@@ -256,6 +276,8 @@ export function resumirNota(
     alertas: Alerta[];
     procedencia?: Procedencia;
     revisado?: boolean;
+    /** a descrição ainda é a do fornecedor? */
+    descricaoDoFornecedor?: boolean;
   }[],
 ): ResumoNota {
   let criticos = 0;
@@ -265,6 +287,7 @@ export function resumirNota(
   let bloqueia = false;
 
   let ensinados = 0;
+  let semDescricaoPadrao = 0;
 
   for (const it of porItem) {
     const pior = severidadeMaxima(it.alertas);
@@ -273,6 +296,7 @@ export function resumirNota(
     // correção anterior. Chute do perfil nunca entra nesta conta - senão o número
     // que mede o produto mediria o palpite do sistema sobre si mesmo.
     if (fonte === 'fixada' || fonte === 'aprendida' || fonte === 'manual') ensinados += 1;
+    if (it.descricaoDoFornecedor) semDescricaoPadrao += 1;
     // Item sem alerta mas sem conhecimento por tras tambem pede olho: o valor ali
     // e chute do perfil, nao decisao. Contar como tranquilo mentiria no numero que
     // a tela usa para dizer quanto ja veio pronto.
@@ -288,10 +312,18 @@ export function resumirNota(
 
     if (it.alertas.some((a) => a.bloqueia)) bloqueia = true;
 
+    if (pior === 'info') info += 1;
+
+    // `info` e etiqueta, nao gaveta. Um aviso informativo nao pede acao
+    // (`bloqueia: false`, severidade `info`), entao o item continua contando
+    // como pronto. Antes ele saia da conta, e com o aviso de descricao pendente
+    // - que vale para quase todo item ainda nao padronizado - isso passaria a
+    // dizer "2 itens para conferir - 0 de 5 ja prontos" numa nota com 3 itens
+    // resolvidos. E a mesma contradicao entre o topo e as linhas que ja foi
+    // corrigida uma vez hoje.
     if (pior === 'critico') criticos += 1;
     else if (conferido) tranquilos += 1;
     else if (pior === 'atencao' || precisaOlho) atencao += 1;
-    else if (pior === 'info') info += 1;
     else tranquilos += 1;
   }
 
@@ -318,7 +350,7 @@ export function resumirNota(
 
   return {
     totalItens: total, criticos, atencao, info, tranquilos, ensinados,
-    bloqueiaExportacao: bloqueia, chamada, aprendizado,
+    semDescricaoPadrao, bloqueiaExportacao: bloqueia, chamada, aprendizado,
   };
 }
 
