@@ -1,4 +1,4 @@
-/* Planee Fiscal — cliente.
+/* Alfa Fiscal — cliente.
  *
  * Sem framework e sem passo de build: o protótipo era assim, o app é pequeno, e uma
  * dependência a menos é uma coisa a menos para quebrar num deploy.
@@ -19,6 +19,7 @@ const estado = {
   demo: null,   // par de teste do modo local, quando /api/local responde
   desafioMfa: null,
   competencia: '',
+  competencias: [],
   notas: [],
   notaAberta: null,
   filtro: 'todos',
@@ -470,6 +471,10 @@ $('#sel-empresa').addEventListener('change', async (e) => {
   estado.empresaId = e.target.value;
   estado.notaAberta = null;
   marcarEscopo();
+  // Competencia e recorte da empresa ANTERIOR. Levar "setembro/2026" para uma
+  // empresa que so tem notas de 2025 devolveria lista vazia sem explicacao.
+  estado.competencia = '';
+  await carregarCompetencias();
   // Trocar de empresa nao pode deixar na tela a lista da empresa anterior.
   const aberta = ['vFornecedores', 'vRegras']
     .find((v) => !$('#' + v).classList.contains('hidden'));
@@ -478,10 +483,85 @@ $('#sel-empresa').addEventListener('change', async (e) => {
   await carregarNotas();
 });
 
-$('#sel-competencia').addEventListener('change', async (e) => {
-  estado.competencia = e.target.value;
-  await carregarNotas();
+/**
+ * Ano e mes, nesta ordem, porque e assim que a contadora procura: primeiro o
+ * exercicio, depois a competencia. Uma empresa com 200 notas nao se acha numa
+ * lista unica - foi o proprio pedido dela, falando de "empresas aqui que sao
+ * 200 notas e que a gente tambem nao vai fazer tudo no mesmo dia".
+ *
+ * As opcoes vem de /competencias, NAO das notas ja filtradas. Antes elas saiam
+ * do resultado da busca, e o seletor se destruia sozinho: escolhia setembro, a
+ * busca voltava so com setembro, o seletor era remontado a partir dela, e
+ * agosto sumia da lista. Quem nao descobrisse que precisava voltar em "todas"
+ * concluia que as notas de agosto tinham sumido do sistema.
+ */
+$('#sel-ano').addEventListener('change', async () => {
+  desenharMeses();
+  await aplicarCompetencia();
 });
+
+$('#sel-mes').addEventListener('change', aplicarCompetencia);
+
+async function aplicarCompetencia() {
+  const ano = $('#sel-ano').value;
+  const mes = $('#sel-mes').value;
+  // Mes sem ano nao existe como filtro: "setembro" de qual exercicio?
+  estado.competencia = ano && mes ? `${ano}-${mes}` : ano || '';
+  await carregarNotas();
+}
+
+const MESES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
+  'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+
+/** [{competencia:'2026-09', notas:4}] da empresa inteira, nao do filtro. */
+async function carregarCompetencias() {
+  if (!estado.empresaId) return;
+  try {
+    estado.competencias = await api(`/api/empresas/${estado.empresaId}/competencias`);
+  } catch {
+    estado.competencias = [];
+  }
+  desenharAnos();
+  desenharMeses();
+}
+
+function desenharAnos() {
+  const sel = $('#sel-ano');
+  const anos = [...new Set(estado.competencias.map((c) => c.competencia.slice(0, 4)))].sort().reverse();
+  const contar = (a) => estado.competencias
+    .filter((c) => c.competencia.startsWith(a))
+    .reduce((s, c) => s + c.notas, 0);
+  const atual = sel.value;
+  sel.innerHTML = '<option value="">todos</option>' +
+    anos.map((a) => `<option value="${a}">${a} (${contar(a)})</option>`).join('');
+  sel.value = anos.includes(atual) ? atual : '';
+}
+
+function desenharMeses() {
+  const sel = $('#sel-mes');
+  const ano = $('#sel-ano').value;
+  const atual = sel.value;
+
+  // Sem ano escolhido nao ha mes para escolher, e o seletor diz isso em vez de
+  // ficar habilitado e vazio.
+  if (!ano) {
+    sel.innerHTML = '<option value="">escolha o ano</option>';
+    sel.disabled = true;
+    sel.value = '';
+    return;
+  }
+
+  sel.disabled = false;
+  const doAno = estado.competencias
+    .filter((c) => c.competencia.startsWith(ano))
+    .sort((a, b) => a.competencia.localeCompare(b.competencia));
+  sel.innerHTML = '<option value="">o ano todo</option>' +
+    doAno.map((c) => {
+      const m = c.competencia.slice(5, 7);
+      return `<option value="${m}">${MESES[Number(m) - 1] ?? m} (${c.notas})</option>`;
+    }).join('');
+  sel.value = doAno.some((c) => c.competencia.slice(5, 7) === atual) ? atual : '';
+}
 
 async function iniciar() {
   estado.eu = await api('/api/eu');
@@ -563,6 +643,8 @@ async function enviar(arquivos) {
           return `${marca} ${a.arquivo}  ${extra}`;
         })
         .join('\n');
+    // Nota nova pode trazer competencia nova: o seletor tem que saber dela.
+    await carregarCompetencias();
     await carregarNotas();
   } catch (e) {
     log.textContent = 'falhou: ' + e.message;
@@ -572,19 +654,10 @@ async function enviar(arquivos) {
 
 async function carregarNotas() {
   if (!estado.empresaId) return;
+  if (estado.competencias.length === 0) await carregarCompetencias();
   const q = estado.competencia ? `?competencia=${estado.competencia}` : '';
   estado.notas = await api(`/api/empresas/${estado.empresaId}/notas${q}`);
   renderNotas();
-  atualizarCompetencias();
-}
-
-function atualizarCompetencias() {
-  const comps = [...new Set(estado.notas.map((n) => n.competencia).filter(Boolean))].sort().reverse();
-  const sel = $('#sel-competencia');
-  const atual = sel.value;
-  sel.innerHTML = '<option value="">todas</option>' +
-    comps.map((c) => `<option value="${c}">${c.split('-').reverse().join('/')}</option>`).join('');
-  sel.value = atual;
 }
 
 function renderNotas() {

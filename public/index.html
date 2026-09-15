@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Planee Fiscal</title>
+<title>Alfa Fiscal</title>
 <link rel="stylesheet" href="/estilo.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
 <!-- ============================================================ LOGIN -->
 <div id="tela-login" class="login-wrap">
   <form class="login-card" id="form-login">
-    <div class="logo"><span class="mark">PF</span> Planee Fiscal</div>
+    <div class="logo"><span class="mark">AF</span> Alfa Fiscal</div>
     <p class="sub">Tratamento de NF-e de entrada</p>
     <div id="login-erro" class="login-erro hidden"></div>
     <div class="campo">
@@ -67,7 +67,7 @@
   <!-- Esqueci a senha. Sem serviço de e-mail, o pedido vai para a tela de
        usuários e um administrador entrega a senha provisória. -->
   <form class="login-card hidden" id="form-esqueci">
-    <div class="logo"><span class="mark">PF</span> Planee Fiscal</div>
+    <div class="logo"><span class="mark">AF</span> Alfa Fiscal</div>
     <p class="sub">Esqueci minha senha</p>
     <div id="esqueci-erro" class="login-erro hidden"></div>
     <div id="esqueci-ok" class="hidden">
@@ -94,7 +94,7 @@
   <!-- Cadastro. A conta nasce pendente: existe, tem senha, e não faz nada até
        um administrador liberar. -->
   <form class="login-card hidden" id="form-cadastro">
-    <div class="logo"><span class="mark">PF</span> Planee Fiscal</div>
+    <div class="logo"><span class="mark">AF</span> Alfa Fiscal</div>
     <p class="sub">Pedir acesso</p>
     <div id="cadastro-erro" class="login-erro hidden"></div>
     <div id="cadastro-ok" class="hidden">
@@ -139,8 +139,8 @@
 <div id="tela-app" class="app hidden">
   <aside class="side">
     <div class="brand">
-      <div class="logo"><span class="mark">PF</span> Planee Fiscal</div>
-      <small>ALFA Contabilidade</small>
+      <div class="logo"><span class="mark">AF</span> Alfa Fiscal</div>
+      <small>NF-e de entrada</small>
     </div>
     <nav id="nav">
       <div class="navlabel">Escrituração</div>
@@ -182,8 +182,12 @@
         <select id="sel-empresa" style="min-width:280px"></select>
       </div>
       <div>
-        <label class="fl" for="sel-competencia">Competência</label>
-        <select id="sel-competencia"><option value="">todas</option></select>
+        <label class="fl" for="sel-ano">Ano</label>
+        <select id="sel-ano"><option value="">todos</option></select>
+      </div>
+      <div>
+        <label class="fl" for="sel-mes">Mês</label>
+        <select id="sel-mes"><option value="">todos</option></select>
       </div>
       <div class="who"><b id="usuario-nome">—</b><span id="usuario-email"></span></div>
     </div>
