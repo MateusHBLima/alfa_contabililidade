@@ -353,3 +353,8 @@ td.vazio .btn{display:block;margin:10px auto 0}
    placar de aprendizado, porque é o que falta — e o que falta ali não pede
    ação imediata, só não pode sumir. */
 .placar.sutil{color:var(--muted-2);margin-top:-10px}
+
+/* "É sempre assim": oferta discreta, ao lado do CFOP. Não compete com o que
+   pede ação — é atalho para quem já sabe, não instrução para quem não sabe. */
+.btn.sm.fixar{margin-top:4px;font-size:10.5px;padding:1px 7px;color:var(--accent)}
+.btn.sm.fixar:hover{background:var(--accent-soft);border-color:var(--accent)}

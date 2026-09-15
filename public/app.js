@@ -921,6 +921,8 @@ function linhaItem(i) {
       <input type="text" class="cfop" maxlength="4" value="${esc(i.cfop_novo ?? '')}"
              data-item="${i.id}" data-campo="cfop">
       ${proc}
+      ${podeFixar(i) ? `<button class="btn sm sutil fixar" data-fixar="${i.id}"
+         title="Faz deste CFOP o padrão deste produto deste fornecedor. Vale a partir da próxima nota, e já nasce confiável — sem esperar as próximas confirmações.">☆ é sempre assim</button>` : ''}
     </td>
     <td class="num">${moeda(i.valor_total)}</td>
     <td>
@@ -933,6 +935,25 @@ function linhaItem(i) {
         : `<button class="btn sm ok" data-conferir="${i.id}">✓ Conferido</button>`}
     </td>
   </tr>`;
+}
+
+/**
+ * Quando oferecer o "é sempre assim".
+ *
+ * So faz sentido com CFOP preenchido - fixar vazio nao fixa nada - e nao faz
+ * sentido no que JA e padrao fixado, senao o botao vira enfeite que nao muda
+ * nada quando clicado.
+ *
+ * O sistema ja aprende de toda correcao, sem botao nenhum. A diferenca aqui e
+ * que a regra nasce VERDE: normalmente ela nasce amarela de proposito (ver uma
+ * vez nao e saber) e so amadurece depois de algumas confirmacoes, o que na
+ * pratica leva umas quatro notas. Este botao e a contadora dizendo "tenho
+ * certeza" e pulando essa fila - decisao dela, nao do sistema.
+ */
+function podeFixar(i) {
+  if (!pode('regras.fixar')) return false;
+  if (!String(i.cfop_novo ?? '').trim()) return false;
+  return i.procedencia?.fonte !== 'fixada';
 }
 
 /**
@@ -1041,7 +1062,43 @@ document.addEventListener('click', (ev) => {
   if (c) return conferirItens([c.dataset.conferir]);
   const d = ev.target.closest('[data-desconferir]');
   if (d) return desconferirItem(d.dataset.desconferir);
+  const f = ev.target.closest('[data-fixar]');
+  if (f) return fixarProduto(f.dataset.fixar);
 });
+
+/**
+ * "É sempre assim": o CFOP daquela linha vira o padrão daquele produto.
+ *
+ * Escopo deliberadamente estreito - AQUELE produto, DAQUELE fornecedor. Nao
+ * toca em nenhum outro item da nota, nao mexe no padrao do fornecedor inteiro,
+ * e nao carimba tudo que compartilha o NCM. Quem quer o fornecedor inteiro tem
+ * outro botao, com outro aviso.
+ */
+async function fixarProduto(itemId) {
+  const i = (estado.notaAberta?.itens ?? []).find((x) => x.id === itemId);
+  if (!i) return;
+  const cfop = String(i.cfop_novo ?? '').trim();
+  if (!cfop) return alerta('Preencha o CFOP antes de salvar como padrão.');
+
+  const nome = i.x_prod_novo || i.x_prod_original || 'este produto';
+  if (!confirm(
+    `Salvar CFOP ${cfop} como padrão de:\n\n${nome}\n\n` +
+    'Vale só para este produto deste fornecedor. A próxima nota já vem com ' +
+    'ele preenchido e marcado como padrão seu.\n\n' +
+    'Não altera nenhum outro item desta nota.',
+  )) return;
+
+  try {
+    await api(`/api/itens/${itemId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: cfop }], fixar: true }),
+    });
+    avisarSalvo('Padrão salvo');
+    await recarregarNota();
+  } catch (e) {
+    alerta('Não consegui salvar o padrão: ' + e.message);
+  }
+}
 
 $('#btn-conferir-visiveis').addEventListener('click', () => {
   const pendentes = itensVisiveis().filter((i) => !i.revisado);
