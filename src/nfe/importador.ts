@@ -181,9 +181,25 @@ async function importarUma(
       sug[campo] = sugerir(campo, item, doItem, contexto);
     }
 
-    // Verde se tudo que importa veio de regra específica e provada.
+    // Quem decide se a linha esta pronta e o CFOP.
+    //
+    // Antes exigia CFOP *e* descricao no verde, e isso tornava o verde quase
+    // inalcancavel: a contadora mandava fixar o padrao do fornecedor - a ordem
+    // mais forte que o sistema aceita - e a linha continuava dizendo "Conferir"
+    // na nota seguinte, e na outra, para sempre. Do ponto de vista dela, fixar
+    // nao fazia nada.
+    //
+    // A assimetria e proposital e e fiscal: o CFOP de entrada e a DECISAO
+    // tributaria, e errar nele tem consequencia no cliente do cliente. A
+    // descricao padronizada e conveniencia de escrituracao - quando ninguem
+    // ensinou, o XML corrigido sai com a descricao do proprio fornecedor, que e
+    // exatamente o que ja acontecia. Nao se perde nada; deixa-se de mentir sobre
+    // o que falta.
+    //
+    // A descricao pendente nao some da tela: vira o alerta `descricao_padrao`,
+    // informativo, que a linha carrega sem pedir acao.
     const confianca =
-      sug['cfop']!.confianca === 'alta' && sug['descricao']!.confianca === 'alta'
+      sug['cfop']!.confianca === 'alta'
         ? 'alta'
         : sug['cfop']!.regraId || sug['descricao']!.regraId
           ? 'media'
