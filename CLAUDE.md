@@ -110,7 +110,9 @@ mais é derivado e pode ser reconstruído a partir dele.
 - O sistema **sugere**; quem decide é a contabilidade (cláusulas 3.1 "d" e 9.4 do contrato).
 - Toda sugestão mostra **de onde veio** — qual regra, qual nível, quantas vezes usada.
 - O sistema **não chuta imposto**: campo de escrituração sem regra aprendida fica vazio.
-- **Linha certa não ganha cor.** Destaque só para o que precisa de ação.
+- **Linha certa não ganha cor.** Destaque só para o que precisa de ação. Mas
+  linha certa **ganha crédito**: a marca de procedência ("padrão seu", "vocês
+  ensinaram") é calma de propósito — dá crédito sem pedir atenção.
 - Erro em silêncio é pior que erro barulhento. Na dúvida, bloqueie e avise.
 
 ---
@@ -250,6 +252,9 @@ Cada uma custou uma decisão. Nenhuma se rompe sem que este arquivo mude primeir
    `DELETE`.
 9. **O campo `origem` da auditoria distingue** "o humano digitou" de "a regra sugeriu e o
    humano confirmou" de "a regra preencheu e ninguém olhou".
+9b. **Gravidade e procedência são campos separados.** `estilo` diz se a linha
+   precisa de ação; `procedencia` diz quem pôs o valor ali. A tela desenha os
+   dois, sempre. Fundir os dois esconde o aprendizado — ver §9.
 10. **Permissão exigida por um campo tem de existir no catálogo e ser concedida por algum
     papel.** Há teste garantindo.
 11. **Toda consulta é escopada por tenant e pelo recorte de empresas do usuário.**
@@ -317,6 +322,20 @@ resultado, e nos meus dois primeiros testes ele foi diferente. **Lição:** duas
 assíncronas escrevendo no mesmo campo é corrida, não bug intermitente — o conserto é uma
 função só, chamada pelas duas, e não um `setTimeout`. Verificado rodando o carregamento
 três vezes seguidas.
+
+**O trabalho da contadora era invisível na tela.** Ela pediu, no primeiro uso
+real: *"se tivesse um jeito de ele ir aparecendo de outra cor o que eu já fiz"*.
+A tela sabia a origem de cada preenchimento — `regra:<id>`, `perfil`,
+`importacao` — e jogava tudo no mesmo "Pronto ✓". O padrão que ela fixou e o
+chute do perfil chegavam com a mesma cara. **A tentativa errada foi pôr a
+procedência dentro do estado da linha**, e rodar o caminho inteiro mostrou por
+que não funciona: regra recém-criada nasce amarela de propósito (invariante 5) e
+a confiança do item exige CFOP *e* descrição — na prática o verde só chega na
+**quarta** nota. Se a marca "veio de você" morasse no estado, ela quase nunca
+apareceria. **Lição:** *o que é grave* e *quem pôs aquilo ali* são dois eixos
+independentes. Amarrar os dois num campo só faz um deles sumir, e some justo o
+que dá sentido ao produto. `procedencia` viaja separada de `estilo`, e a tela
+desenha a marca em toda linha, inclusive nas que ainda pedem conferência.
 
 **O catálogo de permissões divergiu entre o TypeScript e o SQL.** Os campos de escrituração
 exigiam `notas.editar_escrituracao`, que não existia no catálogo — a API teria bloqueado a
