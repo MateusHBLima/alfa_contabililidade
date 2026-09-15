@@ -119,6 +119,19 @@ describe('a tela desenha tudo que o servidor manda', () => {
     }
   });
 
+  it('filtro que não casa nada diz o porquê e oferece a volta', () => {
+    // Visto em produção: nota com 7 itens conferidos, filtro "Prontos", tela em
+    // branco. Sem erro, sem mensagem — a mesma forma do bug do `pode()`: a tela
+    // não quebra, ela mente calada, e quem usa conclui que perdeu o trabalho.
+    expect(APP).toContain('lista.length === 0');
+    expect(APP).toContain('limpar-filtro-itens');
+    for (const f of ['atencao', 'novo', 'pronto', 'conferido']) {
+      expect(APP, `filtro "${f}" sem mensagem de vazio`).toMatch(
+        new RegExp(`${f}:\\s*'`),
+      );
+    }
+  });
+
   it('o filtro "Prontos" não esconde o que o sistema acertou sozinho', () => {
     const filtro = APP.match(/estado\.filtro === 'pronto'\) return ([^;]+);/)!;
     for (const e of ['pronto', 'padrao', 'aprendido']) {
