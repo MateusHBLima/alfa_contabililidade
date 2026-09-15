@@ -1631,6 +1631,12 @@ app.get('/api/empresas/:id/notas', async (c) =>
   ),
 );
 
+/** As competências que a empresa tem, para os seletores de ano e mês. */
+app.get('/api/empresas/:id/competencias', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  return c.json(await c.get('repo').competenciasDaEmpresa(c.req.param('id')));
+});
+
 /**
  * A nota com os itens, os alertas de divergência e o resumo do topo da tela.
  *
