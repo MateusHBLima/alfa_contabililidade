@@ -1496,6 +1496,121 @@ describe('permissões por verbo e administração', () => {
     expect((await req('/api/usuarios', {}, ck2)).status).toBe(403);
     expect((await req('/api/permissoes', {}, ck2)).status).toBe(403);
   });
+
+  /* A contadora, depois do primeiro uso real: "se tivesse um jeito de ele ir
+     aparecendo de outra cor o que eu já fiz". O que ela quis dizer é isto —
+     a nota seguinte tem que mostrar o que veio DELA, separado do que o sistema
+     chutou. Sem este teste, "aprendido" e "chute do perfil" continuam saindo do
+     endpoint com a mesma cara, e nenhum teste de função isolada pega, porque o
+     que erra é a composição: a origem mora no item, a ficha da regra mora em
+     outra tabela, e a decisão de estilo mora num terceiro arquivo. */
+  it('na segunda nota, a tela sabe o que veio da contadora e o que é chute do perfil', async () => {
+    const empresaId = await criarEmpresa();
+    await subirNota(empresaId);
+
+    // Ela corrige o item 1 e ensina o sistema.
+    const primeira = db.consultar('SELECT id FROM notas ORDER BY criado_em')[0].id;
+    const itens1 = await (await req(`/api/notas/${primeira}`)).json() as any;
+    const item1 = itens1.itens[0];
+
+    // Ensina os DOIS campos que decidem a confiança do item. Ensinar só o CFOP
+    // deixa a linha amarela para sempre, porque a confiança exige CFOP e
+    // descrição — coisa que só aparece rodando o caminho inteiro.
+    const ENSINADOS = [
+      { campo: 'cfop', valor: '1403' },
+      { campo: 'descricao', valor: 'CHOCOLATE AO LEITE POTE 200G' },
+    ];
+    const patch = await req(`/api/itens/${item1.id}`, {
+      method: 'PATCH', body: JSON.stringify({ mudancas: ENSINADOS }),
+    });
+    expect(patch.status).toBe(200);
+
+    // Competência seguinte: mesma mercadoria, nota nova.
+    await subirNota(empresaId, outraNota(XML, '55'));
+    const segundaId = db.consultar(
+      'SELECT id FROM notas WHERE chave = ?', parseNFe(outraNota(XML, '55')).chave,
+    )[0].id;
+
+    const corpo = await (await req(`/api/notas/${segundaId}`)).json() as any;
+    const [a, b] = corpo.itens;
+
+    // O item que ela ensinou volta MARCADO como vindo dela — e mesmo assim ainda
+    // pede conferência, porque regra vista uma vez só nasce amarela (invariante 5:
+    // "ver uma vez não é saber"). São dois eixos diferentes, e é justamente por
+    // isso que a procedência não pode viver só dentro do estado da linha: senão
+    // tudo que ela ensinou some da tela até a terceira nota.
+    expect(a.procedencia.fonte).toBe('aprendida');
+    expect(a.estilo.estado).toBe('conferir');
+
+    // O que ninguém ensinou continua sendo chute do perfil — e continua pedindo
+    // conferência. Este é o bug que já apareceu uma vez: item desconhecido
+    // chegando como "Pronto" é o rótulo que faz pular justo a linha certa.
+    expect(b.procedencia.fonte).toBe('perfil');
+    expect(b.estilo.estado).toBe('conferir');
+    expect(b.estilo.destacar).toBe(true);
+
+    // E o topo da nota conta a história em número.
+    expect(corpo.resumo.ensinados).toBe(1);
+    expect(corpo.resumo.aprendizado).toContain('vocês já ensinaram');
+
+    // --- ela confere, e a regra vai ganhando lastro -----------------------
+    // Regra com um acerto só ainda não é verde: a confiança sobe para 0,67 e o
+    // corte é 0,70. Isso é a invariante 5 funcionando ("ver uma vez não é saber"),
+    // e tem consequência de produto: o verde chega na QUARTA nota, não na segunda.
+    // Enquanto isso a procedência é a única coisa que mostra que ela ensinou —
+    // por isso ela não pode viver só dentro do estado da linha.
+    let ultimo = a;
+    for (const serie of ['57', '58']) {
+      const ok = await req(`/api/itens/${ultimo.id}`, {
+        method: 'PATCH', body: JSON.stringify({ mudancas: ENSINADOS }),
+      });
+      expect(ok.status).toBe(200);
+
+      const xml = outraNota(XML, serie);
+      await subirNota(empresaId, xml);
+      const id = db.consultar('SELECT id FROM notas WHERE chave = ?', parseNFe(xml).chave)[0].id;
+      const c = await (await req(`/api/notas/${id}`)).json() as any;
+      ultimo = c.itens[0];
+      expect(ultimo.procedencia.fonte).toBe('aprendida');
+    }
+
+    // Quarta nota: a regra provou histórico e a linha finalmente descansa.
+    expect(ultimo.estilo.estado).toBe('aprendido');
+    expect(ultimo.estilo.destacar).toBe(false);
+    expect(ultimo.estilo.rotulo).toContain('Aprendido');
+  });
+
+  it('o padrão que ela mandou fixar chega como "Padrão seu", não como "Aprendido"', async () => {
+    const empresaId = await criarEmpresa();
+    await subirNota(empresaId);
+
+    const primeira = db.consultar('SELECT id FROM notas ORDER BY criado_em')[0].id;
+    const corpo1 = await (await req(`/api/notas/${primeira}`)).json() as any;
+
+    const patch = await req(`/api/itens/${corpo1.itens[0].id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1403' }], fixar: true }),
+    });
+    expect(patch.status).toBe(200);
+
+    await subirNota(empresaId, outraNota(XML, '56'));
+    const segundaId = db.consultar(
+      'SELECT id FROM notas WHERE chave = ?', parseNFe(outraNota(XML, '56')).chave,
+    )[0].id;
+
+    const corpo = await (await req(`/api/notas/${segundaId}`)).json() as any;
+
+    // Fixar é decisão, não palpite: a regra nasce verde na hora, sem esperar
+    // histórico. A procedência do item diz isso já na nota seguinte.
+    expect(corpo.itens[0].procedencia.fonte).toBe('fixada');
+    expect(corpo.itens[0].cfop_novo).toBe('1403');
+
+    // E mesmo assim a LINHA ainda pede conferência, porque a confiança do item
+    // exige CFOP e descrição, e a descrição ninguém ensinou ainda. Ou seja: se a
+    // marca "veio de você" morasse só dentro do estado da linha, ela quase nunca
+    // apareceria — que é exatamente o buraco que a contadora relatou.
+    expect(corpo.itens[0].estilo.estado).toBe('conferir');
+  });
 });
 
 describe('cadastro público com aprovação', () => {

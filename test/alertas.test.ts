@@ -292,3 +292,115 @@ describe('linha conferida por gente', () => {
     expect(estiloDaLinha('alta', critico, true).estado).toBe('bloqueado');
   });
 });
+
+describe('de onde veio o valor — o pedido da contadora no primeiro uso real', () => {
+  // "Se tivesse um jeito de ele ir aparecendo de outra cor o que eu já fiz."
+  // Ela não estava pedindo enfeite: sem isto o padrão que ela fixou e o chute do
+  // perfil da empresa chegam na tela com a mesma cara, e o produto inteiro — que
+  // é aprender com ela — fica invisível para quem usa.
+
+  it('o que ela mandou fixar aparece como padrão dela', () => {
+    const e = estiloDaLinha('alta', [], false, { fonte: 'fixada' });
+    expect(e.estado).toBe('padrao');
+    expect(e.rotulo).toBe('Padrão seu');
+  });
+
+  it('o que o sistema aprendeu das correções dela diz quantas vezes já serviu', () => {
+    const e = estiloDaLinha('alta', [], false, { fonte: 'aprendida', usos: 3 });
+    expect(e.estado).toBe('aprendido');
+    expect(e.rotulo).toBe('Aprendido · 3x');
+  });
+
+  it('aprendido uma vez só não vira "1x" — fica só "Aprendido"', () => {
+    expect(estiloDaLinha('alta', [], false, { fonte: 'aprendida', usos: 1 }).rotulo)
+      .toBe('Aprendido');
+  });
+
+  it('nenhum dos dois ganha destaque — o prêmio por ensinar é a linha parar de pedir atenção', () => {
+    expect(estiloDaLinha('alta', [], false, { fonte: 'fixada' }).destacar).toBe(false);
+    expect(estiloDaLinha('alta', [], false, { fonte: 'aprendida', usos: 9 }).destacar).toBe(false);
+  });
+
+  it('e os dois são distinguíveis sem cor, como todo estado daqui', () => {
+    const rotulos = new Set([
+      estiloDaLinha('alta', [], false, { fonte: 'fixada' }).rotulo,
+      estiloDaLinha('alta', [], false, { fonte: 'aprendida', usos: 2 }).rotulo,
+      estiloDaLinha('alta', [], false, { fonte: 'perfil' }).rotulo,
+    ]);
+    expect(rotulos.size).toBe(3);
+  });
+
+  // ---- o que a procedência NÃO pode fazer
+
+  it('chute do perfil jamais vira "padrão" ou "aprendido" — ninguém ensinou nada ali', () => {
+    // O perfil sai do motor com confiança "media", e media nunca chega ao fim da
+    // função. Foi assim que o pior bug da tela nasceu: item que o sistema não
+    // conhecia aparecendo como Pronto, que é justo o rótulo que faz pular a linha.
+    const e = estiloDaLinha('media', [], false, { fonte: 'perfil' });
+    expect(e.estado).toBe('conferir');
+    expect(e.destacar).toBe(true);
+  });
+
+  it('procedência não silencia divergência crítica, mesmo em regra fixada', () => {
+    const a = detectarAlertas(item, ctx({ cfopEntrada: null }));
+    expect(estiloDaLinha('alta', a, false, { fonte: 'fixada' }).estado).toBe('bloqueado');
+  });
+
+  it('procedência não sobrepõe produto novo', () => {
+    const a = detectarAlertas(item, ctx({ historico: null }));
+    expect(estiloDaLinha('nenhuma', a, false, { fonte: 'fixada' }).estado).toBe('novo');
+  });
+
+  it('quem conferiu manda: linha revisada continua "Conferido", não vira "Padrão seu"', () => {
+    expect(estiloDaLinha('alta', [], true, { fonte: 'fixada' }).estado).toBe('conferido');
+  });
+
+  it('sem procedência informada, o comportamento antigo continua igual', () => {
+    expect(estiloDaLinha('alta', []).estado).toBe('pronto');
+  });
+});
+
+describe('o placar de aprendizado no topo da nota', () => {
+  const pronto = (fonte: 'fixada' | 'aprendida' | 'perfil') =>
+    ({ confianca: 'alta' as const, alertas: [], procedencia: { fonte } });
+
+  it('conta o que veio do que a contabilidade ensinou', () => {
+    const r = resumirNota([pronto('fixada'), pronto('aprendida'), pronto('fixada')]);
+    expect(r.ensinados).toBe(3);
+    expect(r.aprendizado).toBe('3 de 3 itens vieram do que vocês já ensinaram');
+  });
+
+  it('chute do perfil não entra na conta — senão o número mediria o palpite do sistema sobre si mesmo', () => {
+    const r = resumirNota([
+      pronto('fixada'),
+      { confianca: 'media', alertas: [], procedencia: { fonte: 'perfil' } },
+    ]);
+    expect(r.ensinados).toBe(1);
+    expect(r.aprendizado).toBe('1 de 2 itens vieram do que vocês já ensinaram');
+  });
+
+  it('o placar não mistura as duas contas — juntar "veio de vocês" com "falta você" não fecha', () => {
+    // Um item pode ter vindo do aprendizado E ainda estar pendente de confirmação.
+    // A primeira versão somava as duas coisas e dizia, numa nota de 3 itens,
+    // "2 vieram do que vocês ensinaram · 3 precisam de você". Número que não fecha
+    // derruba a confiança no painel inteiro.
+    const r = resumirNota([pronto('aprendida'), pronto('aprendida'), pronto('perfil')]);
+    expect(r.aprendizado).not.toContain('precisa');
+    expect(r.aprendizado).toBe('2 de 3 itens vieram do que vocês já ensinaram');
+  });
+
+  it('nota sem nada ensinado não anuncia "0 de 12" — é a primeira nota, e isso é normal', () => {
+    const r = resumirNota([{ confianca: 'media', alertas: [], procedencia: { fonte: 'perfil' } }]);
+    expect(r.aprendizado).toBeNull();
+  });
+
+  it('tudo ensinado', () => {
+    const r = resumirNota([pronto('aprendida'), pronto('aprendida')]);
+    expect(r.aprendizado).toBe('2 de 2 itens vieram do que vocês já ensinaram');
+  });
+
+  it('a chamada antiga não mudou — quem lê o topo continua lendo a mesma coisa', () => {
+    const r = resumirNota([pronto('fixada'), pronto('fixada')]);
+    expect(r.chamada).toContain('Tudo conferido');
+  });
+});

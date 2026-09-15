@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 
 const APP = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 
-const COMPARTILHADOS = ['pode', 'esc', 'moeda', 'dataCurta'];
+const COMPARTILHADOS = ['pode', 'esc', 'moeda', 'dataCurta', 'selinhoProcedencia'];
 
 describe('tela: helpers compartilhados', () => {
   for (const nome of COMPARTILHADOS) {
@@ -80,5 +80,49 @@ describe('catálogo de permissões x rotas', () => {
     // Se uma pendente foi resolvida, tire-a da lista — o teste avisa.
     const resolvidas = [...PENDENTES].filter((k) => SERVIDOR.includes(`'${k}'`));
     expect(resolvidas, `já tem rota, tire de PENDENTES: ${resolvidas.join(', ')}`).toEqual([]);
+  });
+});
+
+
+/**
+ * Estado ou procedência que o servidor emite e a tela não desenha vira linha muda.
+ *
+ * O caso que motivou: `estiloDaLinha` ganhou os estados 'padrao' e 'aprendido',
+ * e o filtro "Prontos" — que comparava com 'pronto' — passaria a ESCONDER
+ * justamente as linhas que o sistema acertou sozinho. Some sem erro, sem log,
+ * sem nada: a pessoa conclui que o sistema não aprendeu.
+ */
+describe('a tela desenha tudo que o servidor manda', () => {
+  const ALERTAS = readFileSync(new URL('../src/rules/alertas.ts', import.meta.url), 'utf8');
+  const CSS = readFileSync(new URL('../public/estilo.css', import.meta.url), 'utf8');
+
+  const entreAspas = (trecho: string) =>
+    [...trecho.matchAll(/'([a-z]+)'/g)].map((m) => m[1]!);
+
+  it('todo estado de linha tem estilo próprio no CSS', () => {
+    const linha = ALERTAS.match(/estado: ([^;]+);/)!;
+    const estados = entreAspas(linha[1]!);
+    expect(estados.length).toBeGreaterThanOrEqual(7);
+
+    const semEstilo = estados.filter((e) => !CSS.includes(`.selo-${e}`));
+    expect(semEstilo, `estado sem selo no CSS: ${semEstilo.join(', ')}`).toEqual([]);
+  });
+
+  it('toda fonte de procedência é desenhada pela tela e tem cor', () => {
+    const bloco = ALERTAS.match(/fonte: ([^;]+);/)!;
+    const fontes = entreAspas(bloco[1]!).filter((f) => f !== 'nenhuma');
+    expect(fontes.sort()).toEqual(['aprendida', 'fixada', 'perfil']);
+
+    for (const f of fontes) {
+      expect(APP, `a tela não trata procedência "${f}"`).toContain(`'${f}'`);
+      expect(CSS, `procedência "${f}" sem cor`).toContain(`.proc-${f}`);
+    }
+  });
+
+  it('o filtro "Prontos" não esconde o que o sistema acertou sozinho', () => {
+    const filtro = APP.match(/estado\.filtro === 'pronto'\) return ([^;]+);/)!;
+    for (const e of ['pronto', 'padrao', 'aprendido']) {
+      expect(filtro[1]!, `filtro Prontos ignora "${e}"`).toContain(`'${e}'`);
+    }
   });
 });
