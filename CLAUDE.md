@@ -245,6 +245,13 @@ Cada uma custou uma decisão. Nenhuma se rompe sem que este arquivo mude primeir
 4. **Exportação com invariante falhando é bloqueada.** Nota corrompida não sai.
 5. **Regra recém-criada nasce amarela.** Ver uma vez não é saber. Verde exige nível
    específico *e* histórico de acerto. Regra genérica nunca chega ao verde.
+5b. **Quem decide se a linha está pronta é o CFOP.** O CFOP de entrada é a decisão
+   tributária; a descrição padronizada é organização do cadastro. Exigir as duas
+   tornava o verde inalcançável — a contadora fixava o padrão do fornecedor, a
+   ordem mais forte que o sistema aceita, e a linha continuava "Conferir" para
+   sempre. O que falta na descrição é informado no **resumo da nota**, nunca por
+   linha: medido em produção, 38 de 38 itens estavam nessa situação, e aviso em
+   100% das linhas não informa.
 6. **O nível 5 (padrão do fornecedor) não aprende sozinho.** Só por pedido explícito.
 7. **Toda escrita de domínio passa pelo repositório**, que grava a trilha. Handler que
    escreve direto no banco é bug, não atalho.
