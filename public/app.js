@@ -847,6 +847,9 @@ function selinhoProcedencia(p) {
     const n = Number(p?.usos ?? 0);
     return `<span class="proc proc-aprendida" title="O sistema guardou isto de uma correção de vocês">✓ vocês ensinaram${n > 1 ? ` · ${n}x` : ''}</span>`;
   }
+  if (fonte === 'manual') {
+    return `<span class="proc proc-manual" title="Alguém digitou este valor nesta nota">✎ preenchido por vocês</span>`;
+  }
   if (fonte === 'perfil') {
     return `<span class="proc proc-perfil" title="Ninguém ensinou este item ainda — o valor é palpite pelo perfil fiscal da empresa">● palpite do perfil</span>`;
   }
