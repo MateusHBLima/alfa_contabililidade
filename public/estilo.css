@@ -358,3 +358,39 @@ td.vazio .btn{display:block;margin:10px auto 0}
    pede ação — é atalho para quem já sabe, não instrução para quem não sabe. */
 .btn.sm.fixar{margin-top:4px;font-size:10.5px;padding:1px 7px;color:var(--accent)}
 .btn.sm.fixar:hover{background:var(--accent-soft);border-color:var(--accent)}
+
+/* ------------------------------------------------- caixas de diálogo
+
+   Substituem `confirm()` e `alert()` do navegador. O motivo não é só estética:
+   a caixa nativa escreve "fiscal.alfa-contabil.com says" em cima do texto, e o
+   Chrome oferece "impedir esta página de criar mais caixas" — se a pessoa marca
+   isso sem ler, o `confirm` passa a devolver false calado e a ação simplesmente
+   não acontece. Confirmação que some em silêncio é pior que nenhuma.
+
+   O movimento segue o arquétipo Corporate: 260ms na entrada desacelerando,
+   160ms na saída acelerando (a saída é mais curta de propósito — o que importa
+   é o que aparece, não o que vai embora), e nenhum exagero. Quem pediu menos
+   movimento no sistema operacional não recebe nenhum. */
+.dialogo-texto{margin:0 0 10px;line-height:1.5}
+.dialogo-texto:last-child{margin-bottom:0}
+.dialogo-texto.sutil{color:var(--muted);font-size:12.5px}
+.dialogo-destaque{
+  margin:0 0 12px;padding:9px 12px;background:var(--surface-2);
+  border-left:3px solid var(--primary);border-radius:0 6px 6px 0;
+  font-weight:600;line-height:1.4;
+}
+.dialogo-lista{margin:0;padding-left:18px;line-height:1.6}
+.dialogo-lista li{margin-bottom:5px}
+.dialogo-lista li:last-child{margin-bottom:0}
+.dialogo-lista li.dialogo-atencao{color:var(--warn)}
+
+.modal-fundo{animation:fundo-entra .2s cubic-bezier(.2,0,0,1)}
+.modal{animation:modal-entra .26s cubic-bezier(.2,0,0,1)}
+@keyframes fundo-entra{from{opacity:0}to{opacity:1}}
+@keyframes modal-entra{
+  from{opacity:0;transform:translateY(8px) scale(.985)}
+  to{opacity:1;transform:none}
+}
+@media (prefers-reduced-motion: reduce){
+  .modal-fundo,.modal{animation:none}
+}

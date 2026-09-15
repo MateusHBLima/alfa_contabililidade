@@ -1081,12 +1081,19 @@ async function fixarProduto(itemId) {
   if (!cfop) return alerta('Preencha o CFOP antes de salvar como padrão.');
 
   const nome = i.x_prod_novo || i.x_prod_original || 'este produto';
-  if (!confirm(
-    `Salvar CFOP ${cfop} como padrão de:\n\n${nome}\n\n` +
-    'Vale só para este produto deste fornecedor. A próxima nota já vem com ' +
-    'ele preenchido e marcado como padrão seu.\n\n' +
-    'Não altera nenhum outro item desta nota.',
-  )) return;
+  const ok = await confirmar({
+    titulo: 'Salvar como padrão deste produto',
+    ok: 'Salvar padrão',
+    corpo: `
+      <p class="dialogo-texto">O CFOP <b>${esc(cfop)}</b> passa a ser o padrão de:</p>
+      <p class="dialogo-destaque">${esc(nome)}</p>
+      <ul class="dialogo-lista">
+        <li>Vale só para este produto <b>deste fornecedor</b></li>
+        <li>A próxima nota já vem com ele preenchido</li>
+        <li>Não altera nenhum outro item desta nota</li>
+      </ul>`,
+  });
+  if (!ok) return;
 
   try {
     await api(`/api/itens/${itemId}`, {
@@ -1126,12 +1133,20 @@ $('#btn-fixar-visiveis').addEventListener('click', async () => {
   }
 
   const semCfop = itensVisiveis().filter((i) => !String(i.cfop_novo ?? '').trim()).length;
-  if (!confirm(
-    `Salvar o CFOP de ${alvos.length} item(ns) como padrão de cada produto?\n\n` +
-    'Cada item guarda o SEU próprio CFOP — nenhum valor é alterado.\n' +
-    'A partir da próxima nota deste fornecedor eles já vêm preenchidos.' +
-    (semCfop > 0 ? `\n\n${semCfop} item(ns) sem CFOP serão pulados.` : ''),
-  )) return;
+  const ok = await confirmar({
+    titulo: 'Salvar o padrão de todos',
+    ok: `Salvar ${alvos.length} padrão(ões)`,
+    corpo: `
+      <p class="dialogo-texto">
+        <b>${alvos.length} item(ns)</b> terão o seu CFOP salvo como padrão daquele produto.
+      </p>
+      <ul class="dialogo-lista">
+        <li>Cada item guarda o <b>seu próprio</b> CFOP — nenhum valor é alterado</li>
+        <li>A partir da próxima nota deste fornecedor eles já vêm preenchidos</li>
+        ${semCfop > 0 ? `<li>${semCfop} item(ns) sem CFOP serão pulados</li>` : ''}
+      </ul>`,
+  });
+  if (!ok) return;
 
   try {
     const r = await api(`/api/notas/${estado.notaAberta.nota.id}/fixar-padrao`, {
@@ -1153,9 +1168,32 @@ async function aplicarEmLote(escopo) {
   if (!estado.notaAberta) return;
 
   const alvos = itensVisiveis();
-  if (escopo === 'fornecedor' &&
-      !confirm(`Fixar o CFOP ${cfop} como padrão deste fornecedor para esta empresa?\n\n` +
-               'Vale para qualquer produto dele, inclusive os que ainda não apareceram.')) return;
+
+  // A caixa antiga falava do padrao futuro e calava sobre o presente: o botao
+  // TAMBEM sobrescreve o CFOP de todos os itens visiveis. Numa nota com CFOPs
+  // misturados isso achata tudo, e quem clicou nao foi avisado.
+  if (escopo === 'fornecedor') {
+    const mudam = alvos.filter((i) => String(i.cfop_novo ?? '').trim() !== cfop);
+    const ok = await confirmar({
+      titulo: 'Fixar o padrão do fornecedor',
+      ok: 'Fixar padrão',
+      perigo: true,
+      corpo: `
+        <p class="dialogo-texto">
+          O CFOP <b>${esc(cfop)}</b> passa a ser o padrão deste fornecedor nesta empresa.
+        </p>
+        <ul class="dialogo-lista">
+          <li>Vale para <b>qualquer produto dele</b>, inclusive os que ainda não apareceram</li>
+          ${mudam.length > 0
+            ? `<li class="dialogo-atencao">E <b>troca o CFOP de ${mudam.length} item(ns)</b> que estão na tela agora</li>`
+            : '<li>Nenhum item da tela muda de valor — todos já estão com este CFOP</li>'}
+        </ul>
+        ${mudam.length > 0 ? `<p class="dialogo-texto sutil">${
+          mudam.slice(0, 4).map((i) => `${esc(String(i.x_prod_original).slice(0, 34))} · ${esc(i.cfop_novo || '—')} → ${esc(cfop)}`).join('<br>')
+        }${mudam.length > 4 ? `<br>e mais ${mudam.length - 4}…` : ''}</p>` : ''}`,
+    });
+    if (!ok) return;
+  }
 
   for (const i of alvos) {
     await api(`/api/itens/${i.id}`, {
@@ -1505,7 +1543,13 @@ async function carregarConvites() {
 
   $$('#tbl-convites button[data-revogar]').forEach((b) =>
     b.addEventListener('click', async () => {
-      if (!confirm('Revogar este convite?\n\nQuem tiver o link para de conseguir entrar por ele.')) return;
+      const ok = await confirmar({
+        titulo: 'Revogar convite',
+        ok: 'Revogar',
+        perigo: true,
+        corpo: '<p class="dialogo-texto">Quem tiver o link para de conseguir entrar por ele.</p>',
+      });
+      if (!ok) return;
       try {
         await api(`/api/convites/${b.dataset.revogar}`, { method: 'DELETE' });
         avisarSalvo('Convite revogado');
@@ -1568,7 +1612,13 @@ async function carregarUsuarios() {
   }
   for (const b of $$('#tbl-usuarios button[data-recusar]')) {
     b.addEventListener('click', async () => {
-      if (!confirm('Recusar este pedido? A conta é apagada e a pessoa pode pedir de novo.')) return;
+      const ok = await confirmar({
+        titulo: 'Recusar pedido de acesso',
+        ok: 'Recusar',
+        perigo: true,
+        corpo: '<p class="dialogo-texto">A conta é apagada. A pessoa pode pedir acesso de novo.</p>',
+      });
+      if (!ok) return;
       try {
         await api(`/api/usuarios/${b.dataset.recusar}/recusar`, { method: 'POST' });
         await carregarUsuarios();
@@ -1580,8 +1630,16 @@ async function carregarUsuarios() {
   // botão não.
   for (const b of $$('#tbl-usuarios button[data-mfa]')) {
     b.addEventListener('click', async () => {
-      if (!confirm('Desligar o segundo fator desta pessoa?\n\n'
-        + 'Ela volta a entrar só com e-mail e senha, e precisa configurar de novo.')) return;
+      const ok = await confirmar({
+        titulo: 'Desligar o segundo fator',
+        ok: 'Desligar',
+        perigo: true,
+        corpo: `
+          <p class="dialogo-texto">Ela volta a entrar só com e-mail e senha.</p>
+          <p class="dialogo-texto sutil">Use quando a pessoa trocou de celular e ficou trancada
+          para fora. Ela precisa configurar o segundo fator de novo depois.</p>`,
+      });
+      if (!ok) return;
       try {
         await api(`/api/usuarios/${b.dataset.mfa}/desativar-mfa`, { method: 'POST' });
         await carregarUsuarios();
@@ -1595,8 +1653,15 @@ async function carregarUsuarios() {
   for (const b of $$('#tbl-usuarios button[data-ativo]')) {
     b.addEventListener('click', async () => {
       const ativar = b.dataset.para === '1';
-      if (!confirm(ativar ? 'Reativar este usuário?'
-        : 'Desativar este usuário? As sessões dele caem na hora.')) return;
+      const ok = await confirmar({
+        titulo: ativar ? 'Reativar usuário' : 'Desativar usuário',
+        ok: ativar ? 'Reativar' : 'Desativar',
+        perigo: !ativar,
+        corpo: ativar
+          ? '<p class="dialogo-texto">A pessoa volta a conseguir entrar.</p>'
+          : '<p class="dialogo-texto">As sessões dela caem na hora, em todos os aparelhos.</p>',
+      });
+      if (!ok) return;
       try {
         await api(`/api/usuarios/${b.dataset.ativo}/ativo`, {
           method: 'POST', body: JSON.stringify({ ativo: ativar }),
@@ -1900,6 +1965,8 @@ async function carregarRegras(suspeitas = false) {
 // ------------------------------------------------------------------ modal
 
 let acaoModal = null;
+/** Chamado quando o modal fecha SEM confirmar. Usado por confirmar(). */
+let aoDesistir = null;
 
 function abrirModal(titulo, html, aoSalvar) {
   $('#modal-titulo').textContent = titulo;
@@ -1917,9 +1984,18 @@ function abrirModal(titulo, html, aoSalvar) {
 function fecharModal() {
   $('#modal-fundo').classList.add('hidden');
   acaoModal = null;
+  const desistiu = aoDesistir;
+  aoDesistir = null;
+  if (desistiu) desistiu();
 }
 
 $('#modal-cancelar').addEventListener('click', fecharModal);
+
+// Esc fecha, como qualquer caixa de dialogo. Sem isto o unico jeito de sair e
+// achar o botao, e a pessoa fica presa quando a janela esta pequena.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !$('#modal-fundo').classList.contains('hidden')) fecharModal();
+});
 $('#modal-ok').addEventListener('click', async () => {
   if (!acaoModal) return fecharModal();
   const btn = $('#modal-ok');
@@ -1934,9 +2010,42 @@ $('#modal-ok').addEventListener('click', async () => {
   }
 });
 
-function alerta(msg) {
-  window.alert(msg);
+/**
+ * Caixas de dialogo da propria tela, no lugar das do navegador.
+ *
+ * `confirm()` e `alert()` nativos foram trocados por estes. O motivo nao e so
+ * estetica, embora ela conte: a caixa do navegador escreve "fiscal.alfa-contabil.com
+ * says" em cima do texto, ignora a tipografia do sistema, e o Chrome oferece
+ * "impedir esta pagina de criar mais caixas" - se a pessoa marcar isso sem ler,
+ * o `confirm` passa a devolver false calado e a acao simplesmente nao acontece,
+ * sem nenhum aviso. Uma confirmacao que some em silencio e pior que nenhuma.
+ *
+ * E havia incoerencia: a tela ja tinha modal proprio (editar cliente, papeis),
+ * e estas caixas passavam por fora dele.
+ */
+function confirmar({ titulo, corpo, ok = 'Confirmar', perigo = false }) {
+  return new Promise((resolve) => {
+    let decidiu = false;
+    abrirModal(titulo, corpo, () => { decidiu = true; resolve(true); });
+    aoDesistir = () => { if (!decidiu) resolve(false); };
+    $('#modal-ok').textContent = ok;
+    $('#modal-ok').classList.toggle('perigo', perigo);
+    $('#modal-ok').focus();
+  });
 }
+
+/** Aviso de uma informacao so, com um botao de fechar. */
+function avisar(msg, titulo = 'Aviso') {
+  return new Promise((resolve) => {
+    abrirModal(titulo, `<p class="dialogo-texto">${esc(msg)}</p>`, () => resolve());
+    aoDesistir = () => resolve();
+    $('#modal-cancelar').classList.add('hidden');
+    $('#modal-ok').textContent = 'Entendi';
+    $('#modal-ok').focus();
+  });
+}
+
+const alerta = avisar;
 
 // ------------------------------------------------------------------ boot
 
