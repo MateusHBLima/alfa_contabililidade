@@ -258,3 +258,37 @@ describe('o bug do "Pronto" — encontrado rodando o sistema de verdade', () => 
     expect(r.tranquilos).toBe(2);
   });
 });
+
+describe('linha conferida por gente', () => {
+  /* A contadora conferiu a nota inteira e a tela continuava dizendo "Conferir"
+     em tudo — como se ela não tivesse feito nada. Quem conferiu manda: a pessoa
+     é a autoridade, não a origem do dado. */
+
+  it('depois de conferida, a linha para de pedir atenção', () => {
+    const semRevisar = estiloDaLinha('nenhuma', []);
+    expect(semRevisar.estado).toBe('conferir');
+
+    const revisada = estiloDaLinha('nenhuma', [], true);
+    expect(revisada.estado).toBe('conferido');
+    expect(revisada.destacar).toBe(false);
+  });
+
+  it('produto novo conferido deixa de ser produto novo na tela', () => {
+    const alertas = [
+      { codigo: 'item_novo', severidade: 'info', titulo: 'Produto novo',
+        detalhe: '', bloqueia: false } as any,
+    ];
+    expect(estiloDaLinha('nenhuma', alertas).estado).toBe('novo');
+    expect(estiloDaLinha('nenhuma', alertas, true).estado).toBe('conferido');
+  });
+
+  it('divergência crítica continua gritando mesmo conferida', () => {
+    // Crítico não fala do preenchimento: fala de algo que mudou no mundo.
+    // Conferir o CFOP não faz o NCM ter voltado ao que era.
+    const critico = [
+      { codigo: 'ncm_mudou', severidade: 'critico', titulo: 'NCM mudou',
+        detalhe: '', bloqueia: false } as any,
+    ];
+    expect(estiloDaLinha('alta', critico, true).estado).toBe('bloqueado');
+  });
+});

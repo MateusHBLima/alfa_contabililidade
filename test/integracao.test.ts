@@ -207,6 +207,63 @@ describe('importar uma nota de verdade', () => {
     expect(db.consultar('SELECT * FROM itens')).toHaveLength(3);
   });
 
+  /* O primeiro uso real: a contadora abriu as notas, conferiu item a item,
+     concordou com o que o motor tinha preenchido — e o sistema entendeu que ela
+     não tinha feito nada, porque nenhum valor mudou. "0 de 38 revisados", todas
+     as notas de volta como "a revisar", trabalho descartado em silêncio.
+
+     Concordar com a sugestão é a ação MAIS COMUM, porque o motor existe para
+     acertar sozinho. Era o caminho mais frequente que não gravava nada. */
+  it('confirmar a sugestão sem mudar valor conta como trabalho', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+
+    const item = db.consultar('SELECT * FROM itens LIMIT 1')[0];
+    expect(item.revisado).toBe(0);
+
+    // Reenvia EXATAMENTE o que já estava lá — é o que a tela manda quando a
+    // pessoa olha, concorda e segue.
+    await repo.alterarItem(item.id, [
+      { campo: 'cfop', valor: item.cfop_novo, origem: 'manual' },
+    ]);
+
+    const depois = db.consultar('SELECT * FROM itens WHERE id = ?', [item.id])[0];
+    expect(depois.revisado).toBe(1);
+    expect(depois.revisado_em).toBeTruthy();
+    // O valor não mudou, então não há evento de alteração — mas há de conferência.
+    expect(depois.cfop_novo).toBe(item.cfop_novo);
+    const trilha = db.consultar("SELECT * FROM auditoria WHERE campo = 'conferido'");
+    expect(trilha.length).toBeGreaterThan(0);
+  });
+
+  it('conferir a nota inteira marca todos os itens e some do "a tratar"', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+    const notaId = db.consultar('SELECT id FROM notas')[0].id;
+    const ids = db.consultar('SELECT id FROM itens').map((i: any) => i.id);
+
+    const marcados = await repo.conferirItens(notaId, ids);
+    expect(marcados).toBe(3);
+
+    const [nota] = await repo.listarNotas(empresaId);
+    expect(nota.itens_revisados).toBe(nota.total_itens);
+
+    // Conferir de novo não conta duas vezes.
+    expect(await repo.conferirItens(notaId, ids)).toBe(0);
+  });
+
+  it('desconferir devolve o item para pendente', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+    const notaId = db.consultar('SELECT id FROM notas')[0].id;
+    const item = db.consultar('SELECT * FROM itens LIMIT 1')[0];
+
+    await repo.conferirItens(notaId, [item.id]);
+    expect(db.consultar('SELECT * FROM itens WHERE id = ?', [item.id])[0].revisado).toBe(1);
+
+    await repo.desconferirItem(item.id);
+    const depois = db.consultar('SELECT * FROM itens WHERE id = ?', [item.id])[0];
+    expect(depois.revisado).toBe(0);
+    expect(depois.revisado_por).toBeNull();
+  });
+
   it('grava nota, itens, fornecedor e o XML no R2', async () => {
     const r = await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'nota.xml', conteudo: XML }]);
 
