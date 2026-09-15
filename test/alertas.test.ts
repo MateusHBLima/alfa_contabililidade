@@ -404,3 +404,51 @@ describe('o placar de aprendizado no topo da nota', () => {
     expect(r.chamada).toContain('Tudo conferido');
   });
 });
+
+describe('o resumo do topo não pode contradizer as próprias linhas', () => {
+  // Visto em produção, numa nota que a contadora já tinha tratado: as sete linhas
+  // diziam "Conferido" e a faixa do topo dizia "7 itens para conferir · 0 de 7 já
+  // prontos". É a mesma queixa do primeiro uso real — "apareceu como se eu tivesse
+  // que tratar ainda" — só que agora vinda do resumo, não do banco. A pessoa
+  // termina o trabalho e a tela diz que ela não fez nada.
+  const item = (over: any = {}) =>
+    ({ confianca: 'media' as const, alertas: [], ...over });
+
+  it('item conferido conta como pronto, não como pendente', () => {
+    const r = resumirNota([item({ revisado: true }), item({ revisado: true })]);
+    expect(r.atencao).toBe(0);
+    expect(r.tranquilos).toBe(2);
+    expect(r.chamada).toContain('Tudo conferido');
+  });
+
+  it('mas divergência crítica continua contando mesmo conferida', () => {
+    // Mesmo critério de estiloDaLinha: crítico fala do mundo, não do preenchimento.
+    const critico = detectarAlertas(nota.itens[0]!, ctx({ cfopEntrada: null }));
+    const r = resumirNota([item({ revisado: true, alertas: critico })]);
+    expect(r.criticos).toBe(1);
+    expect(r.chamada).toContain('antes de exportar');
+  });
+
+  it('o resumo e a linha usam o mesmo critério — nunca discordam', () => {
+    for (const revisado of [true, false]) {
+      for (const alertas of [[], detectarAlertas(nota.itens[0]!, ctx({ cfopEntrada: null }))]) {
+        const linha = estiloDaLinha('media', alertas, revisado);
+        const r = resumirNota([{ confianca: 'media', alertas, revisado }]);
+        const linhaPronta = linha.estado === 'conferido' || !linha.destacar;
+        const resumoPronto = r.atencao === 0 && r.criticos === 0;
+        expect(resumoPronto, `linha=${linha.estado} resumo=${r.chamada}`).toBe(linhaPronta);
+      }
+    }
+  });
+});
+
+describe('o que a própria contadora digitou também é trabalho dela', () => {
+  it('valor manual ganha marca própria e entra no placar', () => {
+    const r = resumirNota([
+      { confianca: 'media', alertas: [], procedencia: { fonte: 'manual' }, revisado: true },
+      { confianca: 'media', alertas: [], procedencia: { fonte: 'perfil' } },
+    ]);
+    expect(r.ensinados).toBe(1);
+    expect(r.aprendizado).toBe('1 de 2 itens vieram do que vocês já ensinaram');
+  });
+});
