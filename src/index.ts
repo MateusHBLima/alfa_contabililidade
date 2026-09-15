@@ -17,6 +17,7 @@ import { ErroParserNFe } from './nfe/tipos';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
 import { aprender, chavesDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
 import { detectarAlertas, estiloDaLinha, resumirNota } from './rules/alertas';
+import type { Procedencia } from './rules/alertas';
 
 type Env = {
   DB: D1Database;
@@ -1655,7 +1656,20 @@ app.get('/api/notas/:id', async (c) => {
     .flatMap((i: any) => [i.cfop_origem, i.x_prod_origem])
     .filter((o: string | null) => typeof o === 'string' && o.startsWith('regra:'))
     .map((o: string) => o.slice('regra:'.length));
-  const suspeitas = await repo.regrasSuspeitasDe(r.nota.empresa_id, idsRegra);
+  const fichas = await repo.regrasDeOrigem(r.nota.empresa_id, idsRegra);
+
+  // De onde veio o valor que a contadora esta vendo. O CFOP manda, porque e o campo
+  // que ela de fato decide; a descricao acompanha. Sem isto a tela nao tem como
+  // diferenciar o padrao que ela fixou do chute do perfil da empresa - e foi
+  // exatamente isso que ela pediu no primeiro uso real.
+  const procedenciaDe = (origem: string | null): Procedencia => {
+    if (typeof origem !== 'string') return { fonte: 'nenhuma' };
+    if (origem === 'perfil') return { fonte: 'perfil' };
+    if (!origem.startsWith('regra:')) return { fonte: 'nenhuma' };
+    const ficha = fichas.get(origem.slice('regra:'.length));
+    if (!ficha) return { fonte: 'nenhuma' };
+    return ficha.fixada ? { fonte: 'fixada' } : { fonte: 'aprendida', usos: ficha.usos };
+  };
 
   const itens = r.itens.map((i: any) => {
     const item = {
@@ -1666,8 +1680,11 @@ app.get('/api/notas/:id', async (c) => {
     };
 
     const usouRegraSuspeita = [i.cfop_origem, i.x_prod_origem].some(
-      (o: string | null) => typeof o === 'string' && o.startsWith('regra:') && suspeitas.has(o.slice(6)),
+      (o: string | null) =>
+        typeof o === 'string' && o.startsWith('regra:') && fichas.get(o.slice(6))?.suspeita === true,
     );
+
+    const procedencia = procedenciaDe(i.cfop_origem);
 
     const alertas = detectarAlertas(item, {
       historico: historico.get(String(i.c_prod ?? '').trim().toUpperCase()) ?? null,
@@ -1676,11 +1693,18 @@ app.get('/api/notas/:id', async (c) => {
       regraSuspeita: usouRegraSuspeita,
     });
 
-    return { ...i, alertas, estilo: estiloDaLinha(i.confianca, alertas, i.revisado === 1) };
+    return {
+      ...i,
+      alertas,
+      procedencia,
+      estilo: estiloDaLinha(i.confianca, alertas, i.revisado === 1, procedencia),
+    };
   });
 
   const resumo = resumirNota(
-    itens.map((i: any) => ({ confianca: i.confianca, alertas: i.alertas })),
+    itens.map((i: any) => ({
+      confianca: i.confianca, alertas: i.alertas, procedencia: i.procedencia,
+    })),
   );
 
   return c.json({ nota: r.nota, itens, resumo });
