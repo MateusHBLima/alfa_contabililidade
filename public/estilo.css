@@ -348,3 +348,8 @@ tr.nota-andando td:first-child{box-shadow:inset 3px 0 0 var(--primary-2)}
 /* Tabela vazia por causa de filtro: a mensagem vem com a saída junto. Dizer
    "nada aqui" sem oferecer o caminho de volta é meio aviso. */
 td.vazio .btn{display:block;margin:10px auto 0}
+
+/* Segunda linha do topo da nota: informação, não alarme. Mais apagada que o
+   placar de aprendizado, porque é o que falta — e o que falta ali não pede
+   ação imediata, só não pode sumir. */
+.placar.sutil{color:var(--muted-2);margin-top:-10px}

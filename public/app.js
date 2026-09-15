@@ -847,7 +847,16 @@ function renderItens() {
     // O placar do aprendizado é o número que mede o produto, e é a única prova
     // visível de que ensinar o sistema serviu para alguma coisa. Fica fora da
     // faixa colorida de propósito: é notícia boa, não alarme.
-    (r.aprendizado ? `<div class="placar">📚 ${esc(r.aprendizado)}</div>` : '');
+    (r.aprendizado ? `<div class="placar">📚 ${esc(r.aprendizado)}</div>` : '') +
+    // O que falta padronizar vive AQUI, e nao em cada linha. Medido nas notas
+    // reais: 38 de 38 itens estavam sem descricao padronizada. Um aviso em 100%
+    // das linhas nao informa, so ensina a ignorar aviso - e ai ele nao funciona
+    // mais nas tres linhas em que importava.
+    (r.semDescricaoPadrao > 0
+      ? `<div class="placar sutil" title="O CFOP de entrada é a decisão fiscal e já está resolvido. A descrição padronizada é organização do cadastro: sem ela, o XML corrigido sai com o nome que o fornecedor escreveu.">✎ ${r.semDescricaoPadrao} ${
+          r.semDescricaoPadrao === 1 ? 'item ainda está' : 'itens ainda estão'
+        } com a descrição do fornecedor</div>`
+      : '');
 
   const lista = itensVisiveis();
 
