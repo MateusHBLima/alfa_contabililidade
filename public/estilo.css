@@ -296,3 +296,11 @@ tr.estado-conferido td:first-child{box-shadow:inset 3px 0 0 var(--ok)}
 tr.nota-pronta{background:#f3faf7}
 tr.nota-pronta td:first-child{box-shadow:inset 3px 0 0 var(--ok)}
 tr.nota-andando td:first-child{box-shadow:inset 3px 0 0 var(--primary-2)}
+
+/* Nome numa lista que abre o cadastro. Parece link porque é: numa tabela, texto
+   clicável que não se anuncia não é encontrado. */
+.link-tabela{
+  background:none;border:0;padding:0;font:inherit;color:var(--primary-2);
+  cursor:pointer;text-align:left;
+}
+.link-tabela:hover{text-decoration:underline}

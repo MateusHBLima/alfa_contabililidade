@@ -993,16 +993,24 @@ async function baixar(url) {
 function renderEmpresas() {
   $('#tbl-empresas tbody').innerHTML = estado.empresas.map((e) => `<tr>
     <td class="mono">${esc(e.cnpj)}</td>
-    <td>${esc(e.razao_social)}</td>
+    <td><button class="link-tabela" data-abrir-empresa="${esc(e.id)}">${esc(e.razao_social)}</button></td>
     <td>${esc(e.uf ?? '—')}</td>
     <td><span class="tag info">${esc(e.perfil)}</span></td>
     <td class="mono tiny">${esc(e.cnae_principal ?? '—')}</td>
-    <td class="acoes">${pode('empresas.apagar')
-      ? `<button class="btn sm perigo" data-apagar-empresa="${esc(e.id)}">Apagar</button>` : ''}</td>
+    <td class="acoes">
+      ${pode('empresas.editar')
+        ? `<button class="btn sm" data-abrir-empresa="${esc(e.id)}">Abrir</button>` : ''}
+      ${pode('empresas.apagar')
+        ? `<button class="btn sm perigo" data-apagar-empresa="${esc(e.id)}">Apagar</button>` : ''}
+    </td>
   </tr>`).join('') || '<tr><td colspan="6" class="vazio">Nenhuma empresa cadastrada.</td></tr>';
 
   $$('#tbl-empresas button[data-apagar-empresa]').forEach((b) =>
     b.addEventListener('click', () => apagarEmpresa(b.dataset.apagarEmpresa)));
+
+  $$('#tbl-empresas button[data-abrir-empresa]').forEach((b) =>
+    b.addEventListener('click', () =>
+      formularioEmpresa(estado.empresas.find((x) => x.id === b.dataset.abrirEmpresa))));
 }
 
 /**
@@ -1030,39 +1038,72 @@ function apagarEmpresa(id) {
   $('#modal-ok').classList.add('perigo');
 }
 
-$('#btn-nova-empresa').addEventListener('click', () => {
-  abrirModal('Nova empresa', `
+$('#btn-nova-empresa').addEventListener('click', () => formularioEmpresa(null));
+
+/**
+ * Cadastro de cliente — o mesmo formulário para criar e para corrigir.
+ *
+ * Faltava a parte de corrigir: a tela listava o cliente e só deixava apagar.
+ * Quem errasse o perfil fiscal no cadastro tinha que apagar a empresa inteira,
+ * com notas e regras junto, para cadastrar de novo. E as permissões
+ * `empresas.editar` e `empresas.desativar` existiam sem caminho na tela.
+ */
+function formularioEmpresa(empresa) {
+  const novo = !empresa;
+  abrirModal(novo ? 'Nova empresa' : `Cliente: ${empresa.razao_social}`, `
     <div class="rowflex">
-      <div style="flex:1"><label class="fl">CNPJ</label><input type="text" id="e-cnpj" style="width:100%"></div>
-      <div style="width:80px"><label class="fl">UF</label><input type="text" id="e-uf" maxlength="2" style="width:100%"></div>
+      <div style="flex:1"><label class="fl">CNPJ</label>
+        <input type="text" id="e-cnpj" style="width:100%" value="${esc(empresa?.cnpj ?? '')}"
+               ${novo ? '' : 'disabled title="O CNPJ identifica o cliente e as notas dele — não muda"'}></div>
+      <div style="width:80px"><label class="fl">UF</label>
+        <input type="text" id="e-uf" maxlength="2" style="width:100%" value="${esc(empresa?.uf ?? '')}"></div>
     </div>
     <div style="margin-top:11px"><label class="fl">Razão social</label>
-      <input type="text" id="e-razao" style="width:100%"></div>
+      <input type="text" id="e-razao" style="width:100%" value="${esc(empresa?.razao_social ?? '')}"></div>
     <div style="margin-top:11px"><label class="fl">CNAE principal</label>
-      <input type="text" id="e-cnae" placeholder="47.11-3/02" style="width:100%"></div>
+      <input type="text" id="e-cnae" placeholder="47.11-3/02" style="width:100%"
+             value="${esc(empresa?.cnae_principal ?? '')}"></div>
     <div id="e-sugestao" class="aviso hidden"></div>
     <div style="margin-top:11px"><label class="fl">Perfil fiscal</label>
       <select id="e-perfil" style="width:100%">
-        <option value="revenda">Comércio — revenda</option>
-        <option value="industrializacao">Indústria — insumo</option>
-        <option value="uso_consumo">Uso e consumo / serviços</option>
+        ${[['revenda', 'Comércio — revenda'],
+           ['industrializacao', 'Indústria — insumo'],
+           ['uso_consumo', 'Uso e consumo / serviços']]
+          .map(([v, r]) => `<option value="${v}" ${empresa?.perfil === v ? 'selected' : ''}>${r}</option>`)
+          .join('')}
       </select></div>
     <p class="tiny" style="margin-top:10px">O perfil define o CFOP sugerido enquanto o produto
       não tem padrão próprio. A partir da primeira nota tratada, o aprendizado passa por cima disso.</p>
   `, async () => {
     const cnpj = $('#e-cnpj').value.replace(/\D/g, '');
-    if (cnpj.length !== 14) throw new Error('CNPJ precisa ter 14 dígitos');
+    if (novo && cnpj.length !== 14) throw new Error('CNPJ precisa ter 14 dígitos');
     if ($('#e-razao').value.trim().length < 2) throw new Error('informe a razão social');
-    await api('/api/empresas', {
-      method: 'POST',
-      body: JSON.stringify({
-        cnpj,
-        razaoSocial: $('#e-razao').value.trim(),
-        uf: $('#e-uf').value.toUpperCase() || null,
-        perfil: $('#e-perfil').value,
-        cnaePrincipal: $('#e-cnae').value.trim() || null,
-      }),
-    });
+
+    if (novo) {
+      await api('/api/empresas', {
+        method: 'POST',
+        body: JSON.stringify({
+          cnpj,
+          razaoSocial: $('#e-razao').value.trim(),
+          uf: $('#e-uf').value.toUpperCase() || null,
+          perfil: $('#e-perfil').value,
+          cnaePrincipal: $('#e-cnae').value.trim() || null,
+        }),
+      });
+    } else {
+      // O CNPJ fica de fora de propósito: ele é a identidade do cliente e das
+      // notas dele. Trocar o CNPJ é outro cliente, não uma correção.
+      await api(`/api/empresas/${empresa.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          razao_social: $('#e-razao').value.trim(),
+          uf: $('#e-uf').value.toUpperCase() || null,
+          perfil: $('#e-perfil').value,
+          cnae_principal: $('#e-cnae').value.trim() || null,
+        }),
+      });
+      avisarSalvo('Cliente atualizado');
+    }
     await carregarEmpresas();
     renderEmpresas();
   });
@@ -1082,7 +1123,7 @@ $('#btn-nova-empresa').addEventListener('click', () => {
       box.classList.remove('hidden');
     } catch {}
   });
-});
+}
 
 /* ---------------------------------------------------------------- administração
  *
@@ -1186,11 +1227,57 @@ $('#btn-novo-papel').addEventListener('click', () => editarPapel(null).catch((e)
 
 /* --------------------------------------------------------------- usuários */
 
+/**
+ * Convites em aberto, e o botão de revogar.
+ *
+ * A tela gerava o link e esquecia dele. Um convite de Admin que vaze — grupo
+ * errado do WhatsApp, e-mail reencaminhado — valia até vencer sozinho, sem
+ * como cortar. Gerar sem revogar é meia funcionalidade.
+ *
+ * O código nunca aparece aqui: o banco guarda só o hash. Convite perdido se
+ * gera de novo, não se recupera.
+ */
+async function carregarConvites() {
+  const card = $('#card-convites');
+  if (!card) return;
+  if (!pode('usuarios.convidar')) { card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+
+  const cs = await api('/api/convites');
+  const abertos = cs.filter((c) => !c.revogado && !c.vencido && c.usos < c.usos_max);
+  const situacao = (c) =>
+    c.revogado ? '<span class="tag dan">revogado</span>'
+    : c.vencido ? '<span class="tag mut">vencido</span>'
+    : c.usos >= c.usos_max ? '<span class="tag mut">todo usado</span>'
+    : '<span class="tag ok">válido</span>';
+
+  $('#tbl-convites tbody').innerHTML = cs.map((c) => `<tr${c.revogado || c.vencido ? ' style="opacity:.55"' : ''}>
+    <td>${esc(c.papel ?? '—')}</td>
+    <td class="mono tiny">${c.usos} de ${c.usos_max}</td>
+    <td class="tiny">${dataCurta(c.expira_em)}</td>
+    <td>${situacao(c)}</td>
+    <td class="acoes">${abertos.includes(c)
+      ? `<button class="btn sm perigo" data-revogar="${esc(c.id)}">Revogar</button>` : ''}</td>
+  </tr>`).join('') || '<tr><td colspan="5" class="vazio">Nenhum convite gerado.</td></tr>';
+
+  $$('#tbl-convites button[data-revogar]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      if (!confirm('Revogar este convite?\n\nQuem tiver o link para de conseguir entrar por ele.')) return;
+      try {
+        await api(`/api/convites/${b.dataset.revogar}`, { method: 'DELETE' });
+        avisarSalvo('Convite revogado');
+        await carregarConvites();
+      } catch (e) { alerta(e.message); }
+    }));
+}
+
 async function carregarUsuarios() {
   const us = await api('/api/usuarios');
+  carregarConvites().catch(() => {});
   const podeEditar = estado.eu.permissoes.includes('usuarios.editar');
   const podeDesativar = estado.eu.permissoes.includes('usuarios.desativar');
   const podeSenha = estado.eu.permissoes.includes('usuarios.redefinir_senha');
+  const podeMfa = estado.eu.permissoes.includes('usuarios.desativar_mfa');
 
   const podeAprovar = estado.eu.permissoes.includes('usuarios.aprovar');
   const pendentes = us.filter((u) => u.pendente).length;
@@ -1225,6 +1312,8 @@ async function carregarUsuarios() {
       ${!u.pendente && podeEditar ? `<button class="btn sm" data-editar="${esc(u.id)}">Editar</button>` : ''}
       ${!u.pendente && podeSenha ? `<button class="btn ${u.pediuSenha ? 'primary ' : ''}sm" data-senha="${esc(u.id)}">Senha</button>` : ''}
       ${!u.pendente && podeDesativar ? `<button class="btn sm" data-ativo="${esc(u.id)}" data-para="${u.ativo ? '0' : '1'}">${u.ativo ? 'Desativar' : 'Reativar'}</button>` : ''}
+      ${!u.pendente && u.mfa && podeMfa ? `<button class="btn sm" data-mfa="${esc(u.id)}"
+        title="Para quem trocou de celular e ficou trancado para fora">Desligar 2º fator</button>` : ''}
     </td>
   </tr>`).join('') || '<tr><td colspan="8" class="vazio">Nenhum usuário.</td></tr>';
 
@@ -1243,6 +1332,20 @@ async function carregarUsuarios() {
       } catch (e) { alerta(e.message); }
     });
   }
+  // Trocar de celular sem desligar o segundo fator antes tranca a pessoa para
+  // fora, e não havia caminho nenhum para destravar — a permissão existia, o
+  // botão não.
+  for (const b of $$('#tbl-usuarios button[data-mfa]')) {
+    b.addEventListener('click', async () => {
+      if (!confirm('Desligar o segundo fator desta pessoa?\n\n'
+        + 'Ela volta a entrar só com e-mail e senha, e precisa configurar de novo.')) return;
+      try {
+        await api(`/api/usuarios/${b.dataset.mfa}/desativar-mfa`, { method: 'POST' });
+        await carregarUsuarios();
+      } catch (e) { alerta(e.message); }
+    });
+  }
+
   for (const b of $$('#tbl-usuarios button[data-senha]')) {
     b.addEventListener('click', () => redefinirSenhaDe(b.dataset.senha).catch((e) => alerta(e.message)));
   }
@@ -1484,6 +1587,7 @@ async function gerarConvite() {
 }
 
 function mostrarConvite(r) {
+  carregarConvites().catch(() => {});
   const link = `${location.origin}/?convite=${encodeURIComponent(r.codigo)}`;
   setTimeout(() => {
     abrirModal('Convite gerado', `
