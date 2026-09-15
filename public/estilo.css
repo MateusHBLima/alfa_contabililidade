@@ -304,3 +304,37 @@ tr.nota-andando td:first-child{box-shadow:inset 3px 0 0 var(--primary-2)}
   cursor:pointer;text-align:left;
 }
 .link-tabela:hover{text-decoration:underline}
+
+/* ------------------------------------------------- de onde veio cada valor
+
+   Pedido literal da contadora depois do primeiro uso real: "se tivesse um jeito
+   de ele ir aparecendo de outra cor o que eu já fiz".
+
+   A marca de procedência é DELIBERADAMENTE calma — texto pequeno, fundo lavado,
+   sem borda grossa. Ela não pede ação: ela dá crédito. O prêmio por ensinar o
+   sistema é a linha PARAR de pedir atenção; se o que ela ensinou ganhasse cor
+   forte, em duas competências a tela inteira estaria colorida (o objetivo do
+   produto é justamente que a maioria das linhas passe a vir daqui) e a cor não
+   diria mais nada — inclusive nas três linhas em que ela está certa.
+
+   A exceção é `proc-perfil`: ali ninguém ensinou nada, o valor é palpite, e a
+   linha já está destacada de qualquer jeito. A marca só diz o porquê. */
+.proc{
+  display:inline-block;margin-top:3px;font-size:10.5px;font-weight:600;
+  border-radius:99px;padding:1px 7px;line-height:1.5;white-space:nowrap;
+}
+.proc-fixada{background:var(--accent-soft);color:var(--accent)}
+.proc-aprendida{background:var(--ok-soft);color:var(--ok)}
+.proc-perfil{background:var(--warn-soft);color:var(--warn)}
+
+/* Os dois estados que dividem o antigo "Pronto": mesma tranquilidade, origem
+   diferente. Nenhum dos dois destaca a linha. */
+.selo-padrao{color:var(--accent)}       .selo-padrao .ic{background:var(--accent-soft);color:var(--accent)}
+.selo-aprendido{color:var(--ok)}        .selo-aprendido .ic{background:var(--ok-soft);color:var(--ok)}
+
+/* O placar de aprendizado no topo da nota: o número que mede o produto.
+   Fora da faixa colorida de propósito — é notícia boa, não alarme. */
+.placar{
+  margin:-8px 0 16px;font-size:12px;color:var(--muted);
+  display:flex;align-items:center;gap:6px;
+}

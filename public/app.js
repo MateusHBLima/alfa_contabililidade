@@ -746,7 +746,10 @@ function itensVisiveis() {
     const e = i.estilo?.estado;
     if (estado.filtro === 'atencao') return e === 'bloqueado' || e === 'conferir';
     if (estado.filtro === 'novo') return e === 'novo';
-    if (estado.filtro === 'pronto') return e === 'pronto';
+    // 'padrao' e 'aprendido' sao o mesmo "ja esta pronto", so que dizendo de onde
+    // veio. Sem isto o filtro Prontos passaria a esconder justamente as linhas que
+    // o sistema acertou sozinho.
+    if (estado.filtro === 'pronto') return e === 'pronto' || e === 'padrao' || e === 'aprendido';
     if (estado.filtro === 'conferido') return e === 'conferido';
     return true;
   });
@@ -767,7 +770,11 @@ function renderItens() {
   $('#faixa-resumo').innerHTML =
     `<div class="faixa ${classe}"><b>${esc(r.chamada)}</b>
       ${r.bloqueiaExportacao ? '<span class="tag dan">exportação bloqueada</span>' : ''}
-    </div>`;
+    </div>` +
+    // O placar do aprendizado é o número que mede o produto, e é a única prova
+    // visível de que ensinar o sistema serviu para alguma coisa. Fica fora da
+    // faixa colorida de propósito: é notícia boa, não alarme.
+    (r.aprendizado ? `<div class="placar">📚 ${esc(r.aprendizado)}</div>` : '');
 
   const lista = itensVisiveis();
   corpo.innerHTML = lista.map((i) => linhaItem(i)).join('');
@@ -785,9 +792,7 @@ function linhaItem(i) {
        <span>${esc(a.titulo)}</span>
      </div>`).join('');
 
-  const porque = i.cfop_origem === 'perfil'
-    ? 'palpite pelo perfil da empresa — confirme'
-    : String(i.cfop_origem ?? '').startsWith('regra:') ? 'padrão aprendido' : '';
+  const proc = selinhoProcedencia(i.procedencia);
 
   return `<tr class="estado-${est.estado}">
     <td class="num tiny">${i.n_item}</td>
@@ -804,7 +809,7 @@ function linhaItem(i) {
     <td class="celula-edit">
       <input type="text" class="cfop" maxlength="4" value="${esc(i.cfop_novo ?? '')}"
              data-item="${i.id}" data-campo="cfop">
-      ${porque ? `<span class="porque">${porque}</span>` : ''}
+      ${proc}
     </td>
     <td class="num">${moeda(i.valor_total)}</td>
     <td>
@@ -817,6 +822,35 @@ function linhaItem(i) {
         : `<button class="btn sm ok" data-conferir="${i.id}">✓ Conferido</button>`}
     </td>
   </tr>`;
+}
+
+/**
+ * De onde veio o valor que está naquela linha.
+ *
+ * Isto NÃO é o estado da linha, e a diferença importa. O estado responde "isto
+ * precisa de você?"; a procedência responde "quem pôs isto aqui?". São dois eixos,
+ * e amarrá-los num só foi o que escondeu o trabalho da contadora: uma regra que ela
+ * acabou de ensinar ainda nasce amarela de propósito (ver uma vez não é saber), e a
+ * confiança do item só fica verde quando CFOP E descrição estão resolvidos. Na
+ * prática isso é a QUARTA nota. Se a marca "veio de você" morasse dentro do estado,
+ * ela quase nunca apareceria — e foi exatamente essa a queixa: "se tivesse um jeito
+ * de ele ir aparecendo de outra cor o que eu já fiz".
+ *
+ * Por isso a marca aparece em toda linha, inclusive nas que ainda pedem conferência.
+ */
+function selinhoProcedencia(p) {
+  const fonte = p?.fonte ?? 'nenhuma';
+  if (fonte === 'fixada') {
+    return `<span class="proc proc-fixada" title="Padrão que a contabilidade fixou para este fornecedor">📌 padrão seu</span>`;
+  }
+  if (fonte === 'aprendida') {
+    const n = Number(p?.usos ?? 0);
+    return `<span class="proc proc-aprendida" title="O sistema guardou isto de uma correção de vocês">✓ vocês ensinaram${n > 1 ? ` · ${n}x` : ''}</span>`;
+  }
+  if (fonte === 'perfil') {
+    return `<span class="proc proc-perfil" title="Ninguém ensinou este item ainda — o valor é palpite pelo perfil fiscal da empresa">● palpite do perfil</span>`;
+  }
+  return '';
 }
 
 /** "conferido por fulano, hoje 14:12" — quem assinou aquela linha. */
