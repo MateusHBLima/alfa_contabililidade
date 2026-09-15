@@ -1839,6 +1839,36 @@ app.patch('/api/itens/:id', async (c) => {
  * tinha feito nada, porque nenhum valor mudou. Todas as notas voltaram como
  * "a revisar". Concordar é a ação mais comum que ela faz, e precisava existir.
  */
+/**
+ * Fixa o padrão de vários itens de uma vez — cada um com o SEU próprio CFOP.
+ *
+ * Existe porque a versão que cabia na tela era um laço de requisições no
+ * navegador, uma por item. Numa nota grande isso é minutos, e uma falha no meio
+ * deixa metade feito sem ninguém saber. O leiaute da NF-e admite até 990 itens
+ * por nota, então o lote é o caminho normal, não a exceção.
+ */
+app.post('/api/notas/:id/fixar-padrao', async (c) => {
+  const sessao = c.get('sessao');
+  exigir(sessao, 'notas.visualizar');
+  // Mesma permissão do botão de um item só: fixar em lote não pode ser a porta
+  // dos fundos para quem não pode fixar.
+  exigir(sessao, 'regras.fixar');
+
+  const corpo = z
+    .object({ itens: z.array(z.string()).max(1000).optional() })
+    .parse(await c.req.json().catch(() => ({})));
+
+  const repo = c.get('repo');
+  const r = await repo.obterNotaComItens(c.req.param('id'));
+  if (!r) return c.json({ erro: 'nota não encontrada' }, 404);
+
+  // Sem lista = a nota inteira.
+  const ids = corpo.itens ?? r.itens.map((i: any) => i.id);
+  const { fixados, semCfop } = await repo.fixarPadraoDeItens(r.nota.id, ids);
+
+  return c.json({ ok: true, fixados, semCfop });
+});
+
 app.post('/api/notas/:id/conferir', async (c) => {
   const sessao = c.get('sessao');
   exigir(sessao, 'notas.visualizar');
