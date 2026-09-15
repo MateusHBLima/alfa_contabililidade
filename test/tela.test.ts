@@ -173,7 +173,7 @@ describe('tela: o botão de fixar padrão do produto', () => {
 
   it('pede confirmação antes, e diz que não toca nos outros itens', () => {
     const fn = APP.slice(APP.indexOf('async function fixarProduto'), APP.indexOf('async function fixarProduto') + 1200);
-    expect(fn).toContain('confirm(');
+    expect(fn).toContain('await confirmar(');
     expect(fn).toMatch(/Não altera nenhum outro item/);
   });
 
@@ -204,7 +204,7 @@ describe('tela: salvar o padrão de todos de uma vez', () => {
   it('avisa quantos, e que nenhum valor muda', () => {
     const i = APP.indexOf("$('#btn-fixar-visiveis')");
     const fn = APP.slice(i, i + 1600);
-    expect(fn).toContain('confirm(');
+    expect(fn).toContain('await confirmar(');
     expect(fn).toMatch(/nenhum valor é alterado/);
   });
 
@@ -212,5 +212,43 @@ describe('tela: salvar o padrão de todos de uma vez', () => {
     const i = APP.indexOf("$('#btn-fixar-visiveis')");
     const fn = APP.slice(i, i + 1600);
     expect(fn).toMatch(/Não há item para salvar/);
+  });
+});
+
+
+/**
+ * As caixas do navegador voltaram a aparecer depois de trocadas? Este teste
+ * avisa. `confirm()` nativo tem um defeito que não é estético: o Chrome oferece
+ * "impedir esta página de criar mais caixas", e se a pessoa marcar isso sem ler,
+ * o confirm passa a devolver false calado e a ação simplesmente não acontece.
+ * Confirmação que some em silêncio é pior que nenhuma.
+ */
+describe('tela: nenhuma caixa de diálogo do navegador', () => {
+  const semComentarios = APP.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  for (const nativo of ['window.alert', 'window.confirm', 'window.prompt']) {
+    it(`não usa ${nativo}`, () => {
+      expect(semComentarios).not.toContain(nativo);
+    });
+  }
+
+  it('não chama confirm() nem alert() soltos', () => {
+    expect(semComentarios, 'confirm() nativo voltou').not.toMatch(/(^|[^a-zA-Z.])confirm\s*\(/);
+    expect(semComentarios, 'alert() nativo voltou').not.toMatch(/(^|[^a-zA-Z.])alert\s*\(/);
+  });
+
+  it('o diálogo próprio existe e devolve promessa', () => {
+    expect(APP).toContain('function confirmar(');
+    expect(APP).toContain('function avisar(');
+    expect(APP).toContain('new Promise');
+  });
+
+  it('dá saída pelo Esc — senão a pessoa fica presa', () => {
+    expect(APP).toContain("ev.key === 'Escape'");
+  });
+
+  it('respeita quem pediu menos movimento no sistema', () => {
+    const CSS = readFileSync(new URL('../public/estilo.css', import.meta.url), 'utf8');
+    expect(CSS).toContain('prefers-reduced-motion');
   });
 });
