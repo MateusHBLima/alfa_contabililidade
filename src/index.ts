@@ -1697,17 +1697,23 @@ app.get('/api/notas/:id', async (c) => {
 
     const procedencia = procedenciaDe(i.cfop_origem);
 
-    const alertas = detectarAlertas(item, {
+    // Descricao padronizada ainda igual a do fornecedor = ninguem ensinou.
+    // Nao trava a linha (quem decide e o CFOP), mas nao some da tela.
+    const ctxAlerta = {
       historico: historico.get(String(i.c_prod ?? '').trim().toUpperCase()) ?? null,
       cfopEntrada: i.cfop_novo,
       confianca: i.confianca,
       regraSuspeita: usouRegraSuspeita,
-    });
+      descricaoDoFornecedor:
+        !i.x_prod_novo || String(i.x_prod_novo).trim() === String(i.x_prod_original ?? '').trim(),
+    };
+    const alertas = detectarAlertas(item, ctxAlerta);
 
     return {
       ...i,
       alertas,
       procedencia,
+      descricaoDoFornecedor: ctxAlerta.descricaoDoFornecedor,
       estilo: estiloDaLinha(i.confianca, alertas, i.revisado === 1, procedencia),
     };
   });
@@ -1715,7 +1721,7 @@ app.get('/api/notas/:id', async (c) => {
   const resumo = resumirNota(
     itens.map((i: any) => ({
       confianca: i.confianca, alertas: i.alertas, procedencia: i.procedencia,
-      revisado: i.revisado === 1,
+      revisado: i.revisado === 1, descricaoDoFornecedor: i.descricaoDoFornecedor,
     })),
   );
 
