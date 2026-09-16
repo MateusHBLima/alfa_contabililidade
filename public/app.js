@@ -923,6 +923,8 @@ function linhaItem(i) {
       ${proc}
       ${podeFixar(i) ? `<button class="btn sm sutil fixar" data-fixar="${i.id}"
          title="Faz deste CFOP o padrão deste produto deste fornecedor. Vale a partir da próxima nota, e já nasce confiável — sem esperar as próximas confirmações.">☆ é sempre assim</button>` : ''}
+      ${pode('auditoria.visualizar') ? `<button class="btn sm sutil historico" data-trilha="${i.id}"
+         title="O que já mudou neste item, quem mudou e quando">↩ como estava</button>` : ''}
     </td>
     <td class="num">${moeda(i.valor_total)}</td>
     <td>
@@ -1064,7 +1066,80 @@ document.addEventListener('click', (ev) => {
   if (d) return desconferirItem(d.dataset.desconferir);
   const f = ev.target.closest('[data-fixar]');
   if (f) return fixarProduto(f.dataset.fixar);
+  const t = ev.target.closest('[data-trilha]');
+  if (t) return verTrilha(t.dataset.trilha);
 });
+
+/**
+ * "Me arrependi, nao quero mais, quero ver como que tava."
+ *
+ * Ultimo pedido da contadora no primeiro uso real, e o unico que faltava. Ate
+ * aqui o `desfazer` da linha so tirava a marca de conferido - o VALOR ficava
+ * onde ela tinha deixado, e nao havia como saber o que havia antes.
+ *
+ * A trilha e gravada desde o primeiro dia, com valor_antes e valor_depois. So
+ * nao havia como ler.
+ */
+const ROTULO_CAMPO = {
+  cfop: 'CFOP de entrada', descricao: 'Descrição padronizada',
+  cst_entrada: 'CST de entrada', conta_contabil: 'Conta contábil',
+  credito_icms: 'Crédito de ICMS', credito_pis: 'Crédito de PIS',
+  credito_cofins: 'Crédito de COFINS', conferido: 'Conferência',
+};
+
+async function verTrilha(itemId) {
+  const i = (estado.notaAberta?.itens ?? []).find((x) => x.id === itemId);
+  const nome = i?.x_prod_novo || i?.x_prod_original || 'este item';
+
+  let eventos;
+  try {
+    eventos = await api(`/api/itens/${itemId}/trilha`);
+  } catch (e) {
+    return avisar('Não consegui ler o histórico: ' + e.message);
+  }
+
+  // So o que mudou VALOR interessa para voltar atras; conferencia e outra coisa.
+  const comValor = eventos.filter((e) => e.campo && e.campo !== 'conferido' && e.valor_depois !== null);
+  const anterior = comValor.find((e) => e.campo === 'cfop' && e.valor_antes);
+
+  const linhas = eventos.length === 0
+    ? '<p class="dialogo-texto sutil">Nada mudou neste item desde que a nota entrou.</p>'
+    : `<ul class="trilha">${eventos.map((e) => `
+        <li>
+          <span class="trilha-quando">${esc(dataCurta(e.quando))}</span>
+          <span class="trilha-campo">${esc(ROTULO_CAMPO[e.campo] ?? e.campo ?? e.acao)}</span>
+          ${e.campo === 'conferido'
+            ? '<span class="trilha-valor">conferido</span>'
+            : `<span class="trilha-valor">${
+                e.valor_antes ? `<s>${esc(e.valor_antes)}</s> → ` : ''
+              }<b>${esc(e.valor_depois ?? '—')}</b></span>`}
+          <span class="trilha-quem">${esc(e.usuario_email ?? '—')}${
+            e.origem && e.origem !== 'manual' ? ` · ${esc(e.origem)}` : ''}</span>
+        </li>`).join('')}</ul>`;
+
+  const ok = await confirmar({
+    titulo: 'Como estava',
+    ok: anterior ? `Voltar o CFOP para ${anterior.valor_antes}` : 'Fechar',
+    corpo: `<p class="dialogo-destaque">${esc(nome)}</p>${linhas}${
+      anterior
+        ? `<p class="dialogo-texto sutil">Voltar atrás também fica registrado — a trilha nunca é apagada.</p>`
+        : ''}`,
+  });
+
+  // Sem valor anterior, o botao e so "Fechar".
+  if (!ok || !anterior) return;
+
+  try {
+    await api(`/api/itens/${itemId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: anterior.valor_antes }] }),
+    });
+    avisarSalvo(`CFOP voltou para ${anterior.valor_antes}`);
+    await recarregarNota();
+  } catch (e) {
+    avisar('Não consegui voltar o valor: ' + e.message);
+  }
+}
 
 /**
  * "É sempre assim": o CFOP daquela linha vira o padrão daquele produto.
