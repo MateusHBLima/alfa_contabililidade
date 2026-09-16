@@ -1847,6 +1847,21 @@ app.patch('/api/itens/:id', async (c) => {
  * deixa metade feito sem ninguém saber. O leiaute da NF-e admite até 990 itens
  * por nota, então o lote é o caminho normal, não a exceção.
  */
+/**
+ * A trilha de alterações de um item.
+ *
+ * Fecha duas pendências de uma vez: o último pedido da contadora no primeiro uso
+ * real — *"me arrependi, não quero mais, quero ver como que tava"* — e o
+ * compromisso de contrato de manter "registro de quem lançou e alterou o quê".
+ * A trilha era gravada desde o primeiro dia e não havia como ler: a permissão
+ * `auditoria.visualizar` podia ser concedida e não levava a lugar nenhum.
+ */
+app.get('/api/itens/:id/trilha', async (c) => {
+  const sessao = c.get('sessao');
+  exigir(sessao, 'auditoria.visualizar');
+  return c.json(await c.get('repo').trilhaDoItem(c.req.param('id')));
+});
+
 app.post('/api/notas/:id/fixar-padrao', async (c) => {
   const sessao = c.get('sessao');
   exigir(sessao, 'notas.visualizar');
