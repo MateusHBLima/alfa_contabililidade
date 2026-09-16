@@ -2453,3 +2453,136 @@ describe('"é sempre assim": a contadora fixa um produto, não o mundo', () => {
     expect(r.status).toBe(403);
   });
 });
+
+describe('"quero ver como que tava" — a trilha do item', () => {
+  /* Último pedido da contadora no primeiro uso real, e o único que faltava.
+     Até aqui o `desfazer` da linha só tirava a marca de conferido — o VALOR
+     ficava onde ela deixou, e não havia como saber o que havia antes.
+
+     A trilha é gravada desde o primeiro dia, com valor_antes e valor_depois.
+     Não havia como ler: `auditoria.visualizar` podia ser concedida e não levava
+     a lugar nenhum. É também compromisso de contrato. */
+
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+
+  const SENHA = 'uma frase de senha longa';
+  let ck = '';
+  const req = (c: string, o: RequestInit = {}, cookie = ck) =>
+    app.fetch(new Request(`http://x${c}`, {
+      ...o, headers: { 'content-type': 'application/json', Cookie: cookie, ...(o.headers ?? {}) },
+    }), ambiente());
+
+  const subir = async (empresaId: string, xml = XML) => {
+    const fd = new FormData();
+    fd.append('arquivos', new File([xml], 'n.xml', { type: 'text/xml' }));
+    return app.fetch(new Request(`http://x/api/empresas/${empresaId}/importar`, {
+      method: 'POST', body: fd, headers: { Cookie: ck },
+    }), ambiente());
+  };
+
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: SENHA }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  });
+
+  const prepararItem = async () => {
+    const r = await req('/api/empresas', {
+      method: 'POST',
+      body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'MERCADO PILOTO', uf: 'SC', perfil: 'revenda' }),
+    });
+    const { id: empresaId } = await r.json() as any;
+    await subir(empresaId);
+    const notaId = db.consultar('SELECT id FROM notas ORDER BY criado_em')[0].id;
+    const corpo = await (await req(`/api/notas/${notaId}`)).json() as any;
+    return { empresaId, notaId, item: corpo.itens[0] };
+  };
+
+  it('mostra o que havia antes, quem mudou e quando', async () => {
+    const { item } = await prepararItem();
+    const antes = item.cfop_novo;
+    expect(antes).toBeTruthy();
+
+    await req(`/api/itens/${item.id}`, {
+      method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1403' }] }),
+    });
+
+    const trilha = await (await req(`/api/itens/${item.id}/trilha`)).json() as any[];
+    const mudanca = trilha.find((e) => e.campo === 'cfop');
+    expect(mudanca).toBeDefined();
+    expect(mudanca.valor_antes).toBe(antes);
+    expect(mudanca.valor_depois).toBe('1403');
+    expect(mudanca.usuario_email).toBe('contadora@alfacontabil.net');
+    expect(mudanca.quando).toBeTruthy();
+  });
+
+  it('e voltar atrás também fica registrado — a trilha nunca é apagada', async () => {
+    const { item } = await prepararItem();
+    const original = item.cfop_novo;
+
+    await req(`/api/itens/${item.id}`, {
+      method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1403' }] }),
+    });
+    await req(`/api/itens/${item.id}`, {
+      method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: original }] }),
+    });
+
+    const trilha = await (await req(`/api/itens/${item.id}/trilha`)).json() as any[];
+    const cfops = trilha.filter((e) => e.campo === 'cfop');
+    // As DUAS alterações estão lá: a ida e a volta.
+    expect(cfops).toHaveLength(2);
+    // Mais recente primeiro — é assim que se procura "o que eu fiz ontem".
+    expect(cfops[0].valor_depois).toBe(original);
+    expect(cfops[1].valor_depois).toBe('1403');
+  });
+
+  it('a conferência aparece na trilha, distinta de mudança de valor', async () => {
+    const { item } = await prepararItem();
+    // Confirmar sem mudar valor: o caso que a contadora perdeu em 14/09.
+    await req(`/api/itens/${item.id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [] }) });
+
+    const trilha = await (await req(`/api/itens/${item.id}/trilha`)).json() as any[];
+    expect(trilha.find((e) => e.campo === 'conferido')).toBeDefined();
+  });
+
+  it('sem a permissão, não se lê a trilha de ninguém', async () => {
+    const { item } = await prepararItem();
+
+    const papel = await req('/api/papeis', {
+      method: 'POST',
+      body: JSON.stringify({
+        nome: 'Sem trilha',
+        permissoes: ['notas.visualizar', 'empresas.visualizar', 'empresas.todas'],
+      }),
+    });
+    const { id: papelId } = await papel.json() as any;
+    const novo = await req('/api/usuarios', {
+      method: 'POST',
+      body: JSON.stringify({ nome: 'Aux', email: 'semtrilha@alfacontabil.net', papelId }),
+    });
+    const { senhaProvisoria } = await novo.json() as any;
+
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'semtrilha@alfacontabil.net', senha: senhaProvisoria }),
+    }), ambiente());
+    const ck2 = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    await req('/api/trocar-senha', {
+      method: 'POST',
+      body: JSON.stringify({ senhaAtual: senhaProvisoria, senhaNova: 'quinta frase longa 3' }),
+    }, ck2);
+    const l2 = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'semtrilha@alfacontabil.net', senha: 'quinta frase longa 3' }),
+    }), ambiente());
+    const ck3 = (l2.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+
+    expect((await req(`/api/itens/${item.id}/trilha`, {}, ck3)).status).toBe(403);
+  });
+});

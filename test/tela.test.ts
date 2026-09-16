@@ -64,8 +64,8 @@ describe('catálogo de permissões x rotas', () => {
     'regras.apagar',
     // Desativar cliente ainda não tem rota própria (só apagar, que é outra coisa).
     'empresas.desativar',
-    // A trilha é gravada a cada alteração e ainda não há como consultá-la.
-    'auditoria.visualizar',
+    // `auditoria.visualizar` saiu daqui em 16/09: GET /api/itens/:id/trilha.
+    // Foi este teste que avisou que a dívida tinha sido paga.
   ]);
 
   it('toda permissão do catálogo é exigida por alguma rota', () => {
@@ -250,5 +250,26 @@ describe('tela: nenhuma caixa de diálogo do navegador', () => {
   it('respeita quem pediu menos movimento no sistema', () => {
     const CSS = readFileSync(new URL('../public/estilo.css', import.meta.url), 'utf8');
     expect(CSS).toContain('prefers-reduced-motion');
+  });
+});
+
+
+describe('tela: "como estava" — a trilha na linha do item', () => {
+  it('o link existe, e só para quem pode consultar a trilha', () => {
+    expect(APP).toContain("pode('auditoria.visualizar')");
+    expect(APP).toContain('data-trilha');
+  });
+
+  it('lê a rota da trilha, não inventa o histórico da tela', () => {
+    expect(APP).toContain('/trilha');
+  });
+
+  it('voltar atrás é uma alteração como outra qualquer — e fica registrada', () => {
+    // Nada de apagar ou reescrever evento: a trilha é append-only (invariante 8).
+    const i = APP.indexOf('async function verTrilha');
+    const fn = APP.slice(i, i + 3000);
+    expect(fn).toContain("method: 'PATCH'");
+    expect(fn, 'a trilha não pode ser apagada').not.toMatch(/method:\s*'DELETE'/);
+    expect(fn).toMatch(/nunca é apagada/);
   });
 });
