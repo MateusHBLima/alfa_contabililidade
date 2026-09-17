@@ -411,3 +411,22 @@ td.vazio .btn{display:block;margin:10px auto 0}
 .trilha-quem{grid-column:3;grid-row:1/3;color:var(--muted-2);font-size:11.5px;text-align:right}
 .btn.sm.historico{margin-top:4px;font-size:10.5px;padding:1px 7px;color:var(--muted)}
 .btn.sm.historico:hover{background:var(--surface-2);border-color:var(--line)}
+
+/* Importacao em andamento: a area de soltar mostra que esta ocupada. */
+.drop.ocupado { opacity: .55; cursor: progress; }
+
+/* Marcas da linha (invariante 9c): o quanto a NOTA foge do normal.
+   Duas cores independentes, pedidas pela contadora para a lista "Todos":
+   ambar = CFOP original diferente de 5102 · azul = produto novo.
+   As duas na mesma linha: o produto (1a e 2a colunas) fica azul, o resto ambar.
+   Conferiu, a cor sai - a etiqueta em texto continua. */
+tr.marca-cfop:not(.marca-apagada) td{background:#ffedcc}
+tr.marca-novo:not(.marca-apagada) td{background:#dfeeff}
+tr.marca-cfop.marca-novo:not(.marca-apagada) td{background:#ffedcc}
+tr.marca-cfop.marca-novo:not(.marca-apagada) td:nth-child(-n+2){background:#dfeeff}
+.etiqueta{display:inline-block;border-radius:4px;padding:1px 6px;font-size:10.5px;font-weight:700;
+  letter-spacing:.2px;white-space:nowrap;vertical-align:middle}
+.etiqueta-cfop{background:#f7b955;color:#4a2a00}
+.etiqueta-novo{background:#7fb2f0;color:#06264d;margin-left:6px}
+.legenda-marcas{display:flex;gap:8px;align-items:center;padding:8px 14px 0}
+.legenda-marcas .etiqueta{margin-left:0}
