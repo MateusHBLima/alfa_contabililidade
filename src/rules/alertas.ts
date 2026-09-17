@@ -452,3 +452,44 @@ export function estiloDaLinha(
   }
   return { estado: 'pronto', icone: '✓', rotulo: 'Pronto', destacar: false };
 }
+
+
+// ---------------------------------------------------------------- marcas da linha
+
+/**
+ * O terceiro eixo (invariante 9c): o quanto a NOTA foge do normal.
+ *
+ * `estilo` diz se a linha precisa de acao e `procedencia` diz quem pos o valor
+ * ali - os dois falam do que NOS sabemos. As marcas falam do que o FORNECEDOR
+ * declarou. Pedido literal da contadora (16/09), repetido em dois audios:
+ *
+ *   "o CFOP original, o 5102, ele e o padrao, entao deixasse nessa corzinha
+ *    branca (...) quando vier um produto com um CFOP original que nao seja 5102,
+ *    que ele venha colorido (...) e que quando o produto for novo tambem puxe
+ *    outra cor."
+ *
+ * Medido em producao antes de implementar (Italiana Garden, 426 itens, 09/2026):
+ * 80% sao 5102 e NENHUM item e de fora do estado; os outros 20% sao 5949, 5101,
+ * 5104, 5405, 5656 e 5910 - exatamente o que ela quer enxergar. A regra literal
+ * funciona. Se um cliente comprar muito de fora do estado, 6102 entra na lista -
+ * mas isso e decisao da contabilidade, nao de programador.
+ *
+ * As marcas NAO mudam `estilo`, nao entram no resumo e nao bloqueiam nada: sao
+ * para o olho dela achar a linha na lista "Todos", que e onde ela trabalha.
+ */
+export const CFOPS_DE_SAIDA_NORMAIS: ReadonlySet<string> = new Set(['5102']);
+
+export type MarcasDaLinha = {
+  /** CFOP de saida do fornecedor fora do normal (brinde, ST, remessa, combustivel...). */
+  cfopForaDoNormal: boolean;
+  /** Primeira vez que este produto aparece deste fornecedor. */
+  produtoNovo: boolean;
+};
+
+export function marcasDaLinha(cfopOriginal: string | null | undefined, alertas: Alerta[]): MarcasDaLinha {
+  const cfop = String(cfopOriginal ?? '').trim();
+  return {
+    cfopForaDoNormal: cfop !== '' && !CFOPS_DE_SAIDA_NORMAIS.has(cfop),
+    produtoNovo: alertas.some((a) => a.codigo === 'item_novo'),
+  };
+}
