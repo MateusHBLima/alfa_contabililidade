@@ -1,4 +1,4 @@
-import { parseNFe, hashXml } from './parser';
+import { parseNFe, lerEventoNFe, hashXml } from './parser';
 import { ErroParserNFe } from './tipos';
 import type { Repo } from '../db/repo';
 import { chavesDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from '../rules/engine';
@@ -18,11 +18,27 @@ import { TODOS_CAMPOS, type Campo } from '../rules/campos';
  *   4. roda o motor de regras em cada item e ja grava as sugestoes
  *
  * O passo 4 e o que faz a segunda nota de um fornecedor chegar pronta.
+ *
+ * PRINCIPIO: nenhum arquivo some sem explicacao que a contadora entenda. Todo
+ * arquivo termina como `importada`, `duplicada`, `evento` ou `recusada`, com motivo
+ * em portugues de escritorio - nao em mensagem de parser nem de banco.
+ *
+ *   - `duplicada` diz quantos itens ela ja tinha conferido e que nada foi alterado.
+ *     Reimportar NUNCA mexe em nota existente (a gravacao e um batch atomico e a
+ *     chave e unica por tenant); o que faltava era a tela dizer isso.
+ *   - `evento` e XML de cancelamento / carta de correcao. Por decisao de 17/09 o
+ *     cancelamento e tratado A MAO pela contabilidade; o sistema nao grava o evento,
+ *     mas diz com todas as letras qual nota foi atingida. Evento ignorado e nota
+ *     cancelada sendo escriturada.
  */
 
 export type ResultadoArquivo = {
   arquivo: string;
-  status: 'importada' | 'duplicada' | 'recusada';
+  status: 'importada' | 'duplicada' | 'evento' | 'recusada';
+  /** So em `duplicada`: quantos itens a nota tem e quantos ja estavam conferidos. */
+  itensConferidos?: number;
+  /** So em `evento`. */
+  evento?: { tipo: string; descricao: string; cancela: boolean; chaveNota: string; numeroNota: string; notaNoSistema: boolean };
   chave?: string;
   notaId?: string;
   itens?: number;
@@ -35,6 +51,9 @@ export type ResultadoLote = {
   total: number;
   importadas: number;
   duplicadas: number;
+  /** Das duplicadas, quantas ja tinham algum item conferido por alguem. */
+  duplicadasTratadas: number;
+  eventos: number;
   recusadas: number;
   arquivos: ResultadoArquivo[];
 };
@@ -58,17 +77,29 @@ export async function importarArquivos(
         await importarUma(repo, bucketOriginal, empresa, loteId, arq, origem),
       );
     } catch (e) {
-      resultados.push({
-        arquivo: arq.nome,
-        status: 'recusada',
-        motivo: e instanceof Error ? e.message : 'erro desconhecido',
-      });
+      const msg = e instanceof Error ? e.message : 'erro desconhecido';
+      // Dois envios do mesmo arquivo ao mesmo tempo: o segundo bate na chave unica
+      // e o batch inteiro dele e desfeito. Nada se perde - mas "UNIQUE constraint
+      // failed" na tela da contadora parece desastre. E duplicata, e dizemos isso.
+      if (/UNIQUE constraint failed: notas\./i.test(msg)) {
+        resultados.push({
+          arquivo: arq.nome,
+          status: 'duplicada',
+          motivo: 'já estava sendo importada por outro envio — nada foi alterado',
+        });
+        continue;
+      }
+      resultados.push({ arquivo: arq.nome, status: 'recusada', motivo: msg });
     }
   }
 
   const importadas = resultados.filter((r) => r.status === 'importada').length;
   const duplicadas = resultados.filter((r) => r.status === 'duplicada').length;
   const recusadas = resultados.filter((r) => r.status === 'recusada').length;
+  const eventos = resultados.filter((r) => r.status === 'evento').length;
+  const duplicadasTratadas = resultados.filter(
+    (r) => r.status === 'duplicada' && (r.itensConferidos ?? 0) > 0,
+  ).length;
 
   await repo.bd
     .prepare(
@@ -92,13 +123,18 @@ export async function importarArquivos(
     acao: 'criar',
     entidade: 'lote_importacao',
     entidadeId: loteId,
-    valorDepois: `${importadas} importada(s), ${duplicadas} duplicada(s), ${recusadas} recusada(s)`,
+    valorDepois:
+      `${importadas} importada(s), ${duplicadas} duplicada(s), ${recusadas} recusada(s)` +
+      (eventos ? `, ${eventos} evento(s)` : ''),
     origem: 'importacao',
     ip: repo.contexto.ip,
     requestId: repo.contexto.requestId,
   });
 
-  return { loteId, total: arquivos.length, importadas, duplicadas, recusadas, arquivos: resultados };
+  return {
+    loteId, total: arquivos.length, importadas, duplicadas, duplicadasTratadas,
+    eventos, recusadas, arquivos: resultados,
+  };
 }
 
 async function importarUma(
@@ -109,6 +145,33 @@ async function importarUma(
   arq: { nome: string; conteudo: string },
   origem: string,
 ): Promise<ResultadoArquivo> {
+  const evento = lerEventoNFe(arq.conteudo);
+  if (evento) {
+    const atingida = await repo.situacaoDaNota(evento.chNFe);
+    const quando = evento.dhEvento ? ` em ${dataBr(evento.dhEvento)}` : '';
+    const porque = evento.justificativa ? ` — "${evento.justificativa}"` : '';
+    const onde = atingida
+      ? `A nota ESTÁ no sistema${atingida.emitNome ? ` (${atingida.emitNome})` : ''}` +
+        (atingida.revisados > 0 ? `, com ${atingida.revisados} item(ns) já conferido(s)` : '') + '.'
+      : 'A nota não está no sistema.';
+    const oQueFazer = evento.cancela
+      ? ' O sistema não cancela sozinho: trate esta nota manualmente.'
+      : ' O evento não foi gravado: confira a nota manualmente.';
+    return {
+      arquivo: arq.nome,
+      status: 'evento',
+      chave: evento.chNFe,
+      notaId: atingida?.id,
+      motivo:
+        `${evento.descricao.toUpperCase()} da NF ${evento.numeroNota} (série ${evento.serieNota})` +
+        `${quando}${porque}. ${onde}${oQueFazer}`,
+      evento: {
+        tipo: evento.tpEvento, descricao: evento.descricao, cancela: evento.cancela,
+        chaveNota: evento.chNFe, numeroNota: evento.numeroNota, notaNoSistema: atingida !== null,
+      },
+    };
+  }
+
   const nota = parseNFe(arq.conteudo);
 
   if (await repo.notaExiste(nota.chave)) {
@@ -116,7 +179,20 @@ async function importarUma(
     // "duplicada" prenderia o arquivo para sempre.
     const eraOrfa = await repo.limparNotaSemItens(nota.chave);
     if (!eraOrfa) {
-      return { arquivo: arq.nome, status: 'duplicada', chave: nota.chave };
+      const sit = await repo.situacaoDaNota(nota.chave);
+      const conferidos = sit?.revisados ?? 0;
+      return {
+        arquivo: arq.nome,
+        status: 'duplicada',
+        chave: nota.chave,
+        notaId: sit?.id,
+        itens: sit?.itens,
+        itensConferidos: conferidos,
+        motivo:
+          conferidos > 0
+            ? `já estava no sistema, com ${conferidos} de ${sit!.itens} itens conferidos — nada foi alterado`
+            : 'já estava no sistema — nada foi alterado',
+      };
     }
   }
 
@@ -248,6 +324,12 @@ async function importarUma(
     preenchidos,
     motivo: motivoAviso,
   };
+}
+
+/** 2026-09-09T10:02:20-03:00 -> 09/09/2026. Sem Date: o fuso do servidor nao e o da nota. */
+function dataBr(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : iso;
 }
 
 function vazioParaNulo(v: string): string | null {

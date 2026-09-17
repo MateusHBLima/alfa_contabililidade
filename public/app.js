@@ -449,7 +449,7 @@ function nomeEmpresaAtual() {
 
 function marcarEscopo() {
   const nome = nomeEmpresaAtual();
-  for (const id of ['#escopo-fornecedores', '#escopo-regras']) {
+  for (const id of ['#escopo-fornecedores', '#escopo-regras', '#escopo-relatorios']) {
     const el = $(id);
     if (el) el.textContent = nome ? `de ${nome}` : 'nenhuma empresa selecionada';
   }
@@ -457,12 +457,13 @@ function marcarEscopo() {
 
 function irPara(view) {
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
-  ['v1', 'v2', 'v3', 'vEmpresas', 'vFornecedores', 'vRegras', 'vUsuarios', 'vPapeis'].forEach((v) =>
+  ['v1', 'v2', 'v3', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vUsuarios', 'vPapeis'].forEach((v) =>
     $('#' + v).classList.toggle('hidden', v !== view));
   marcarEscopo();
   if (view === 'vEmpresas') renderEmpresas();
   if (view === 'vFornecedores') carregarFornecedores();
   if (view === 'vRegras') carregarRegras();
+  if (view === 'vRelatorios') abrirRelatorios();
   if (view === 'vUsuarios') carregarUsuarios();
   if (view === 'vPapeis') carregarPapeis();
 }
@@ -476,10 +477,11 @@ $('#sel-empresa').addEventListener('change', async (e) => {
   estado.competencia = '';
   await carregarCompetencias();
   // Trocar de empresa nao pode deixar na tela a lista da empresa anterior.
-  const aberta = ['vFornecedores', 'vRegras']
+  const aberta = ['vFornecedores', 'vRegras', 'vRelatorios']
     .find((v) => !$('#' + v).classList.contains('hidden'));
   if (aberta === 'vFornecedores') await carregarFornecedores();
   if (aberta === 'vRegras') await carregarRegras();
+  if (aberta === 'vRelatorios') await abrirRelatorios();
   await carregarNotas();
 });
 
@@ -618,38 +620,104 @@ drop.addEventListener('drop', (e) => {
 });
 inputArquivo.addEventListener('change', () => enviar([...inputArquivo.files]));
 
+// Importacao: uma de cada vez, em lotes, com contagem na tela.
+//
+// O primeiro lote real tinha 78 arquivos. Ia tudo numa requisicao so, o log
+// escrevia "enviando 78 arquivo(s)..." e congelava; parecia travado, e a
+// contadora soltava os arquivos de novo. Reimportar nunca apagou nada (o
+// servidor devolve "duplicada"), mas ela nao tinha como saber.
+//
+//   1. TRAVA: com importacao em voo, soltar de novo nao dispara nada - e diz por que.
+//   2. LOTES de 20: a contagem anda na tela e nenhuma requisicao fica gigante.
+//   3. O resultado fala a lingua dela: o que ja existia, o que ja estava
+//      conferido ("nada foi alterado") e os EVENTOS (cancelamento) no topo.
+const TAMANHO_LOTE_IMPORT = 20;
+let importando = false;
+
+function travarImportacao(sim) {
+  importando = sim;
+  drop.classList.toggle('ocupado', sim);
+  drop.setAttribute('aria-busy', sim ? 'true' : 'false');
+  inputArquivo.disabled = sim;
+}
+
 async function enviar(arquivos) {
+  if (importando) {
+    return alerta('Já existe uma importação em andamento. Espere ela terminar — a contagem está andando logo abaixo.');
+  }
   if (!estado.empresaId) return alerta('Escolha uma empresa antes de importar.');
   const xmls = arquivos.filter((f) => f.name.toLowerCase().endsWith('.xml'));
   if (xmls.length === 0) return alerta('Nenhum arquivo .xml no que foi solto.');
 
   const log = $('#log-import');
   log.classList.remove('hidden');
-  log.textContent = `enviando ${xmls.length} arquivo(s)...\n`;
+  const empresaDoEnvio = estado.empresaId;
+  const tot = { importadas: 0, duplicadas: 0, duplicadasTratadas: 0, eventos: 0, recusadas: 0 };
+  const linhas = [];
+  let feitos = 0;
 
-  const form = new FormData();
-  for (const f of xmls) form.append('arquivos', f, f.name);
+  const placar = () =>
+    `${tot.importadas} importada(s) · ${tot.duplicadas} já existia(m)` +
+    (tot.eventos ? ` · ${tot.eventos} evento(s)` : '') +
+    ` · ${tot.recusadas} recusada(s)`;
 
+  travarImportacao(true);
+  log.textContent = `importando… 0 de ${xmls.length}\nnão precisa enviar de novo: a contagem anda aqui.`;
   try {
-    const r = await api(`/api/empresas/${estado.empresaId}/importar`, { method: 'POST', body: form });
-    log.textContent =
-      `${r.importadas} importada(s) · ${r.duplicadas} duplicada(s) · ${r.recusadas} recusada(s)\n\n` +
-      r.arquivos
-        .map((a) => {
-          const marca = { importada: '✓', duplicada: '=', recusada: '✕' }[a.status];
-          const extra = a.status === 'importada'
-            ? `${a.itens} itens${a.preenchidos ? `, ${a.preenchidos} já preenchidos pelo padrão` : ''}`
-            : (a.motivo ?? '');
-          return `${marca} ${a.arquivo}  ${extra}`;
-        })
-        .join('\n');
+    for (let i = 0; i < xmls.length; i += TAMANHO_LOTE_IMPORT) {
+      const fatia = xmls.slice(i, i + TAMANHO_LOTE_IMPORT);
+      const form = new FormData();
+      for (const f of fatia) form.append('arquivos', f, f.name);
+      try {
+        const r = await api(`/api/empresas/${empresaDoEnvio}/importar`, { method: 'POST', body: form });
+        tot.importadas += r.importadas;
+        tot.duplicadas += r.duplicadas;
+        tot.duplicadasTratadas += r.duplicadasTratadas ?? 0;
+        tot.eventos += r.eventos ?? 0;
+        tot.recusadas += r.recusadas;
+        linhas.push(...r.arquivos);
+      } catch (e) {
+        // Um lote que falha nao derruba os outros, e nao some: vira recusa com motivo.
+        tot.recusadas += fatia.length;
+        linhas.push(...fatia.map((f) => ({ arquivo: f.name, status: 'recusada', motivo: 'o envio falhou: ' + e.message })));
+      }
+      feitos += fatia.length;
+      log.textContent = `importando… ${feitos} de ${xmls.length}\n${placar()}`;
+    }
+
+    const marca = { importada: '✓', duplicada: '=', evento: '⚠', recusada: '✕' };
+    const texto = (a) => {
+      const extra = a.status === 'importada'
+        ? `${a.itens} itens${a.preenchidos ? `, ${a.preenchidos} já preenchidos pelo padrão` : ''}${a.motivo ? ' · ' + a.motivo : ''}`
+        : (a.motivo ?? '');
+      return `${marca[a.status] ?? '?'} ${a.arquivo}  ${extra}`;
+    };
+    // O que pede acao dela vem primeiro: evento, depois recusa. O resto e conferencia.
+    const ordem = { evento: 0, recusada: 1, importada: 2, duplicada: 3 };
+    linhas.sort((a, b) => (ordem[a.status] ?? 9) - (ordem[b.status] ?? 9));
+
+    const cabecalho = [`${xmls.length} arquivo(s) · ${placar()}`];
+    if (tot.duplicadas > 0) {
+      cabecalho.push(
+        tot.duplicadasTratadas > 0
+          ? `${tot.duplicadas} nota(s) já estavam no sistema — ${tot.duplicadasTratadas} com itens que você já conferiu. Nenhuma foi alterada.`
+          : `${tot.duplicadas} nota(s) já estavam no sistema. Nenhuma foi alterada.`,
+      );
+    }
+    if (tot.eventos > 0) {
+      cabecalho.push(`ATENÇÃO: ${tot.eventos} arquivo(s) são EVENTO de nota (cancelamento/correção) — veja logo abaixo qual nota.`);
+    }
+    log.textContent = cabecalho.join('\n') + '\n\n' + linhas.map(texto).join('\n');
+
     // Nota nova pode trazer competencia nova: o seletor tem que saber dela.
     await carregarCompetencias();
     await carregarNotas();
   } catch (e) {
     log.textContent = 'falhou: ' + e.message;
+  } finally {
+    travarImportacao(false);
+    inputArquivo.value = '';
   }
-  inputArquivo.value = '';
 }
 
 async function carregarNotas() {
@@ -890,6 +958,17 @@ function renderItens() {
 
   corpo.innerHTML = lista.map((i) => linhaItem(i)).join('');
 
+  // Legenda das cores: so aparece quando ha o que explicar.
+  const nCfop = n.itens.filter((i) => i.marcas?.cfopForaDoNormal).length;
+  const nNovo = n.itens.filter((i) => i.marcas?.produtoNovo).length;
+  const legenda = $('#legenda-marcas');
+  if (legenda) {
+    legenda.classList.toggle('hidden', nCfop + nNovo === 0);
+    legenda.innerHTML =
+      (nCfop ? `<span class="etiqueta etiqueta-cfop">◆ CFOP original diferente de 5102 · ${nCfop}</span>` : '') +
+      (nNovo ? `<span class="etiqueta etiqueta-novo">＋ produto novo · ${nNovo}</span>` : '');
+  }
+
   $$('#tbl-itens [data-campo]').forEach((el) => {
     el.addEventListener('change', () => salvarCampo(el.dataset.item, el.dataset.campo, el.value));
   });
@@ -905,15 +984,29 @@ function linhaItem(i) {
 
   const proc = selinhoProcedencia(i.procedencia);
 
-  return `<tr class="estado-${est.estado}">
+  // Terceiro eixo (invariante 9c): o quanto a NOTA foge do normal. Pedido da
+  // contadora para a lista "Todos", onde ela trabalha: CFOP original fora do
+  // 5102 numa cor, produto novo em outra. A cor sai quando ela confere a linha
+  // (linha certa nao ganha cor); a etiqueta em texto fica, porque cor nunca e a
+  // unica pista.
+  const m = i.marcas ?? {};
+  const classesMarca =
+    (m.cfopForaDoNormal ? ' marca-cfop' : '') +
+    (m.produtoNovo ? ' marca-novo' : '') +
+    (i.revisado ? ' marca-apagada' : '');
+
+  return `<tr class="estado-${est.estado}${classesMarca}">
     <td class="num tiny">${i.n_item}</td>
     <td>
       ${esc(i.x_prod_original)}
+      ${m.produtoNovo ? '<span class="etiqueta etiqueta-novo" title="Primeira vez que este produto aparece deste fornecedor">＋ NOVO</span>' : ''}
       <span class="porque">cód. ${esc(i.c_prod ?? '—')}${i.c_ean ? ' · EAN ' + esc(i.c_ean) : ''}</span>
       ${alertas ? `<div class="alertas">${alertas}</div>` : ''}
     </td>
     <td class="mono tiny">${esc(i.ncm ?? '—')}</td>
-    <td class="mono tiny">${esc(i.cfop_original)}</td>
+    <td class="mono tiny">${m.cfopForaDoNormal
+      ? `<span class="etiqueta etiqueta-cfop" title="O normal é 5102 (venda de mercadoria). Este CFOP de saída é outro: confira o tratamento.">◆ ${esc(i.cfop_original)}</span>`
+      : esc(i.cfop_original)}</td>
     <td class="celula-edit">
       <input type="text" value="${esc(i.x_prod_novo ?? '')}" data-item="${i.id}" data-campo="descricao">
     </td>
@@ -1991,6 +2084,96 @@ $('#btn-convidar').addEventListener('click', () => gerarConvite().catch((e) => a
 $('#btn-novo-usuario').addEventListener('click', () => editarUsuario(null).catch((e) => alerta(e.message)));
 
 // ------------------------------------------------------------------ fornecedores e regras
+
+// ------------------------------------------------------------------ relatorios
+//
+// Por CFOP e por produto, por empresa e competencia. Pedido da contadora para
+// bater o tratamento dela com o da colega no fim do mes - e o instrumento de
+// medicao do projeto. A conta e do servidor; a tela so desenha, e a planilha
+// baixada sai da MESMA rota (formato=csv), para tela e arquivo nunca discordarem.
+
+const rel = { qual: 'cfop', competencia: '' };
+
+async function abrirRelatorios() {
+  if (!estado.empresaId) return;
+  if (estado.competencias.length === 0) await carregarCompetencias();
+  const sel = $('#rel-competencia');
+  // As opcoes vem do universo inteiro de competencias, nunca de um resultado filtrado.
+  const comps = estado.competencias.map((c) => c.competencia);
+  if (!comps.includes(rel.competencia)) {
+    rel.competencia = comps.includes(estado.competencia) ? estado.competencia : (comps[0] ?? '');
+  }
+  sel.innerHTML = comps.length
+    ? comps.map((c) => `<option value="${c}">${MESES[Number(c.slice(5)) - 1] ?? c.slice(5)} de ${c.slice(0, 4)}</option>`).join('')
+    : '<option value="">nenhuma nota importada</option>';
+  sel.value = rel.competencia;
+  await carregarRelatorio();
+}
+
+async function carregarRelatorio() {
+  const tabela = $('#tbl-relatorio');
+  const aviso = $('#rel-aviso');
+  const [cab, corpo, pe] = [tabela.querySelector('thead'), tabela.querySelector('tbody'), tabela.querySelector('tfoot')];
+  if (!estado.empresaId || !rel.competencia) {
+    cab.innerHTML = pe.innerHTML = '';
+    corpo.innerHTML = '<tr><td class="vazio">Importe notas desta empresa para ver os relatórios.</td></tr>';
+    aviso.classList.add('hidden');
+    return;
+  }
+  corpo.innerHTML = '<tr><td class="vazio">calculando…</td></tr>';
+  let r;
+  try {
+    r = await api(`/api/empresas/${estado.empresaId}/relatorios/${rel.qual}?competencia=${rel.competencia}`);
+  } catch (e) {
+    cab.innerHTML = pe.innerHTML = '';
+    corpo.innerHTML = `<tr><td class="vazio">Não consegui montar o relatório: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+
+  // O relatorio inclui o que ainda nao foi conferido - e diz isso, para o total
+  // bater com o do outro sistema sem fazer palpite passar por decisao.
+  const pendentes = r.totais.itens - r.totais.conferidos;
+  aviso.classList.toggle('hidden', pendentes === 0);
+  aviso.textContent = pendentes > 0
+    ? `⚠ ${pendentes} de ${r.totais.itens} itens ainda não foram conferidos — entram aqui com o valor sugerido pelo sistema.`
+    : '';
+
+  const qtd = (v) => Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 4 });
+  if (rel.qual === 'cfop') {
+    cab.innerHTML = '<tr><th>CFOP de entrada</th><th>Natureza</th><th class="num">Itens</th><th class="num">Conferidos</th><th class="num">Valor total</th><th>CFOP original (itens)</th></tr>';
+    corpo.innerHTML = r.linhas.map((l) => `<tr>
+      <td class="mono"><b>${esc(l.cfop)}</b></td><td>${esc(l.natureza)}</td>
+      <td class="num">${l.itens}</td><td class="num">${l.conferidos}</td>
+      <td class="num">${moeda(l.valor)}</td><td class="tiny">${esc(l.origem)}</td></tr>`).join('');
+    pe.innerHTML = `<tr><th>Total</th><th></th><th class="num">${r.totais.itens}</th><th class="num">${r.totais.conferidos}</th><th class="num">${moeda(r.totais.valor)}</th><th></th></tr>`;
+  } else {
+    cab.innerHTML = '<tr><th>Produto</th><th>Un.</th><th class="num">Quantidade</th><th class="num">Unitário médio</th><th class="num">Valor total</th><th>CFOP</th><th>Cód. fornecedor</th><th class="num">Notas</th></tr>';
+    corpo.innerHTML = r.linhas.map((l) => `<tr>
+      <td>${esc(l.descricao)}${l.descricaoOriginal && l.descricaoOriginal !== l.descricao
+        ? `<span class="porque">na nota: ${esc(l.descricaoOriginal)}</span>` : ''}</td>
+      <td class="tiny">${esc(l.unidade)}</td>
+      <td class="num">${qtd(l.quantidade)}</td>
+      <td class="num">${l.valorUnitarioMedio === null ? '—' : Number(l.valorUnitarioMedio).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
+      <td class="num">${moeda(l.valor)}</td>
+      <td class="mono tiny">${esc(l.cfops)}</td><td class="mono tiny">${esc(l.codigos)}</td>
+      <td class="num">${l.notas}</td></tr>`).join('');
+    pe.innerHTML = `<tr><th>Total · ${r.linhas.length} produtos</th><th></th><th></th><th></th><th class="num">${moeda(r.totais.valor)}</th><th></th><th></th><th></th></tr>`;
+  }
+  if (r.linhas.length === 0) {
+    corpo.innerHTML = '<tr><td class="vazio" colspan="8">Nenhum item nesta competência.</td></tr>';
+  }
+}
+
+$$('#rel-qual button').forEach((b) => b.addEventListener('click', () => {
+  rel.qual = b.dataset.rel;
+  $$('#rel-qual button').forEach((x) => x.classList.toggle('on', x === b));
+  carregarRelatorio();
+}));
+$('#rel-competencia').addEventListener('change', (e) => { rel.competencia = e.target.value; carregarRelatorio(); });
+$('#rel-baixar').addEventListener('click', () => {
+  if (!estado.empresaId || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
+  baixar(`/api/empresas/${estado.empresaId}/relatorios/${rel.qual}?competencia=${rel.competencia}&formato=csv`);
+});
 
 async function carregarFornecedores() {
   if (!estado.empresaId) return;

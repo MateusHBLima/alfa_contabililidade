@@ -16,8 +16,9 @@ import { gerarXmlCorrigido, verificarInvariantes } from './nfe/serializer';
 import { ErroParserNFe } from './nfe/tipos';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
 import { aprender, chavesDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
-import { detectarAlertas, estiloDaLinha, resumirNota } from './rules/alertas';
+import { detectarAlertas, estiloDaLinha, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
+import { montarRelatorioCfop, montarRelatorioProdutos, csvCfop, csvProdutos } from './relatorios/relatorios';
 
 type Env = {
   DB: D1Database;
@@ -1638,6 +1639,42 @@ app.get('/api/empresas/:id/competencias', async (c) => {
 });
 
 /**
+ * Relatórios de conferência por empresa e competência: por CFOP e por produto.
+ * JSON para a tela; `?formato=csv` para a planilha. Regra e formato em
+ * src/relatorios/relatorios.ts.
+ */
+app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const qual = c.req.param('qual');
+  if (qual !== 'cfop' && qual !== 'produtos') return c.json({ erro: 'relatório desconhecido' }, 404);
+
+  const competencia = c.req.query('competencia') || undefined;
+  if (competencia && !/^\d{4}(-\d{2})?$/.test(competencia)) {
+    return c.json({ erro: 'competência inválida (use AAAA-MM ou AAAA)' }, 400);
+  }
+  const repo = c.get('repo');
+  const empresaId = c.req.param('id');
+  const rel =
+    qual === 'cfop'
+      ? montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia))
+      : montarRelatorioProdutos(await repo.relatorioProdutos(empresaId, competencia));
+
+  if (c.req.query('formato') === 'csv') {
+    const corpo = qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any);
+    const empresa = await repo.obterEmpresa(empresaId);
+    const nome = `relatorio-${qual}-${empresa?.cnpj ?? 'empresa'}-${competencia ?? 'tudo'}.csv`;
+    return new Response(corpo, {
+      headers: {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': `attachment; filename="${nome}"`,
+        'cache-control': 'no-store',
+      },
+    });
+  }
+  return c.json({ competencia: competencia ?? null, ...rel });
+});
+
+/**
  * A nota com os itens, os alertas de divergência e o resumo do topo da tela.
  *
  * É aqui que "quando não bater, chamar a atenção" vira dado. A tela não decide o que
@@ -1715,6 +1752,8 @@ app.get('/api/notas/:id', async (c) => {
       procedencia,
       descricaoDoFornecedor: ctxAlerta.descricaoDoFornecedor,
       estilo: estiloDaLinha(i.confianca, alertas, i.revisado === 1, procedencia),
+      // Terceiro eixo (9c): o quanto a nota foge do normal. Nao mexe no estilo.
+      marcas: marcasDaLinha(i.cfop_original, alertas),
     };
   });
 

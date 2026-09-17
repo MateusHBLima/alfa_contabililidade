@@ -161,6 +161,7 @@
       <div class="navlabel">Da empresa selecionada</div>
       <button data-view="vFornecedores"><span class="num">F</span><span>Fornecedores<span class="sub">só desta empresa</span></span></button>
       <button data-view="vRegras"><span class="num">R</span><span>Padrões aprendidos<span class="sub">só desta empresa</span></span></button>
+      <button data-view="vRelatorios"><span class="num">📊</span><span>Relatórios<span class="sub">por CFOP e por produto</span></span></button>
       <div class="navlabel">Administração</div>
       <button data-view="vUsuarios"><span class="num">U</span><span>Usuários<span class="sub">quem entra e o que pode</span></span></button>
       <button data-view="vPapeis"><span class="num">P</span><span>Papéis<span class="sub">conjuntos de permissões</span></span></button>
@@ -253,6 +254,7 @@
               <button class="btn sm primary" id="btn-ver-xml">Ver XML corrigido →</button>
             </div>
           </header>
+          <div id="legenda-marcas" class="legenda-marcas hidden"></div>
           <div class="toolbar">
             <div class="filters" id="filtros">
               <button data-f="todos" class="on">Todos</button>
@@ -363,6 +365,27 @@
               <thead><tr><th>CNPJ</th><th>Nome</th><th>UF</th><th class="num">Notas</th><th>Última</th><th>Padrão</th></tr></thead>
               <tbody></tbody>
             </table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------- RELATÓRIOS -->
+      <section id="vRelatorios" class="hidden">
+        <h1>Relatórios <span class="escopo-empresa" id="escopo-relatorios"></span></h1>
+        <p class="page-desc">Como as notas ficaram depois do tratamento, para bater com o outro sistema.</p>
+        <div class="card">
+          <div class="toolbar">
+            <div class="filters" id="rel-qual">
+              <button data-rel="cfop" class="on">Por CFOP</button>
+              <button data-rel="produtos">Por produto</button>
+            </div>
+            <select id="rel-competencia" style="font-size:12px;width:210px"></select>
+            <div class="sep"></div>
+            <button class="btn sm primary" id="rel-baixar">⇩ Baixar planilha</button>
+          </div>
+          <div id="rel-aviso" class="placar sutil hidden" style="margin:0 14px 8px"></div>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-relatorio"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>
           </div>
         </div>
       </section>

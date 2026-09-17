@@ -30,6 +30,26 @@ export type NotaFiscal = {
   itens: ItemNFe[];
 };
 
+/** Evento da NF-e (cancelamento, carta de correcao, manifestacao). Ver lerEventoNFe. */
+export type EventoNFe = {
+  chNFe: string;
+  tpEvento: string;
+  descricao: string;
+  nSeqEvento: string | null;
+  dhEvento: string | null;
+  justificativa: string | null;
+  /** Protocolo de autorizacao da NOTA atingida (vem em detEvento). */
+  protocoloNota: string | null;
+  /** Protocolo do proprio EVENTO (vem em retEvento). */
+  protocoloEvento: string | null;
+  cStat: string | null;
+  numeroNota: string;
+  serieNota: string;
+  emitCnpj: string;
+  /** true quando o evento tira a nota da escrituracao. */
+  cancela: boolean;
+};
+
 export class ErroParserNFe extends Error {
   constructor(mensagem: string) {
     super(mensagem);
