@@ -850,7 +850,47 @@ $('#orig-baixar').addEventListener('click', () => {
   if (estado.notaAberta) baixar(`/api/notas/${estado.notaAberta.nota.id}/original?formato=xml`);
 });
 
+// Dois jeitos de ver o original: como NOTA (legivel) e como XML (o arquivo cru,
+// indentado, com os campos que o sistema le em destaque). O XML vem da mesma rota
+// do download - e o arquivo guardado, sem passar por nenhuma leitura nossa.
+const CAMPOS_LIDOS = ['xProd', 'cProd', 'cEAN', 'NCM', 'CEST', 'CFOP', 'uCom', 'qCom', 'vUnCom', 'vProd', 'vNF', 'nNF', 'chNFe'];
+
+function indentarXml(xml) {
+  let nivel = 0;
+  return xml.replace(/>\s*</g, '>\n<').split('\n').map((l) => {
+    if (/^<\//.test(l)) nivel = Math.max(0, nivel - 1);
+    const linha = '  '.repeat(nivel) + l;
+    if (/^<[^!?\/]([^>]*[^\/])?>$/.test(l)) nivel += 1;
+    return linha;
+  }).join('\n');
+}
+
+async function mostrarModoOriginal(modo) {
+  $$('#orig-modo button').forEach((b) => b.classList.toggle('on', b.dataset.modo === modo));
+  $('#orig-corpo').classList.toggle('hidden', modo !== 'nota');
+  $('#orig-xml').classList.toggle('hidden', modo !== 'xml');
+  if (modo !== 'xml' || !estado.notaAberta) return;
+  const pre = $('#orig-xml-pre');
+  if (pre.dataset.nota === estado.notaAberta.nota.id) return;
+  pre.textContent = 'lendo o arquivo…';
+  try {
+    const r = await fetch(`/api/notas/${estado.notaAberta.nota.id}/original?formato=xml`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('o servidor respondeu ' + r.status);
+    let texto = indentarXml(await r.text());
+    // Assinatura e certificado sao centenas de linhas de base64: recolhidos, com aviso.
+    texto = texto.replace(/(<(?:X509Certificate|SignatureValue)>)[^<]{80,}(<\/)/g, '$1… (recolhido — está íntegro no arquivo) …$2');
+    const re = new RegExp(`(&lt;(${CAMPOS_LIDOS.join('|')})&gt;)([^&]*)(&lt;\\/\\2&gt;)`, 'g');
+    pre.innerHTML = esc(texto).replace(re, '$1<mark>$3</mark>$4');
+    pre.dataset.nota = estado.notaAberta.nota.id;
+  } catch (e) {
+    pre.textContent = 'Não consegui abrir o XML: ' + e.message;
+  }
+}
+$$('#orig-modo button').forEach((b) => b.addEventListener('click', () => mostrarModoOriginal(b.dataset.modo)));
+
 async function abrirOriginal() {
+  $('#orig-xml-pre').dataset.nota = '';
+  mostrarModoOriginal('nota');
   const aberta = estado.notaAberta;
   if (!aberta) return alerta('Abra uma nota primeiro.');
   irPara('vOriginal');

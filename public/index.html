@@ -344,9 +344,15 @@
           Ao lado de cada item, o que o sistema está mostrando.</p>
         <div class="toolbar" style="padding-left:0">
           <button class="btn sm" id="orig-voltar">← Tratamento</button>
+          <div class="filters" id="orig-modo">
+            <button data-modo="nota" class="on">Nota</button>
+            <button data-modo="xml">XML do fornecedor</button>
+          </div>
           <button class="btn sm" id="orig-baixar">⇩ Baixar XML original</button>
         </div>
         <div id="orig-corpo"></div>
+        <div id="orig-xml" class="card hidden"><header><h2>XML original</h2><span class="hint">exatamente o arquivo guardado · em destaque, os campos que o sistema lê</span></header>
+          <div class="body"><pre class="xml orig-xml-pre" id="orig-xml-pre"></pre></div></div>
       </section>
 
       <!-- ------------------------------------------------- EMPRESAS -->
