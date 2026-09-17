@@ -305,35 +305,61 @@
 
       <!-- ------------------------------------------------ AMBIENTE 3 -->
       <section id="v3" class="hidden">
-        <h1>XML corrigido</h1>
+        <h1>XML corrigido <span class="escopo-empresa" id="escopo-xml"></span></h1>
         <p class="page-desc">O XML original nunca é alterado — a assinatura do fornecedor seria invalidada.
-          O corrigido é cópia de trabalho para escrituração.</p>
+          O corrigido é cópia de trabalho para escrituração: só CFOP e descrição mudam.</p>
 
-        <div class="grid2">
-          <div class="card">
-            <header><h2>Validações</h2><span class="hint">rodam a cada exportação</span></header>
-            <div class="body"><ul class="checklist" id="lista-validacoes">
-              <li class="tiny">Selecione uma nota no ambiente 2.</li>
-            </ul></div>
-          </div>
-          <div class="card">
-            <header><h2>Exportar</h2></header>
-            <div class="body">
-              <div class="rowflex">
-                <button class="btn primary" id="btn-baixar-xml">⇩ XML corrigido</button>
-                <button class="btn" id="btn-baixar-csv">⇩ Dados de escrituração (.csv)</button>
-              </div>
-              <div class="aviso">
-                O CSV traz CST de entrada, conta contábil e créditos. Esses campos são
-                <b>registrados, não gravados no XML</b> — só CFOP e descrição vão para dentro da nota.
-              </div>
+        <div class="card">
+          <div class="toolbar">
+            <select id="xc-competencia" style="font-size:12px;width:210px"></select>
+            <div class="filters" id="xc-filtro">
+              <button data-xc="todas" class="on">Todas</button>
+              <button data-xc="prontas">Prontas para exportar</button>
+              <button data-xc="pendentes">Pendentes</button>
             </div>
+            <div class="sep"></div>
+            <button class="btn sm primary" id="xc-baixar-zip"
+              title="Um arquivo .zip com o XML corrigido de todas as notas 100% conferidas do mês">⇩ Baixar todas as conferidas (.zip)</button>
+          </div>
+          <div id="xc-resumo" class="placar sutil" style="margin:0 14px 8px"></div>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-xc">
+              <thead><tr><th>Emissão</th><th>Número</th><th>Fornecedor</th><th class="num">Itens</th><th>Situação</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table></div>
           </div>
         </div>
 
-        <div class="card">
-          <header><h2>Prévia do XML</h2><span class="hint">tags <span class="mono">xProd</span> e <span class="mono">CFOP</span> destacadas</span></header>
-          <div class="body"><pre class="xml" id="previa-xml">Selecione uma nota.</pre></div>
+        <div id="xc-detalhe" class="hidden">
+          <div class="grid2">
+            <div class="card">
+              <header><h2 id="xc-titulo">Validações</h2><span class="hint">rodam a cada exportação</span></header>
+              <div class="body"><ul class="checklist" id="lista-validacoes"></ul></div>
+            </div>
+            <div class="card">
+              <header><h2>Exportar esta nota</h2></header>
+              <div class="body">
+                <div class="rowflex">
+                  <button class="btn primary" id="btn-baixar-xml">⇩ XML corrigido</button>
+                  <button class="btn" id="btn-baixar-csv">⇩ Dados de escrituração (.csv)</button>
+                </div>
+                <div class="aviso">
+                  O CSV traz CST de entrada, conta contábil e créditos. Esses campos são
+                  <b>registrados, não gravados no XML</b> — só CFOP e descrição vão para dentro da nota.
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <header><h2>O que muda no XML</h2><span class="hint" id="xc-hint-mudancas"></span></header>
+            <div class="body tight"><div class="scroll"><table id="tbl-xc-mudancas">
+              <thead><tr><th>Item</th><th>Campo</th><th>No original</th><th>No corrigido</th></tr></thead><tbody></tbody>
+            </table></div></div>
+          </div>
+          <div class="card">
+            <header><h2>XML corrigido</h2><span class="hint">o arquivo exatamente como será baixado · em destaque, o que mudou</span></header>
+            <div class="body"><pre class="xml orig-xml-pre" id="previa-xml"></pre></div>
+          </div>
         </div>
       </section>
 

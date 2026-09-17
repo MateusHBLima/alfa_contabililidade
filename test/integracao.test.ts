@@ -2855,3 +2855,127 @@ describe('nota original: o XML do fornecedor, legível, cruzado com o que o app 
     expect((await req(`/api/notas/nao-existe/original`)).status).toBe(404);
   });
 });
+
+describe('XML corrigido: a página deixa de ser beco — prévia real e exportação em lote', () => {
+  /* Relato do Mateus em 17/09: "não está aparecendo nenhum". Pelo menu a página
+     abria vazia, a prévia era um resumo montado na tela, e não havia como baixar a
+     competência inteira. */
+
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+
+  let ck = '';
+  let empresaId = '';
+  const req = (c: string, cookie = ck) =>
+    app.fetch(new Request(`http://x${c}`, { headers: { Cookie: cookie } }), ambiente());
+
+  /** Lê um zip "store": devolve nome -> conteúdo. Leitor independente do escritor. */
+  const lerZip = (b: Uint8Array) => {
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    const out = new Map<string, string>();
+    let p = 0;
+    while (dv.getUint32(p, true) === 0x04034b50) {
+      const tam = dv.getUint32(p + 18, true);
+      const nomeLen = dv.getUint16(p + 26, true);
+      const extra = dv.getUint16(p + 28, true);
+      const nome = new TextDecoder().decode(b.slice(p + 30, p + 30 + nomeLen));
+      const ini = p + 30 + nomeLen + extra;
+      out.set(nome, new TextDecoder().decode(b.slice(ini, ini + tam)));
+      p = ini + tam;
+    }
+    return out;
+  };
+
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    empresaId = await repo.criarEmpresa({
+      cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'industrializacao',
+    });
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'a.xml', conteudo: outraNota(XML, '11') },
+      { nome: 'b.xml', conteudo: outraNota(XML, '22') },
+    ]);
+    // A nota ...11 ela tratou inteira (e mudou um CFOP e uma descrição); a ...22 ficou pela metade.
+    const [n11, n22] = db.consultar('SELECT id FROM notas ORDER BY chave') as any[];
+    db.consultar(`UPDATE itens SET revisado = 1 WHERE nota_id = '${n11.id}'`);
+    db.consultar(`UPDATE itens SET cfop_novo = '1556', x_prod_novo = 'DETERGENTE NEUTRO' WHERE nota_id = '${n11.id}' AND n_item = 3`);
+    db.consultar(`UPDATE itens SET revisado = 1 WHERE nota_id = '${n22.id}' AND n_item = 1`);
+  });
+
+  it('a prévia é o arquivo de verdade: o mesmo XML que o download entrega, com a lista do que mudou', async () => {
+    const n11 = (db.consultar('SELECT id FROM notas ORDER BY chave')[0] as any).id;
+    const previa: any = await (await req(`/api/notas/${n11}/xml-corrigido/previa`)).json();
+    const baixado = await (await req(`/api/notas/${n11}/xml-corrigido`)).text();
+    expect(previa.xml).toBe(baixado);
+    expect(previa.exportavel).toBe(true);
+    expect(previa.conferidos).toBe(3);
+    const i3 = previa.alteracoes.filter((a: any) => a.nItem === 3);
+    expect(i3.find((a: any) => a.campo === 'CFOP')).toMatchObject({ depois: '1556' });
+    expect(i3.find((a: any) => a.campo === 'xProd')).toMatchObject({ depois: 'DETERGENTE NEUTRO' });
+    expect(previa.xml).toContain('<xProd>DETERGENTE NEUTRO</xProd>');
+    expect(previa.invariantes.every((i: any) => i.ok)).toBe(true);
+  });
+
+  it('ver a prévia não conta como exportação: nada entra na trilha', async () => {
+    const n11 = (db.consultar('SELECT id FROM notas ORDER BY chave')[0] as any).id;
+    const antes = (db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0] as any).n;
+    await req(`/api/notas/${n11}/xml-corrigido/previa`);
+    expect((db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0] as any).n).toBe(antes);
+  });
+
+  it('a lista diz a situação de cada nota: conferidos e itens sem CFOP', async () => {
+    db.consultar(`UPDATE itens SET cfop_novo = NULL WHERE n_item = 2 AND nota_id IN (SELECT id FROM notas WHERE chave LIKE '%22')`);
+    const notas: any[] = await (await req(`/api/empresas/${empresaId}/notas?competencia=2026-08`)).json() as any;
+    const n22 = notas.find((n) => String(n.chave).endsWith('22'));
+    const n11 = notas.find((n) => String(n.chave).endsWith('11'));
+    expect(n22.itens_sem_cfop).toBe(1);
+    expect(n11.itens_sem_cfop).toBe(0);
+    expect(n11.itens_revisados).toBe(n11.total_itens);
+  });
+
+  it('o zip leva SÓ a nota 100% conferida; a outra fica de fora, com motivo, no LEIA-ME — e fica na trilha', async () => {
+    const resp = await req(`/api/empresas/${empresaId}/xml-corrigidos.zip?competencia=2026-08`);
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get('content-disposition')).toContain('xml-corrigidos-11222333000181-2026-08.zip');
+    const arquivos = lerZip(new Uint8Array(await resp.arrayBuffer()));
+
+    const nomes = [...arquivos.keys()].sort();
+    expect(nomes).toHaveLength(2); // uma nota + LEIA-ME
+    const xmlNome = nomes.find((n) => n.endsWith('-corrigido.xml'))!;
+    expect(xmlNome.slice(0, 44).endsWith('11')).toBe(true);
+
+    // O que está no zip é byte a byte o que o download individual entrega.
+    const n11 = (db.consultar('SELECT id FROM notas ORDER BY chave')[0] as any).id;
+    expect(arquivos.get(xmlNome)).toBe(await (await req(`/api/notas/${n11}/xml-corrigido`)).text());
+
+    const leia = arquivos.get('LEIA-ME.txt')!;
+    expect(leia).toMatch(/NESTE ARQUIVO: 1 nota/);
+    expect(leia).toMatch(/FICARAM DE FORA: 1 nota/);
+    expect(leia).toMatch(/1 de 3 itens conferidos/);
+
+    const trilha = db.consultar(`SELECT valor_depois FROM auditoria WHERE acao = 'exportar' AND entidade = 'empresa'`) as any[];
+    expect(trilha).toHaveLength(1);
+    expect(trilha[0].valor_depois).toMatch(/2026-08 · 1 nota\(s\), 1 de fora/);
+  });
+
+  it('sem nenhuma nota 100% conferida o zip não sai vazio: recusa e diz por quê', async () => {
+    db.consultar('UPDATE itens SET revisado = 0');
+    const resp = await req(`/api/empresas/${empresaId}/xml-corrigidos.zip?competencia=2026-08`);
+    expect(resp.status).toBe(422);
+    const corpo: any = await resp.json();
+    expect(corpo.erro).toMatch(/100% conferida/);
+    expect(corpo.falhas).toHaveLength(2);
+  });
+
+  it('exige competência, sessão e permissão de exportar', async () => {
+    expect((await req(`/api/empresas/${empresaId}/xml-corrigidos.zip`)).status).toBe(400);
+    expect((await req(`/api/empresas/${empresaId}/xml-corrigidos.zip?competencia=2026-08`, '')).status).toBe(401);
+  });
+});

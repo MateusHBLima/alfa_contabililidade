@@ -15,6 +15,7 @@ import { analisarCnaes } from './empresas/cnae';
 import { gerarXmlCorrigido, verificarInvariantes } from './nfe/serializer';
 import { ErroParserNFe } from './nfe/tipos';
 import { lerNotaOriginal, compararComApp } from './nfe/visao';
+import { montarZip } from './nfe/zip';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
 import { aprender, chavesDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
 import { detectarAlertas, estiloDaLinha, marcasDaLinha, resumirNota } from './rules/alertas';
@@ -2106,6 +2107,129 @@ app.get('/api/notas/:id/original', async (c) => {
     soNoApp: comparacao.soNoApp,
     divergenciasCabecalho: cabecalho,
     divergencias: comparacao.divergencias + cabecalho.length,
+  });
+});
+
+/**
+ * Monta o XML corrigido de uma nota e diz o que mudou. Não grava nem audita:
+ * quem chama decide se isto é prévia (tela) ou exportação (arquivo).
+ */
+async function montarCorrigido(c: any, notaId: string) {
+  const r = await c.get('repo').obterNotaComItens(notaId);
+  if (!r) return null;
+  const obj = r.nota.r2_original ? await c.env.XML_ORIGINAL.get(r.nota.r2_original) : null;
+  if (!obj) return { r, erro: 'XML original não encontrado no arquivo' as const };
+  const original: string = await obj.text();
+
+  const { xml } = gerarXmlCorrigido(
+    original,
+    r.itens.map((i: any) => ({ nItem: i.n_item, cfop: i.cfop_novo, xProd: i.x_prod_novo })),
+  );
+  const invariantes = verificarInvariantes(original, xml);
+
+  const alteracoes: { nItem: number; campo: 'CFOP' | 'xProd'; antes: string; depois: string }[] = [];
+  for (const i of r.itens) {
+    const cfop = String(i.cfop_novo ?? '').trim();
+    if (cfop && cfop !== String(i.cfop_original ?? '')) {
+      alteracoes.push({ nItem: i.n_item, campo: 'CFOP', antes: String(i.cfop_original ?? ''), depois: cfop });
+    }
+    const desc = String(i.x_prod_novo ?? '').trim();
+    if (desc && desc !== String(i.x_prod_original ?? '').trim()) {
+      alteracoes.push({ nItem: i.n_item, campo: 'xProd', antes: String(i.x_prod_original ?? ''), depois: desc });
+    }
+  }
+  const semCfop = r.itens.filter((i: any) => !String(i.cfop_novo ?? '').trim()).length;
+  const conferidos = r.itens.filter((i: any) => i.revisado === 1).length;
+  return { r, xml, invariantes, alteracoes, semCfop, conferidos, falhas: invariantes.filter((i) => !i.ok) };
+}
+
+/** Prévia do XML corrigido DE VERDADE (o mesmo que seria baixado), com o que mudou. Só leitura. */
+app.get('/api/notas/:id/xml-corrigido/previa', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const m = await montarCorrigido(c, c.req.param('id'));
+  if (!m) return c.json({ erro: 'nota não encontrada' }, 404);
+  if ('erro' in m) return c.json({ erro: m.erro }, 404);
+  return c.json({
+    notaId: m.r.nota.id, numero: m.r.nota.numero, emitNome: m.r.nota.emit_nome, chave: m.r.nota.chave,
+    itens: m.r.itens.length, conferidos: m.conferidos, semCfop: m.semCfop,
+    alteracoes: m.alteracoes, invariantes: m.invariantes,
+    exportavel: m.falhas.length === 0 && m.semCfop === 0,
+    xml: m.xml,
+  });
+});
+
+/**
+ * Todos os XML corrigidos da competência num .zip.
+ *
+ * Entra só nota 100% CONFERIDA: item que ninguém olhou sairia com o palpite do
+ * sistema, e palpite não entra no Questor com cara de decisão (cláusulas 3.1 "d" e
+ * 9.4). O que ficou de fora não some: vai listado, com motivo, no LEIA-ME do zip.
+ */
+app.get('/api/empresas/:id/xml-corrigidos.zip', async (c) => {
+  exigir(c.get('sessao'), 'notas.exportar');
+  const repo = c.get('repo');
+  const empresaId = c.req.param('id');
+  const competencia = c.req.query('competencia') || undefined;
+  if (!competencia || !/^\d{4}-\d{2}$/.test(competencia)) {
+    return c.json({ erro: 'escolha a competência (AAAA-MM) para exportar em lote' }, 400);
+  }
+  const empresa = await repo.obterEmpresa(empresaId);
+  if (!empresa) return c.json({ erro: 'empresa não encontrada' }, 404);
+
+  const notas = await repo.listarNotas(empresaId, competencia);
+  const arquivos: { nome: string; conteudo: string }[] = [];
+  const dentro: string[] = [];
+  const fora: string[] = [];
+
+  for (const n of notas) {
+    const rotulo = `NF ${n.numero} · ${n.emit_nome ?? n.emit_cnpj}`;
+    if (Number(n.itens_sem_cfop) > 0) { fora.push(`${rotulo} — ${n.itens_sem_cfop} item(ns) sem CFOP de entrada`); continue; }
+    if (Number(n.itens_revisados) < Number(n.total_itens)) {
+      fora.push(`${rotulo} — ${n.itens_revisados} de ${n.total_itens} itens conferidos`);
+      continue;
+    }
+    const m = await montarCorrigido(c, n.id);
+    if (!m || 'erro' in m) { fora.push(`${rotulo} — XML original não encontrado`); continue; }
+    if (m.falhas.length > 0) {
+      fora.push(`${rotulo} — não passou na validação: ${m.falhas.map((f) => f.nome).join('; ')}`);
+      continue;
+    }
+    arquivos.push({ nome: `${n.chave}-corrigido.xml`, conteudo: m.xml });
+    dentro.push(rotulo);
+  }
+
+  if (arquivos.length === 0) {
+    return c.json({
+      erro: 'nenhuma nota desta competência está 100% conferida ainda',
+      falhas: fora.slice(0, 50).map((f) => ({ nome: f })),
+    }, 422);
+  }
+
+  const leiaMe =
+    `XML corrigidos — ${empresa.razao_social} (${empresa.cnpj}) — competência ${competencia}\r\n` +
+    `Gerado em ${repo.agora()} por ${c.get('sessao').email}\r\n\r\n` +
+    `NESTE ARQUIVO: ${dentro.length} nota(s), todas com todos os itens conferidos.\r\n` +
+    dentro.map((d) => `  ✓ ${d}`).join('\r\n') +
+    `\r\n\r\nFICARAM DE FORA: ${fora.length} nota(s).\r\n` +
+    (fora.length ? fora.map((f) => `  ✕ ${f}`).join('\r\n') : '  (nenhuma)') +
+    `\r\n\r\nSó CFOP e descrição do produto são alterados no XML. O original assinado continua guardado, sem alteração.\r\n`;
+  arquivos.push({ nome: 'LEIA-ME.txt', conteudo: '\uFEFF' + leiaMe });
+
+  await repo.auditoria().registrar({
+    tenantId: repo.contexto.sessao.tenantId,
+    usuarioId: repo.contexto.sessao.usuarioId,
+    usuarioEmail: repo.contexto.sessao.email,
+    acao: 'exportar', entidade: 'empresa', entidadeId: empresaId,
+    valorDepois: `xml corrigidos em lote · ${competencia} · ${dentro.length} nota(s), ${fora.length} de fora`,
+    origem: 'manual', ip: repo.contexto.ip, requestId: repo.contexto.requestId,
+  });
+
+  return new Response(montarZip(arquivos), {
+    headers: {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="xml-corrigidos-${empresa.cnpj}-${competencia}.zip"`,
+      'cache-control': 'no-store',
+    },
   });
 });
 

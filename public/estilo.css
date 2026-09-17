@@ -440,5 +440,6 @@ tr.marca-cfop.marca-novo:not(.marca-apagada) td:nth-child(-n+2){background:#dfee
 .orig-app-cfop{background:var(--primary-soft);color:var(--primary);border-radius:4px;padding:1px 6px;font-weight:700}
 .orig-infcpl{white-space:pre-wrap;line-height:1.5}
 @media (max-width:1000px){.orig-cabecalho{grid-template-columns:1fr}}
-.orig-xml-pre{max-height:70vh;overflow:auto;white-space:pre;font-size:11.5px;line-height:1.45}
+pre.xml.orig-xml-pre{max-height:70vh;overflow:auto;white-space:pre;font-size:11.5px;line-height:1.45}
 .orig-xml-pre mark{background:#ffe08a;color:#1b1300;border-radius:3px;padding:0 2px}
+pre.xml .xml-antes{color:#8fa3bd;font-style:italic}
