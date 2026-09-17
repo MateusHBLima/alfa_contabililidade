@@ -134,6 +134,19 @@ describe('a tela desenha tudo que o servidor manda', () => {
     expect(CSS).toContain(':not(.marca-apagada)');
   });
 
+  it('a nota original abre dentro do site, de dois jeitos: como nota e como XML do fornecedor', () => {
+    const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+    for (const id of ['btn-ver-original', 'vOriginal', 'orig-corpo', 'orig-xml-pre', 'orig-baixar']) {
+      expect(HTML, `falta #${id} na tela`).toContain(`id="${id}"`);
+    }
+    expect(HTML).toContain('data-modo="nota"');
+    expect(HTML).toContain('data-modo="xml"');
+    // O XML mostrado e o ARQUIVO guardado (mesma rota do download), nunca remontado do banco.
+    expect(APP).toContain('/original?formato=xml');
+    // irPara precisa conhecer a tela, senao ela abre por cima das outras.
+    expect(APP).toMatch(/\[[^\]]*'vOriginal'[^\]]*\]\.forEach/);
+  });
+
   it('filtro que não casa nada diz o porquê e oferece a volta', () => {
     // Visto em produção: nota com 7 itens conferidos, filtro "Prontos", tela em
     // branco. Sem erro, sem mensagem — a mesma forma do bug do `pode()`: a tela
