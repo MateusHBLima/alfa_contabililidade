@@ -457,7 +457,7 @@ function marcarEscopo() {
 
 function irPara(view) {
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
-  ['v1', 'v2', 'v3', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vUsuarios', 'vPapeis'].forEach((v) =>
+  ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vUsuarios', 'vPapeis'].forEach((v) =>
     $('#' + v).classList.toggle('hidden', v !== view));
   marcarEscopo();
   if (view === 'vEmpresas') renderEmpresas();
@@ -836,6 +836,112 @@ function apagarNota(id) {
 
 $('#btn-voltar-notas').addEventListener('click', () => irPara('v1'));
 $('#btn-ver-xml').addEventListener('click', () => { irPara('v3'); renderXml(); });
+
+// ------------------------------------------------------------------ nota original
+//
+// "Preciso conseguir abrir o XML original, numa visao facil de visualizar e
+// comparar com o que o app esta trazendo." A nota e lida AGORA do arquivo guardado
+// (nunca do banco), e o servidor cruza item a item com o que o app mostra. A tela
+// so desenha: o que confere fica calmo; divergencia de leitura grita.
+
+$('#btn-ver-original').addEventListener('click', () => abrirOriginal());
+$('#orig-voltar').addEventListener('click', () => irPara('v2'));
+$('#orig-baixar').addEventListener('click', () => {
+  if (estado.notaAberta) baixar(`/api/notas/${estado.notaAberta.nota.id}/original?formato=xml`);
+});
+
+async function abrirOriginal() {
+  const aberta = estado.notaAberta;
+  if (!aberta) return alerta('Abra uma nota primeiro.');
+  irPara('vOriginal');
+  // No menu, quem fica aceso e o Tratamento: esta tela e um desvio dele.
+  $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === 'v2'));
+  const corpo = $('#orig-corpo');
+  $('#orig-titulo').textContent = `nº ${aberta.nota.numero} — ${aberta.nota.emit_nome ?? ''}`;
+  corpo.innerHTML = '<div class="card"><div class="body vazio">lendo o XML guardado…</div></div>';
+
+  let r;
+  try {
+    r = await api(`/api/notas/${aberta.nota.id}/original`);
+  } catch (e) {
+    corpo.innerHTML = `<div class="card"><div class="body vazio">Não consegui abrir a nota original: ${esc(e.message)}</div></div>`;
+    return;
+  }
+  const n = r.nota;
+  const v = (x, casas = 2) => (x === null || x === undefined ? '—'
+    : Number(x).toLocaleString('pt-BR', { minimumFractionDigits: casas, maximumFractionDigits: Math.max(casas, 4) }));
+  const doc = (d) => !d ? '—'
+    : d.length === 14 ? d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5')
+    : d.length === 11 ? d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4') : d;
+  const parte = (titulo, p) => `<div class="orig-parte"><div class="lbl">${titulo}</div>
+      <b>${esc(p.nome ?? '—')}</b>${p.fantasia ? `<span class="porque">${esc(p.fantasia)}</span>` : ''}
+      <span class="mono tiny">${esc(doc(p.doc))}${p.ie ? ' · IE ' + esc(p.ie) : ''}</span>
+      <span class="tiny">${esc([p.endereco, p.municipio, p.uf].filter(Boolean).join(' · ') || '—')}</span></div>`;
+
+  const faixa = r.divergencias === 0
+    ? `<div class="faixa ok"><b>✓ Confere.</b> Os ${r.itens.length} itens que o sistema mostra são exatamente os do XML: descrição, código, NCM, CFOP, quantidade e valores.</div>`
+    : `<div class="faixa critico"><b>▲ ${r.divergencias} diferença(s) entre o XML e o que o sistema guardou.</b> Isso não deveria acontecer — avise o suporte antes de tratar esta nota.</div>`;
+
+  const divCab = (r.divergenciasCabecalho ?? []).map((d) =>
+    `<div class="alerta critico"><span class="marca">▲</span><span>${esc(d.campo)}: no XML “${esc(d.noXml)}”, no sistema “${esc(d.noApp)}”</span></div>`).join('');
+
+  const totais = [['Produtos', 'vProd'], ['Desconto', 'vDesc'], ['Frete', 'vFrete'], ['Outras', 'vOutro'],
+    ['ICMS', 'vICMS'], ['ICMS ST', 'vST'], ['IPI', 'vIPI'], ['Total da nota', 'vNF']]
+    .filter(([, k]) => k === 'vProd' || k === 'vNF' || (n.totais[k] ?? 0) > 0)
+    .map(([l, k]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v(n.totais[k])}</div></div>`).join('');
+
+  const linhas = r.itens.map((i) => {
+    const a = i.app;
+    const mudouCfop = a && a.cfopEntrada;
+    return `<tr class="${i.divergencias.length ? 'estado-bloqueado' : ''}">
+      <td class="num tiny">${i.nItem}</td>
+      <td>${esc(i.xProd ?? '—')}
+        <span class="porque">cód. ${esc(i.cProd ?? '—')}${i.cEAN ? ' · EAN ' + esc(i.cEAN) : ''}</span>
+        ${i.descricaoAlterada ? `<span class="orig-app">no sistema: <b>${esc(a.descricao)}</b></span>` : ''}
+        ${i.infAdProd ? `<span class="porque">obs.: ${esc(i.infAdProd)}</span>` : ''}
+        ${i.divergencias.map((d) => `<div class="alerta critico"><span class="marca">▲</span><span>${esc(d.campo)}: no XML “${esc(d.noXml)}”, no sistema “${esc(d.noApp)}”</span></div>`).join('')}
+      </td>
+      <td class="mono tiny">${esc(i.NCM ?? '—')}</td>
+      <td class="mono tiny">${esc(i.cst ?? '—')}</td>
+      <td class="mono"><b>${esc(i.CFOP ?? '—')}</b></td>
+      <td class="mono">${mudouCfop ? `<span class="orig-app-cfop">→ ${esc(a.cfopEntrada)}</span>${a.revisado ? ' <span class="tiny">✓</span>' : ''}` : '—'}</td>
+      <td class="tiny">${esc(i.uCom ?? '')}</td>
+      <td class="num">${v(i.qCom, 0)}</td>
+      <td class="num">${v(i.vUnCom)}</td>
+      <td class="num">${v(i.vProd)}</td>
+      <td class="num tiny">${(i.vICMSST ?? 0) > 0 ? v(i.vICMSST) : ''}</td>
+      <td>${i.divergencias.length ? '<span class="selo selo-bloqueado"><span class="ic">▲</span>difere</span>'
+        : '<span class="selo selo-pronto"><span class="ic">✓</span>confere</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  corpo.innerHTML = `
+    ${faixa}${divCab}
+    <div class="card"><div class="body orig-cabecalho">
+      ${parte('Emitente (fornecedor)', n.emit)}
+      ${parte('Destinatário', n.dest)}
+      <div class="orig-parte"><div class="lbl">Nota</div>
+        <b>nº ${esc(n.numero ?? '—')} · série ${esc(n.serie ?? '—')}</b>
+        <span class="tiny">${esc(n.natOp ?? '—')}</span>
+        <span class="tiny">emitida em ${esc(dataCurta(n.dhEmi))}${n.finalidade ? ' · ' + esc(n.finalidade) : ''}${n.consumidorFinal ? ' · consumidor final' : ''}</span>
+        <span class="tiny">${n.protocolo ? `protocolo ${esc(n.protocolo)} — ${esc(n.situacao ?? '')}` : 'sem protocolo de autorização no arquivo'}</span>
+        <span class="mono tiny orig-chave">${esc((n.chave ?? '').replace(/(\d{4})(?=\d)/g, '$1 '))}</span>
+      </div>
+    </div></div>
+    <div class="kpis">${totais}</div>
+    <div class="card"><header><h2>Itens do XML</h2><span class="hint">à direita do CFOP do fornecedor, o CFOP de entrada que está no sistema</span></header>
+      <div class="body tight"><div class="scroll"><table>
+        <thead><tr><th>#</th><th>Produto no XML</th><th>NCM</th><th>CST</th><th>CFOP fornecedor</th><th>CFOP entrada</th><th>Un.</th>
+          <th class="num">Qtd.</th><th class="num">Unitário</th><th class="num">Total</th><th class="num">ICMS ST</th><th>Leitura</th></tr></thead>
+        <tbody>${linhas}</tbody>
+      </table></div></div>
+    </div>
+    ${r.soNoApp?.length ? `<div class="faixa critico">O sistema tem item(ns) que não existem no XML: nº ${r.soNoApp.join(', ')}.</div>` : ''}
+    ${n.pagamentos?.length ? `<div class="card"><div class="body tiny"><b>Pagamento:</b> ${n.pagamentos.map((p) => `${esc(p.forma)} ${v(p.valor)}`).join(' · ')}</div></div>` : ''}
+    ${n.infCpl || n.infAdFisco ? `<div class="card"><header><h2>Informações complementares</h2></header>
+      <div class="body tiny orig-infcpl">${esc([n.infAdFisco, n.infCpl].filter(Boolean).join('\n\n'))}</div></div>` : ''}`;
+}
+
 $('#busca').addEventListener('input', (e) => { estado.busca = e.target.value.toLowerCase(); renderItens(); });
 $$('#filtros-notas button').forEach((b) => b.addEventListener('click', () => {
   $$('#filtros-notas button').forEach((x) => x.classList.remove('on'));

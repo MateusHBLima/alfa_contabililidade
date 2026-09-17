@@ -14,6 +14,7 @@ import { importarArquivos } from './nfe/importador';
 import { analisarCnaes } from './empresas/cnae';
 import { gerarXmlCorrigido, verificarInvariantes } from './nfe/serializer';
 import { ErroParserNFe } from './nfe/tipos';
+import { lerNotaOriginal, compararComApp } from './nfe/visao';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
 import { aprender, chavesDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
 import { detectarAlertas, estiloDaLinha, marcasDaLinha, resumirNota } from './rules/alertas';
@@ -2061,6 +2062,51 @@ app.delete('/api/empresas/:id', async (c) => {
   }
 
   return c.json({ ok: true, notasApagadas: notas.length });
+});
+
+/**
+ * A nota ORIGINAL, legível, cruzada com o que o app guarda. Só leitura.
+ * `?formato=xml` baixa o arquivo exatamente como o fornecedor assinou.
+ */
+app.get('/api/notas/:id/original', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const r = await c.get('repo').obterNotaComItens(c.req.param('id'));
+  if (!r) return c.json({ erro: 'nota não encontrada' }, 404);
+
+  const obj = r.nota.r2_original ? await c.env.XML_ORIGINAL.get(r.nota.r2_original) : null;
+  if (!obj) return c.json({ erro: 'XML original não encontrado no arquivo' }, 404);
+  const xml = await obj.text();
+
+  if (c.req.query('formato') === 'xml') {
+    return new Response(xml, {
+      headers: {
+        'Content-Type': 'application/xml; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${r.nota.chave}-original.xml"`,
+        'cache-control': 'no-store',
+      },
+    });
+  }
+
+  const nota = lerNotaOriginal(xml);
+  const comparacao = compararComApp(nota, r.itens);
+  // A chave e o total do cabeçalho também são cópia: conferimos junto.
+  const cabecalho: { campo: string; noXml: string; noApp: string }[] = [];
+  if ((nota.chave ?? '') !== String(r.nota.chave ?? '')) {
+    cabecalho.push({ campo: 'chave', noXml: nota.chave ?? '—', noApp: String(r.nota.chave ?? '—') });
+  }
+  if (nota.totais['vNF'] !== null && Math.abs((nota.totais['vNF'] ?? 0) - Number(r.nota.valor_total ?? 0)) > 0.005) {
+    cabecalho.push({ campo: 'valor total', noXml: String(nota.totais['vNF']), noApp: String(r.nota.valor_total) });
+  }
+
+  return c.json({
+    notaId: r.nota.id,
+    hashGuardado: r.nota.hash_original ?? null,
+    nota: { ...nota, itens: undefined },
+    itens: comparacao.itens,
+    soNoApp: comparacao.soNoApp,
+    divergenciasCabecalho: cabecalho,
+    divergencias: comparacao.divergencias + cabecalho.length,
+  });
 });
 
 app.get('/api/notas/:id/xml-corrigido', async (c) => {

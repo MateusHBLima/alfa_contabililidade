@@ -430,3 +430,13 @@ tr.marca-cfop.marca-novo:not(.marca-apagada) td:nth-child(-n+2){background:#dfee
 .etiqueta-novo{background:#7fb2f0;color:#06264d;margin-left:6px}
 .legenda-marcas{display:flex;gap:8px;align-items:center;padding:8px 14px 0}
 .legenda-marcas .etiqueta{margin-left:0}
+
+/* Nota original: o XML do fornecedor em forma de nota, ao lado do que o sistema mostra. */
+.orig-cabecalho{display:grid;grid-template-columns:1fr 1fr 1.2fr;gap:18px}
+.orig-parte{display:flex;flex-direction:column;gap:3px;min-width:0}
+.orig-parte .lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);font-weight:700}
+.orig-chave{word-break:break-all;color:var(--muted)}
+.orig-app{display:block;font-size:11.5px;color:var(--primary-2);margin-top:2px}
+.orig-app-cfop{background:var(--primary-soft);color:var(--primary);border-radius:4px;padding:1px 6px;font-weight:700}
+.orig-infcpl{white-space:pre-wrap;line-height:1.5}
+@media (max-width:1000px){.orig-cabecalho{grid-template-columns:1fr}}

@@ -2774,3 +2774,84 @@ describe('relatórios por CFOP e por produto — o instrumento da comparação d
     expect((await app.fetch(new Request(`http://x/api/empresas/${empresaId}/relatorios/cfop`), ambiente())).status).toBe(401);
   });
 });
+
+describe('nota original: o XML do fornecedor, legível, cruzado com o que o app mostra', () => {
+  /* Pedido do Mateus em 17/09: abrir o original numa visão fácil e comparar com o
+     que o app traz. A leitura vem do ARQUIVO guardado, nunca do banco - senão
+     estaríamos comparando o banco com ele mesmo. */
+
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+
+  let ck = '';
+  let notaId = '';
+  const req = (c: string, cookie = ck) =>
+    app.fetch(new Request(`http://x${c}`, { headers: { Cookie: cookie } }), ambiente());
+
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    const empresaId = await repo.criarEmpresa({
+      cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'industrializacao',
+    });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+    notaId = (db.consultar('SELECT id FROM notas')[0] as any).id;
+  });
+
+  it('nota recém-importada: tudo que o app guarda confere com o XML', async () => {
+    const r: any = await (await req(`/api/notas/${notaId}/original`)).json();
+    const lida = parseNFe(XML);
+    expect(r.divergencias).toBe(0);
+    expect(r.itens).toHaveLength(lida.itens.length);
+    expect(r.nota.chave).toBe(CHAVE_ORIGINAL);
+    expect(r.nota.emit.nome).toBeTruthy();
+    expect(r.nota.totais.vNF).toBeCloseTo(lida.vNF!, 2);
+    for (const i of r.itens) {
+      expect(i.divergencias).toEqual([]);
+      expect(i.app).toBeTruthy();
+    }
+  });
+
+  it('o que a contadora decidiu aparece AO LADO, não como divergência', async () => {
+    db.consultar(`UPDATE itens SET cfop_novo = '1556', x_prod_novo = 'DETERGENTE NEUTRO', revisado = 1 WHERE n_item = 3`);
+    const r: any = await (await req(`/api/notas/${notaId}/original`)).json();
+    const i3 = r.itens.find((i: any) => i.nItem === 3);
+    expect(r.divergencias).toBe(0);
+    expect(i3.app).toMatchObject({ cfopEntrada: '1556', descricao: 'DETERGENTE NEUTRO', revisado: true });
+    expect(i3.descricaoAlterada).toBe(true);
+    expect(i3.xProd).not.toBe('DETERGENTE NEUTRO'); // o XML continua dizendo o que o fornecedor escreveu
+  });
+
+  it('se o banco divergir do XML, a tela fica sabendo: campo, valor no XML e valor no app', async () => {
+    db.consultar(`UPDATE itens SET quantidade = 999, ncm = '00000000' WHERE n_item = 1`);
+    db.consultar(`DELETE FROM itens WHERE n_item = 2`);
+    const r: any = await (await req(`/api/notas/${notaId}/original`)).json();
+    const i1 = r.itens.find((i: any) => i.nItem === 1);
+    expect(i1.divergencias.map((d: any) => d.campo).sort()).toEqual(['NCM', 'quantidade']);
+    expect(i1.divergencias.find((d: any) => d.campo === 'quantidade').noApp).toBe('999');
+    expect(r.itens.find((i: any) => i.nItem === 2).app).toBeNull();
+    expect(r.divergencias).toBe(3);
+  });
+
+  it('baixar devolve o arquivo byte a byte como o fornecedor assinou', async () => {
+    const resp = await req(`/api/notas/${notaId}/original?formato=xml`);
+    expect(resp.headers.get('content-disposition')).toContain(`${CHAVE_ORIGINAL}-original.xml`);
+    expect(await resp.text()).toBe(XML);
+  });
+
+  it('ler a nota original não altera nada e exige sessão', async () => {
+    const antes = JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY n_item'));
+    const trilha = db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0] as any;
+    await req(`/api/notas/${notaId}/original`);
+    expect(JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY n_item'))).toBe(antes);
+    expect((db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0] as any).n).toBe(trilha.n);
+    expect((await req(`/api/notas/${notaId}/original`, '')).status).toBe(401);
+    expect((await req(`/api/notas/nao-existe/original`)).status).toBe(404);
+  });
+});

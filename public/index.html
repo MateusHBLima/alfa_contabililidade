@@ -251,6 +251,7 @@
             <span class="hint" id="hint-nota"></span>
             <div style="margin-left:auto" class="rowflex">
               <button class="btn sm" id="btn-voltar-notas">← Notas</button>
+              <button class="btn sm" id="btn-ver-original" title="A nota como o fornecedor emitiu, lado a lado com o que o sistema leu">📄 Nota original</button>
               <button class="btn sm primary" id="btn-ver-xml">Ver XML corrigido →</button>
             </div>
           </header>
@@ -334,6 +335,18 @@
           <header><h2>Prévia do XML</h2><span class="hint">tags <span class="mono">xProd</span> e <span class="mono">CFOP</span> destacadas</span></header>
           <div class="body"><pre class="xml" id="previa-xml">Selecione uma nota.</pre></div>
         </div>
+      </section>
+
+      <!-- ------------------------------------------------- NOTA ORIGINAL -->
+      <section id="vOriginal" class="hidden">
+        <h1>Nota original <span class="escopo-empresa" id="orig-titulo"></span></h1>
+        <p class="page-desc">Lida agora do XML que o fornecedor assinou — o arquivo guardado, sem alteração.
+          Ao lado de cada item, o que o sistema está mostrando.</p>
+        <div class="toolbar" style="padding-left:0">
+          <button class="btn sm" id="orig-voltar">← Tratamento</button>
+          <button class="btn sm" id="orig-baixar">⇩ Baixar XML original</button>
+        </div>
+        <div id="orig-corpo"></div>
       </section>
 
       <!-- ------------------------------------------------- EMPRESAS -->
