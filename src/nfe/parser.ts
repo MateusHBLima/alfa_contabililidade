@@ -1,5 +1,5 @@
 import { XMLParser } from 'fast-xml-parser';
-import { ErroParserNFe, type ItemNFe, type NotaFiscal } from './tipos';
+import { ErroParserNFe, type EventoNFe, type ItemNFe, type NotaFiscal } from './tipos';
 
 /**
  * Leitor de NF-e (modelo 55).
@@ -52,6 +52,66 @@ function extrairCstIcms(imposto: No | undefined): string | null {
     }
   }
   return null;
+}
+
+/**
+ * XML de EVENTO da NF-e (`procEventoNFe` ou `evento` cru): cancelamento, carta de
+ * correcao, manifestacao. Nao e nota - nao tem item, nao tem CFOP.
+ *
+ * Devolve null quando o arquivo nao e evento, para o importador seguir o caminho
+ * normal. Existe porque, no primeiro lote real (78 arquivos), o evento de
+ * cancelamento saiu como "recusada - nao encontrei o elemento NFe": tecnicamente
+ * avisado, na pratica invisivel. Cancelamento que passa despercebido e nota
+ * cancelada sendo escriturada.
+ *
+ * Atencao aos dois `nProt`: o de `detEvento` e o protocolo de AUTORIZACAO da nota
+ * atingida; o de `retEvento` e o protocolo do proprio evento. Nao sao o mesmo.
+ */
+const NOME_EVENTO: Record<string, string> = {
+  '110111': 'Cancelamento',
+  '110112': 'Cancelamento por substituição',
+  '110110': 'Carta de correção',
+  '210200': 'Confirmação da operação',
+  '210210': 'Ciência da operação',
+  '210220': 'Desconhecimento da operação',
+  '210240': 'Operação não realizada',
+};
+
+export function lerEventoNFe(xml: string): EventoNFe | null {
+  // Barato antes de caro: a esmagadora maioria dos arquivos e nota.
+  if (!/<(\w+:)?(procEventoNFe|evento|envEvento)[\s>]/.test(xml)) return null;
+  let raiz: No;
+  try {
+    raiz = parser.parse(xml) as No;
+  } catch {
+    return null;
+  }
+  const proc = raiz['procEventoNFe'];
+  const evento = proc?.['evento'] ?? raiz['evento'] ?? raiz['envEvento']?.['evento'];
+  const inf = (Array.isArray(evento) ? evento[0] : evento)?.['infEvento'];
+  if (!inf) return null;
+
+  const chNFe = texto(inf['chNFe']);
+  const tpEvento = texto(inf['tpEvento']);
+  if (!chNFe || !/^\d{44}$/.test(chNFe) || !tpEvento) return null;
+
+  const det = inf['detEvento'] ?? {};
+  const ret = proc?.['retEvento']?.['infEvento'] ?? {};
+  return {
+    chNFe,
+    tpEvento,
+    descricao: NOME_EVENTO[tpEvento] ?? texto(det['descEvento']) ?? `Evento ${tpEvento}`,
+    nSeqEvento: texto(inf['nSeqEvento']),
+    dhEvento: texto(inf['dhEvento']),
+    justificativa: texto(det['xJust']) ?? texto(det['xCorrecao']),
+    protocoloNota: texto(det['nProt']),
+    protocoloEvento: texto(ret['nProt']),
+    cStat: texto(ret['cStat']),
+    numeroNota: String(Number(chNFe.slice(25, 34))),
+    serieNota: String(Number(chNFe.slice(22, 25))),
+    emitCnpj: chNFe.slice(6, 20),
+    cancela: tpEvento === '110111' || tpEvento === '110112',
+  };
 }
 
 export function parseNFe(xml: string): NotaFiscal {
