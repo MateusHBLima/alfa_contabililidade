@@ -449,7 +449,7 @@ function nomeEmpresaAtual() {
 
 function marcarEscopo() {
   const nome = nomeEmpresaAtual();
-  for (const id of ['#escopo-fornecedores', '#escopo-regras', '#escopo-relatorios']) {
+  for (const id of ['#escopo-fornecedores', '#escopo-regras', '#escopo-relatorios', '#escopo-xml']) {
     const el = $(id);
     if (el) el.textContent = nome ? `de ${nome}` : 'nenhuma empresa selecionada';
   }
@@ -463,6 +463,7 @@ function irPara(view) {
   if (view === 'vEmpresas') renderEmpresas();
   if (view === 'vFornecedores') carregarFornecedores();
   if (view === 'vRegras') carregarRegras();
+  if (view === 'v3') abrirXmlCorrigido();
   if (view === 'vRelatorios') abrirRelatorios();
   if (view === 'vUsuarios') carregarUsuarios();
   if (view === 'vPapeis') carregarPapeis();
@@ -477,11 +478,12 @@ $('#sel-empresa').addEventListener('change', async (e) => {
   estado.competencia = '';
   await carregarCompetencias();
   // Trocar de empresa nao pode deixar na tela a lista da empresa anterior.
-  const aberta = ['vFornecedores', 'vRegras', 'vRelatorios']
+  const aberta = ['vFornecedores', 'vRegras', 'vRelatorios', 'v3']
     .find((v) => !$('#' + v).classList.contains('hidden'));
   if (aberta === 'vFornecedores') await carregarFornecedores();
   if (aberta === 'vRegras') await carregarRegras();
   if (aberta === 'vRelatorios') await abrirRelatorios();
+  if (aberta === 'v3') await abrirXmlCorrigido();
   await carregarNotas();
 });
 
@@ -835,7 +837,7 @@ function apagarNota(id) {
 // ------------------------------------------------------------------ ambiente 2
 
 $('#btn-voltar-notas').addEventListener('click', () => irPara('v1'));
-$('#btn-ver-xml').addEventListener('click', () => { irPara('v3'); renderXml(); });
+$('#btn-ver-xml').addEventListener('click', () => irPara('v3'));
 
 // ------------------------------------------------------------------ nota original
 //
@@ -1524,47 +1526,173 @@ async function aplicarEmLote(escopo) {
 
 // ------------------------------------------------------------------ ambiente 3
 
-async function renderXml() {
-  const n = estado.notaAberta;
-  if (!n) return;
+// ------------------------------------------------------------------ XML corrigido
+//
+// A pagina era um beco: pelo menu ela abria vazia ("Selecione uma nota") e nao
+// oferecia jeito nenhum de escolher a nota dali; a "previa" era um resumo montado
+// na tela, nao o arquivo; e nao havia exportacao em lote - com 77 notas numa
+// competencia, baixar uma a uma nao e entrega. Agora:
+//   - abre SEMPRE preenchida, com as notas da competencia e a situacao de cada uma;
+//   - "Ver" mostra o XML corrigido DE VERDADE (o mesmo que sera baixado), com o que mudou;
+//   - um .zip com todas as notas 100% conferidas. Nota com item nao conferido fica
+//     de fora de proposito: palpite do sistema nao entra no Questor como decisao.
 
-  const validacoes = $('#lista-validacoes');
-  const r = n.resumo;
-  const bloqueios = n.itens.flatMap((i) => (i.alertas ?? []).filter((a) => a.bloqueia));
+const xc = { competencia: '', filtro: 'todas', notas: [], notaId: null };
 
-  validacoes.innerHTML = [
-    linhaCheck(!r.bloqueiaExportacao, 'Todos os itens têm CFOP de entrada'),
-    linhaCheck(r.criticos === 0, `Itens com divergência crítica: ${r.criticos}`),
-    linhaCheck(true, 'XML original preservado, sem alteração'),
-    linhaCheck(true, 'CST/CSOSN e bloco IBS/CBS não são tocados'),
-    linhaCheck(true, 'Totais e chave de acesso conferidos na exportação'),
-  ].join('') + (bloqueios.length
-    ? `<li class="tiny" style="color:var(--danger)">${bloqueios.length} item(ns) bloqueando a exportação.</li>`
-    : '');
+const situacaoXc = (n) =>
+  n.itens_sem_cfop > 0 ? { k: 'bloqueada', txt: `▲ ${n.itens_sem_cfop} item(ns) sem CFOP`, cls: 'selo-bloqueado', ic: '▲' }
+  : n.itens_revisados >= n.total_itens && n.total_itens > 0 ? { k: 'pronta', txt: 'pronta para exportar', cls: 'selo-conferido', ic: '✓' }
+  : { k: 'pendente', txt: `${n.itens_revisados} de ${n.total_itens} itens conferidos`, cls: 'selo-conferir', ic: '●' };
 
-  const prod = n.itens.slice(0, 6).map((i) =>
-    `  Item ${i.n_item}\n    <mark>&lt;xProd&gt;${esc(i.x_prod_novo ?? i.x_prod_original)}&lt;/xProd&gt;</mark>\n` +
-    `    <mark>&lt;CFOP&gt;${esc(i.cfop_novo ?? i.cfop_original)}&lt;/CFOP&gt;</mark>   (original: ${esc(i.cfop_original)})`
-  ).join('\n');
-
-  $('#previa-xml').innerHTML =
-    `Chave  ${esc(n.nota.chave)}\nNota   ${esc(n.nota.numero)} · ${esc(n.nota.emit_nome ?? '')}\n` +
-    `Itens  ${n.itens.length}\n\n${prod}` +
-    (n.itens.length > 6 ? `\n\n  … e mais ${n.itens.length - 6} item(ns)` : '') +
-    `\n\nBaixe o arquivo para ver o XML completo.`;
+async function abrirXmlCorrigido() {
+  if (!estado.empresaId) return;
+  if (estado.competencias.length === 0) await carregarCompetencias();
+  const comps = estado.competencias.map((c) => c.competencia);
+  // Se ha nota aberta no Tratamento, a pagina abre na competencia dela e ja mostra o XML dela.
+  const daNota = estado.notaAberta?.nota?.competencia;
+  if (daNota && comps.includes(daNota)) xc.competencia = daNota;
+  if (!comps.includes(xc.competencia)) xc.competencia = comps.includes(estado.competencia) ? estado.competencia : (comps[0] ?? '');
+  const sel = $('#xc-competencia');
+  sel.innerHTML = comps.length
+    ? comps.map((c) => `<option value="${c}">${MESES[Number(c.slice(5)) - 1] ?? c.slice(5)} de ${c.slice(0, 4)}</option>`).join('')
+    : '<option value="">nenhuma nota importada</option>';
+  sel.value = xc.competencia;
+  await carregarListaXc();
+  if (estado.notaAberta && xc.notas.some((n) => n.id === estado.notaAberta.nota.id)) {
+    await verXmlCorrigido(estado.notaAberta.nota.id);
+  } else {
+    $('#xc-detalhe').classList.add('hidden');
+    xc.notaId = null;
+  }
 }
+
+async function carregarListaXc() {
+  const corpo = $('#tbl-xc tbody');
+  if (!xc.competencia) {
+    xc.notas = [];
+    corpo.innerHTML = '<tr><td colspan="6" class="vazio">Importe notas desta empresa para gerar XML corrigido.</td></tr>';
+    $('#xc-resumo').textContent = '';
+    return;
+  }
+  corpo.innerHTML = '<tr><td colspan="6" class="vazio">carregando…</td></tr>';
+  try {
+    xc.notas = await api(`/api/empresas/${estado.empresaId}/notas?competencia=${xc.competencia}`);
+  } catch (e) {
+    corpo.innerHTML = `<tr><td colspan="6" class="vazio">Não consegui listar as notas: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+  renderListaXc();
+}
+
+function renderListaXc() {
+  const corpo = $('#tbl-xc tbody');
+  const com = xc.notas.map((n) => ({ n, s: situacaoXc(n) }));
+  const prontas = com.filter((x) => x.s.k === 'pronta').length;
+  $('#xc-resumo').textContent =
+    `${prontas} de ${xc.notas.length} nota(s) prontas para exportar — entram no .zip só as que têm todos os itens conferidos.`;
+  $('#xc-baixar-zip').disabled = prontas === 0;
+
+  const lista = com.filter((x) => xc.filtro === 'todas' || (xc.filtro === 'prontas' ? x.s.k === 'pronta' : x.s.k !== 'pronta'));
+  if (lista.length === 0) {
+    corpo.innerHTML = `<tr><td colspan="6" class="vazio">${
+      xc.filtro === 'prontas' ? 'Nenhuma nota com todos os itens conferidos ainda.' : 'Nenhuma nota pendente neste mês.'}
+      <button class="btn sm" id="xc-ver-todas">Ver todas as ${xc.notas.length} notas</button></td></tr>`;
+    $('#xc-ver-todas')?.addEventListener('click', () => definirFiltroXc('todas'));
+    return;
+  }
+  corpo.innerHTML = lista.map(({ n, s }) => `<tr class="${n.id === xc.notaId ? 'nota-andando' : ''}">
+    <td class="tiny">${esc(dataCurta(n.dh_emi))}</td>
+    <td class="mono">${esc(n.numero ?? '—')}</td>
+    <td>${esc(n.emit_nome ?? n.emit_cnpj)}</td>
+    <td class="num">${n.total_itens}</td>
+    <td><span class="selo ${s.cls}"><span class="ic">${s.ic}</span>${esc(s.txt)}</span></td>
+    <td style="text-align:right;white-space:nowrap">
+      <button class="btn sm" data-xc-ver="${n.id}">Ver XML</button>
+      ${s.k === 'pendente' || s.k === 'bloqueada' ? `<button class="btn sm sutil" data-xc-tratar="${n.id}">Tratar →</button>` : ''}
+    </td></tr>`).join('');
+}
+
+function definirFiltroXc(f) {
+  xc.filtro = f;
+  $$('#xc-filtro button').forEach((b) => b.classList.toggle('on', b.dataset.xc === f));
+  renderListaXc();
+}
+
+async function verXmlCorrigido(notaId) {
+  xc.notaId = notaId;
+  renderListaXc();
+  const det = $('#xc-detalhe');
+  det.classList.remove('hidden');
+  const pre = $('#previa-xml');
+  pre.textContent = 'gerando o XML corrigido…';
+  let r;
+  try {
+    r = await api(`/api/notas/${notaId}/xml-corrigido/previa`);
+  } catch (e) {
+    pre.textContent = 'Não consegui gerar o XML corrigido: ' + e.message;
+    return;
+  }
+  $('#xc-titulo').textContent = `Validações — NF ${r.numero}`;
+  $('#lista-validacoes').innerHTML =
+    linhaCheck(r.semCfop === 0, r.semCfop === 0 ? 'Todos os itens têm CFOP de entrada' : `${r.semCfop} item(ns) sem CFOP de entrada — exportação bloqueada`) +
+    linhaCheck(r.conferidos === r.itens, `${r.conferidos} de ${r.itens} itens conferidos${r.conferidos < r.itens ? ' — só entra no .zip com todos conferidos' : ''}`) +
+    r.invariantes.map((i) => linhaCheck(i.ok, i.nome + (i.detalhe ? ` (${i.detalhe})` : ''))).join('');
+
+  $('#xc-hint-mudancas').textContent = r.alteracoes.length
+    ? `${r.alteracoes.length} alteração(ões) — nada além disto muda no arquivo`
+    : 'nenhuma alteração: o corrigido sai idêntico ao original';
+  $('#tbl-xc-mudancas tbody').innerHTML = r.alteracoes.length
+    ? r.alteracoes.map((a) => `<tr><td class="num tiny">${a.nItem}</td>
+        <td>${a.campo === 'CFOP' ? 'CFOP' : 'Descrição'}</td>
+        <td class="mono tiny"><s>${esc(a.antes)}</s></td><td class="mono"><b>${esc(a.depois)}</b></td></tr>`).join('')
+    : '<tr><td colspan="4" class="vazio">Nenhum CFOP ou descrição foi alterado nesta nota.</td></tr>';
+
+  // O arquivo de verdade, indentado; em destaque so as tags que de fato mudaram.
+  let texto = indentarXml(r.xml)
+    .replace(/(<(?:X509Certificate|SignatureValue)>)[^<]{80,}(<\/)/g, '$1… (recolhido — está íntegro no arquivo) …$2');
+  let html = esc(texto);
+  const mudou = new Map();
+  for (const a of r.alteracoes) mudou.set(`${a.nItem}|${a.campo}`, a);
+  let itemAtual = 0;
+  html = html.split('\n').map((l) => {
+    const d = l.match(/&lt;det\b[^&]*nItem=&quot;(\d+)&quot;/);
+    if (d) itemAtual = Number(d[1]);
+    const t = l.match(/^(\s*)&lt;(CFOP|xProd)&gt;(.*)&lt;\/\2&gt;$/);
+    const a = t && mudou.get(`${itemAtual}|${t[2]}`);
+    return a ? `${t[1]}&lt;${t[2]}&gt;<mark>${t[3]}</mark>&lt;/${t[2]}&gt;   <span class="xml-antes">era: ${esc(a.antes)}</span>` : l;
+  }).join('\n');
+  pre.innerHTML = html;
+  det.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+$('#xc-competencia').addEventListener('change', async (e) => {
+  xc.competencia = e.target.value; xc.notaId = null;
+  $('#xc-detalhe').classList.add('hidden');
+  await carregarListaXc();
+});
+$$('#xc-filtro button').forEach((b) => b.addEventListener('click', () => definirFiltroXc(b.dataset.xc)));
+$('#xc-baixar-zip').addEventListener('click', () => {
+  if (!estado.empresaId || !xc.competencia) return alerta('Escolha uma empresa e um mês.');
+  baixar(`/api/empresas/${estado.empresaId}/xml-corrigidos.zip?competencia=${xc.competencia}`);
+});
+document.addEventListener('click', (ev) => {
+  const v = ev.target.closest('[data-xc-ver]');
+  if (v) return verXmlCorrigido(v.dataset.xcVer);
+  const t = ev.target.closest('[data-xc-tratar]');
+  if (t) return abrirNota(t.dataset.xcTratar);
+});
 
 const linhaCheck = (ok, txt) =>
   `<li><span class="${ok ? 'ok' : 'fail'}">${ok ? '✓' : '✕'}</span> ${esc(txt)}</li>`;
 
 $('#btn-baixar-xml').addEventListener('click', async () => {
-  if (!estado.notaAberta) return alerta('Selecione uma nota.');
-  await baixar(`/api/notas/${estado.notaAberta.nota.id}/xml-corrigido`);
+  if (!xc.notaId) return alerta('Escolha uma nota na lista.');
+  await baixar(`/api/notas/${xc.notaId}/xml-corrigido`);
 });
 
 $('#btn-baixar-csv').addEventListener('click', async () => {
-  if (!estado.notaAberta) return alerta('Selecione uma nota.');
-  await baixar(`/api/notas/${estado.notaAberta.nota.id}/escrituracao.csv`);
+  if (!xc.notaId) return alerta('Escolha uma nota na lista.');
+  await baixar(`/api/notas/${xc.notaId}/escrituracao.csv`);
 });
 
 async function baixar(url) {
