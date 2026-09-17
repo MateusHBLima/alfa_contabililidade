@@ -5,7 +5,7 @@ import { Repo } from '../src/db/repo';
 import { Auditoria } from '../src/db/auditoria';
 import { importarArquivos } from '../src/nfe/importador';
 import { gerarXmlCorrigido, verificarInvariantes } from '../src/nfe/serializer';
-import { parseNFe } from '../src/nfe/parser';
+import { parseNFe, lerEventoNFe } from '../src/nfe/parser';
 import { detectarAlertas } from '../src/rules/alertas';
 import { aprender, chavesDoItem, sugerir } from '../src/rules/engine';
 import { TODAS_PERMISSOES, type Sessao } from '../src/auth/permissoes';
@@ -21,6 +21,7 @@ import { gerarTotp } from '../src/auth/totp';
  */
 
 const XML = readFileSync(new URL('./fixtures/nfe-exemplo.xml', import.meta.url), 'utf8');
+const EVENTO = readFileSync(new URL('./fixtures/evento-cancelamento-sintetico.xml', import.meta.url), 'utf8');
 const SEED = 'semente-de-teste';
 
 const CHAVE_ORIGINAL = '42260783646984003044550010005047671000722978'; // 44 dígitos
@@ -205,6 +206,74 @@ describe('importar uma nota de verdade', () => {
     const r = await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
     expect(r.arquivos[0]!.status).toBe('duplicada');
     expect(db.consultar('SELECT * FROM itens')).toHaveLength(3);
+  });
+
+  /* Retorno de 16-17/09, primeiro lote real (78 arquivos, importacao quinzenal).
+     O medo dela: importar dia 1-15, tratar, e depois importar 1-30 "e desfazer
+     tudo que eu tinha feito". O servidor nunca desfez - mas tambem nunca DISSE. */
+  it('reimportar nota já tratada não toca em nada — e diz quantos itens ela já tinha conferido', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+    db.consultar("UPDATE itens SET revisado = 1, cfop_novo = '1556' WHERE n_item IN (1, 2)");
+    const antes = JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY n_item'));
+
+    const r = await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+
+    expect(r.arquivos[0]!.status).toBe('duplicada');
+    expect(r.arquivos[0]!.itensConferidos).toBe(2);
+    expect(r.arquivos[0]!.motivo).toMatch(/2 de 3 itens conferidos/);
+    expect(r.arquivos[0]!.motivo).toMatch(/nada foi alterado/);
+    expect(r.duplicadasTratadas).toBe(1);
+    expect(JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY n_item'))).toBe(antes);
+  });
+
+  it('o mesmo arquivo enviado duas vezes AO MESMO TEMPO: uma nota, nenhum item perdido, nenhum erro de banco na tela', async () => {
+    const rs = await Promise.all([
+      importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]),
+      importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]),
+    ]);
+    const status = rs.map((r) => r.arquivos[0]!.status).sort();
+    expect(status).toEqual(['duplicada', 'importada']);
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(1);
+    expect(db.consultar('SELECT * FROM itens')).toHaveLength(3);
+    for (const r of rs) expect(r.arquivos[0]!.motivo ?? '').not.toMatch(/UNIQUE|constraint/i);
+  });
+
+  /* "ali ele fala que importou 77 notas. Ok. Mas na verdade eu tinha 78 XMLs
+     porque um deles era um evento." O evento saia como recusada, com mensagem de
+     parser. Era um CANCELAMENTO. */
+  it('XML de evento não é recusa anônima: diz que é cancelamento, de qual nota, e o que fazer', async () => {
+    const r = await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'NFe_Evento.xml', conteudo: EVENTO }]);
+    const a = r.arquivos[0]!;
+    expect(a.status).toBe('evento');
+    expect(r.eventos).toBe(1);
+    expect(r.recusadas).toBe(0);
+    expect(a.motivo).toMatch(/CANCELAMENTO da NF 123 \(série 1\) em 20\/07\/2026/);
+    expect(a.motivo).toMatch(/faturamento incorreto/);
+    expect(a.motivo).toMatch(/não está no sistema/);
+    expect(a.motivo).toMatch(/manualmente/);
+    expect(a.evento).toMatchObject({ tipo: '110111', cancela: true, notaNoSistema: false });
+    // Evento nao vira nota nem item.
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
+  });
+
+  it('evento de nota que JÁ está no sistema avisa isso — e não mexe nela', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
+    db.consultar('UPDATE itens SET revisado = 1');
+    const doEvento = EVENTO.replaceAll('42260711222333000181550010000001231000000019', CHAVE_ORIGINAL);
+
+    const r = await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ev.xml', conteudo: doEvento }]);
+
+    expect(r.arquivos[0]!.motivo).toMatch(/ESTÁ no sistema/);
+    expect(r.arquivos[0]!.motivo).toMatch(/3 item\(ns\) já conferido/);
+    expect(r.arquivos[0]!.notaId).toBeTruthy();
+    expect(db.consultar('SELECT * FROM itens WHERE revisado = 1')).toHaveLength(3);
+  });
+
+  it('os dois nProt do evento não se confundem: o da nota e o do evento', () => {
+    const ev = lerEventoNFe(EVENTO)!;
+    expect(ev.protocoloNota).toBe('142260000000001');
+    expect(ev.protocoloEvento).toBe('142260000000002');
+    expect(lerEventoNFe(XML)).toBeNull();
   });
 
   /* O primeiro uso real: a contadora abriu as notas, conferiu item a item,
@@ -2584,5 +2653,124 @@ describe('"quero ver como que tava" — a trilha do item', () => {
     const ck3 = (l2.headers.get('Set-Cookie') ?? '').split(';')[0]!;
 
     expect((await req(`/api/itens/${item.id}/trilha`, {}, ck3)).status).toBe(403);
+  });
+});
+
+describe('relatórios por CFOP e por produto — o instrumento da comparação do fim do mês', () => {
+  /* Pedido da contadora em 17/09: ela trata no sistema, a colega trata do jeito
+     antigo, e no fim do mês batem os dois relatórios. Se o relatório mentir, a
+     comparação inteira mente - por isso o teste que importa aqui é o que CRUZA o
+     relatório com a soma crua dos itens. */
+
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+
+  let ck = '';
+  let empresaId = '';
+  const req = (c: string) =>
+    app.fetch(new Request(`http://x${c}`, { headers: { Cookie: ck } }), ambiente());
+
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+
+    empresaId = await repo.criarEmpresa({
+      cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'industrializacao',
+    });
+    // Julho: a nota original. Agosto: duas notas do mesmo fornecedor, mesmos produtos.
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'jul.xml', conteudo: XML },
+      { nome: 'ago1.xml', conteudo: outraNota(XML, '11') },
+      { nome: 'ago2.xml', conteudo: outraNota(XML, '22') },
+    ]);
+    // Ela trata um item de agosto: muda o CFOP e confere.
+    db.consultar(`UPDATE itens SET cfop_novo = '1556', revisado = 1
+                   WHERE n_item = 1 AND nota_id IN (SELECT id FROM notas WHERE competencia = '2026-08')`);
+  });
+
+  it('por CFOP: os totais batem com a soma crua dos itens da competência — nem um centavo, nem um item a mais', async () => {
+    const r: any = await (await req(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`)).json();
+    const cru = db.consultar(`SELECT COUNT(*) AS n, SUM(i.valor_total) AS v, SUM(i.revisado) AS c
+                                FROM itens i JOIN notas n ON n.id = i.nota_id
+                               WHERE n.competencia = '2026-08'`)[0] as any;
+    expect(r.totais.itens).toBe(cru.n);
+    expect(r.totais.itens).toBe(6);
+    expect(r.totais.conferidos).toBe(cru.c);
+    expect(r.totais.valor).toBeCloseTo(cru.v, 2);
+    expect(r.linhas.reduce((s: number, l: any) => s + l.itens, 0)).toBe(cru.n);
+
+    // "Os CFOPs que eu tratei, como ficou": o 1556 que ela pôs aparece, com natureza.
+    const l1556 = r.linhas.find((l: any) => l.cfop === '1556');
+    expect(l1556).toMatchObject({ itens: 2, conferidos: 2, natureza: 'Compra de material para uso ou consumo' });
+    expect(l1556.origem).toMatch(/^\d{4} \(2\)$/);
+  });
+
+  it('julho não vaza para agosto, e o ano soma os dois', async () => {
+    const jul: any = await (await req(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-07`)).json();
+    const ano: any = await (await req(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026`)).json();
+    expect(jul.totais.itens).toBe(3);
+    expect(ano.totais.itens).toBe(9);
+  });
+
+  it('por produto: a quantidade do mês é a SOMA das notas, e unitário médio × quantidade fecha com o total', async () => {
+    const r: any = await (await req(`/api/empresas/${empresaId}/relatorios/produtos?competencia=2026-08`)).json();
+    const umaNota = db.consultar(`SELECT i.quantidade AS q, i.valor_total AS v, i.x_prod_original AS d
+                                    FROM itens i JOIN notas n ON n.id = i.nota_id
+                                   WHERE n.competencia = '2026-08' ORDER BY n.chave, i.n_item LIMIT 3`) as any[];
+    expect(r.linhas).toHaveLength(3); // 3 produtos, não 6 linhas: duas notas do mesmo produto viram uma
+    for (const item of umaNota) {
+      const linha = r.linhas.find((l: any) => l.descricaoOriginal === item.d);
+      expect(linha, item.d).toBeTruthy();
+      expect(linha.notas).toBe(2);
+      expect(linha.quantidade).toBeCloseTo(item.q * 2, 4);
+      expect(linha.valor).toBeCloseTo(item.v * 2, 2);
+      expect(linha.valorUnitarioMedio * linha.quantidade).toBeCloseTo(linha.valor, 1);
+    }
+    const cru = db.consultar(`SELECT SUM(i.valor_total) AS v FROM itens i JOIN notas n ON n.id = i.nota_id
+                               WHERE n.competencia = '2026-08'`)[0] as any;
+    expect(r.totais.valor).toBeCloseTo(cru.v, 2);
+  });
+
+  it('a descrição que ela padronizou é a que agrupa — e a original continua visível', async () => {
+    db.consultar(`UPDATE itens SET x_prod_novo = 'ALFACE AMERICANA' WHERE n_item = 2`);
+    const r: any = await (await req(`/api/empresas/${empresaId}/relatorios/produtos?competencia=2026-08`)).json();
+    const l = r.linhas.find((x: any) => x.descricao === 'ALFACE AMERICANA');
+    expect(l).toBeTruthy();
+    expect(l.descricaoOriginal).not.toBe('ALFACE AMERICANA');
+    expect(l.notas).toBe(2);
+  });
+
+  it('a planilha sai da mesma conta: abre no Excel brasileiro e fecha com a tela', async () => {
+    const resp = await req(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08&formato=csv`);
+    expect(resp.headers.get('content-type')).toMatch(/text\/csv/);
+    expect(resp.headers.get('content-disposition')).toMatch(/relatorio-cfop-11222333000181-2026-08\.csv/);
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]); // BOM: sem ele o Excel quebra os acentos
+    const texto = new TextDecoder().decode(bytes);
+    const linhas = texto.trim().split('\r\n');
+    expect(linhas[0]).toContain('CFOP de entrada;Natureza;Itens');
+    const tela: any = await (await req(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`)).json();
+    expect(linhas.at(-1)).toBe(`TOTAL;;6;2;${tela.totais.valor.toFixed(2).replace('.', ',')};`);
+  });
+
+  it('descrição de fornecedor que começa com "=" não vira fórmula na planilha', async () => {
+    db.consultar(`UPDATE itens SET x_prod_novo = '=HYPERLINK("http://x")' WHERE n_item = 3`);
+    const texto = await (await req(`/api/empresas/${empresaId}/relatorios/produtos?competencia=2026-08&formato=csv`)).text();
+    expect(texto).toContain(`"'=HYPERLINK(""http://x"")"`);
+  });
+
+  it('outra empresa não aparece, e competência malformada é recusada', async () => {
+    const outra = await repo.criarEmpresa({ cnpj: '99888777000166', razaoSocial: 'OUTRA', uf: 'SC', perfil: 'revenda' });
+    const r: any = await (await req(`/api/empresas/${outra}/relatorios/cfop?competencia=2026-08`)).json();
+    expect(r.totais.itens).toBe(0);
+    expect((await req(`/api/empresas/${empresaId}/relatorios/cfop?competencia=agosto`)).status).toBe(400);
+    expect((await req(`/api/empresas/${empresaId}/relatorios/outro`)).status).toBe(404);
+    expect((await app.fetch(new Request(`http://x/api/empresas/${empresaId}/relatorios/cfop`), ambiente())).status).toBe(401);
   });
 });

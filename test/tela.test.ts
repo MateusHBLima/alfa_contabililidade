@@ -119,6 +119,21 @@ describe('a tela desenha tudo que o servidor manda', () => {
     }
   });
 
+  it('toda marca da linha (9c) é desenhada: classe na linha, etiqueta em texto e cor no CSS', () => {
+    const bloco = ALERTAS.match(/export type MarcasDaLinha = \{([\s\S]*?)\};/)!;
+    const marcas = [...bloco[1]!.matchAll(/^\s*(\w+): boolean;/gm)].map((m) => m[1]!);
+    expect(marcas.sort()).toEqual(['cfopForaDoNormal', 'produtoNovo']);
+    for (const m of marcas) expect(APP, `a tela ignora a marca "${m}"`).toContain(`m.${m}`);
+    for (const c of ['marca-cfop', 'marca-novo', 'etiqueta-cfop', 'etiqueta-novo']) {
+      expect(CSS, `sem estilo para .${c}`).toContain(`.${c}`);
+      expect(APP, `a tela não usa .${c}`).toContain(c);
+    }
+    // Cor nunca e a unica pista: as etiquetas carregam texto.
+    expect(APP).toContain('＋ NOVO');
+    // Conferiu, a cor sai.
+    expect(CSS).toContain(':not(.marca-apagada)');
+  });
+
   it('filtro que não casa nada diz o porquê e oferece a volta', () => {
     // Visto em produção: nota com 7 itens conferidos, filtro "Prontos", tela em
     // branco. Sem erro, sem mensagem — a mesma forma do bug do `pode()`: a tela

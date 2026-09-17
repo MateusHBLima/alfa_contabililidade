@@ -1,10 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { parseNFe } from '../src/nfe/parser';
-import {
-  detectarAlertas, estiloDaLinha, resumirNota, severidadeMaxima,
-  type ContextoAlerta, type HistoricoProduto,
-} from '../src/rules/alertas';
+import { detectarAlertas, estiloDaLinha, resumirNota, severidadeMaxima, type ContextoAlerta, type HistoricoProduto, marcasDaLinha } from '../src/rules/alertas';
 
 const XML = readFileSync(new URL('./fixtures/nfe-exemplo.xml', import.meta.url), 'utf8');
 const nota = parseNFe(XML);
@@ -491,5 +488,38 @@ describe('descrição ainda do fornecedor: informa no topo, não em cada linha',
   it('nota toda padronizada não tem nada a informar', () => {
     const r = resumirNota([{ confianca: 'alta', alertas: [], descricaoDoFornecedor: false }]);
     expect(r.semDescricaoPadrao).toBe(0);
+  });
+});
+
+
+/* Invariante 9c - pedido da contadora em 16/09, em dois audios. */
+describe('marcas da linha: o quanto a nota foge do normal', () => {
+  const novo = [{ codigo: 'item_novo', severidade: 'atencao', titulo: '', detalhe: '', bloqueia: false }] as any;
+
+  it('5102 é o normal: sem marca', () => {
+    expect(marcasDaLinha('5102', [])).toEqual({ cfopForaDoNormal: false, produtoNovo: false });
+  });
+
+  it('qualquer outro CFOP de saída é marcado — os que apareceram no lote real dela', () => {
+    for (const cfop of ['5949', '5101', '5104', '5405', '5656', '5910', '6102']) {
+      expect(marcasDaLinha(cfop, []).cfopForaDoNormal, cfop).toBe(true);
+    }
+  });
+
+  it('as duas marcas são independentes e podem vir juntas', () => {
+    expect(marcasDaLinha('5102', novo)).toEqual({ cfopForaDoNormal: false, produtoNovo: true });
+    expect(marcasDaLinha('5405', novo)).toEqual({ cfopForaDoNormal: true, produtoNovo: true });
+  });
+
+  it('CFOP vazio não vira marca: ausência não é anormalidade', () => {
+    expect(marcasDaLinha('', []).cfopForaDoNormal).toBe(false);
+    expect(marcasDaLinha(null, []).cfopForaDoNormal).toBe(false);
+  });
+
+  it('marca não muda o estilo da linha: são eixos separados', () => {
+    const antes = estiloDaLinha('alta', [], false, { fonte: 'fixada' });
+    marcasDaLinha('5949', []);
+    expect(estiloDaLinha('alta', [], false, { fonte: 'fixada' })).toEqual(antes);
+    expect(antes.estado).toBe('padrao');
   });
 });
