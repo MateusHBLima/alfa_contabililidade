@@ -147,6 +147,18 @@ describe('a tela desenha tudo que o servidor manda', () => {
     expect(APP).toMatch(/\[[^\]]*'vOriginal'[^\]]*\]\.forEach/);
   });
 
+  it('XML corrigido não é mais beco: abre preenchida pelo MENU, tem lista, prévia real e zip', () => {
+    const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+    // O defeito original: o menu chamava irPara('v3') e ninguem desenhava a pagina.
+    expect(APP).toMatch(/if \(view === 'v3'\) abrirXmlCorrigido\(\)/);
+    for (const id of ['tbl-xc', 'xc-competencia', 'xc-baixar-zip', 'previa-xml', 'tbl-xc-mudancas']) {
+      expect(HTML, `falta #${id}`).toContain(`id="${id}"`);
+    }
+    expect(HTML).not.toContain('Selecione uma nota no ambiente 2');
+    expect(APP).toContain('/xml-corrigido/previa');
+    expect(APP).toContain('/xml-corrigidos.zip?competencia=');
+  });
+
   it('filtro que não casa nada diz o porquê e oferece a volta', () => {
     // Visto em produção: nota com 7 itens conferidos, filtro "Prontos", tela em
     // branco. Sem erro, sem mensagem — a mesma forma do bug do `pode()`: a tela
