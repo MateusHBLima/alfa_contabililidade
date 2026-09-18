@@ -218,11 +218,19 @@
         <div class="card">
           <header><h2>Notas carregadas</h2><span class="hint" id="hint-notas"></span></header>
           <div class="body tight">
-            <div class="filters" id="filtros-notas">
-              <button data-fn="todas" class="on">Todas</button>
-              <button data-fn="tratar">A tratar</button>
-              <button data-fn="tratadas">Tratadas</button>
+            <div class="toolbar" style="padding:10px 14px 4px">
+              <div class="filters" id="filtros-notas">
+                <button data-fn="todas" class="on">Todas</button>
+                <button data-fn="tratar">A tratar</button>
+                <button data-fn="tratadas">Tratadas</button>
+              </div>
+              <div class="sep"></div>
+              <label class="tiny" for="sel-importacao">Importação</label>
+              <select id="sel-importacao" style="font-size:12px;max-width:300px"><option value="">todas</option></select>
+              <div class="sep"></div>
+              <button class="btn sm" id="btn-agrupar" title="Dobra a lista por fornecedor: a decisão de CFOP costuma ser por fornecedor">▤ Agrupar por fornecedor</button>
             </div>
+            <div id="detalhe-importacao" class="log hidden" style="margin:0 14px 10px;max-height:260px"></div>
             <div class="scroll"><table id="tbl-notas">
               <thead><tr>
                 <th>Emissão</th><th>Número</th><th>Fornecedor</th><th>Chave</th>
