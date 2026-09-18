@@ -323,8 +323,12 @@ tr.nota-andando td:first-child{box-shadow:inset 3px 0 0 var(--primary-2)}
   display:inline-block;margin-top:3px;font-size:10.5px;font-weight:600;
   border-radius:99px;padding:1px 7px;line-height:1.5;white-space:nowrap;
 }
-.proc-fixada{background:var(--accent-soft);color:var(--accent)}
-.proc-aprendida{background:var(--ok-soft);color:var(--ok)}
+/* Pedido da ALFA em 18/09: o que ja e padrao tem que CHAMAR a atencao, "mesmo que
+   seja so o texto". Entao o selo fica forte - fundo cheio, negrito, maior - mas so
+   o selo: a linha continua branca, para a cor da linha seguir dizendo "precisa de
+   voce". Decisao registrada no CLAUDE.md (regra "linha certa nao ganha cor"). */
+.proc-fixada{background:var(--accent);color:#fff;font-weight:800;font-size:12px;padding:3px 9px;letter-spacing:.2px;box-shadow:0 1px 0 rgba(0,0,0,.08)}
+.proc-aprendida{background:var(--ok);color:#fff;font-weight:800;font-size:12px;padding:3px 9px;letter-spacing:.2px;box-shadow:0 1px 0 rgba(0,0,0,.08)}
 .proc-perfil{background:var(--warn-soft);color:var(--warn)}
 
 /* Os dois estados que dividem o antigo "Pronto": mesma tranquilidade, origem

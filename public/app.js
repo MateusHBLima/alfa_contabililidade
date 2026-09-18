@@ -1216,11 +1216,11 @@ function podeFixar(i) {
 function selinhoProcedencia(p) {
   const fonte = p?.fonte ?? 'nenhuma';
   if (fonte === 'fixada') {
-    return `<span class="proc proc-fixada" title="Padrão que a contabilidade fixou para este fornecedor">📌 padrão seu</span>`;
+    return `<span class="proc proc-fixada" title="Padrão que a contabilidade fixou para este fornecedor">📌 PADRÃO FIXADO</span>`;
   }
   if (fonte === 'aprendida') {
     const n = Number(p?.usos ?? 0);
-    return `<span class="proc proc-aprendida" title="O sistema guardou isto de uma correção de vocês">✓ vocês ensinaram${n > 1 ? ` · ${n}x` : ''}</span>`;
+    return `<span class="proc proc-aprendida" title="O sistema guardou isto de uma correção de vocês">✓ VOCÊS ENSINARAM${n > 1 ? ` · ${n}x` : ''}</span>`;
   }
   if (fonte === 'manual') {
     return `<span class="proc proc-manual" title="Alguém digitou este valor nesta nota">✎ preenchido por vocês</span>`;
