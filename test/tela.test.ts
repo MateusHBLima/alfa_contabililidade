@@ -159,6 +159,17 @@ describe('a tela desenha tudo que o servidor manda', () => {
     expect(APP).toContain('/xml-corrigidos.zip?competencia=');
   });
 
+  it('a lista de notas agrupa por fornecedor e filtra por importação', () => {
+    const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+    expect(HTML).toContain('id="sel-importacao"');
+    expect(HTML).toContain('id="btn-agrupar"');
+    expect(HTML).toContain('id="detalhe-importacao"');
+    expect(APP).toContain('/importacoes');
+    expect(APP).toContain("form.append('envio', envioId)");
+    expect(APP).toContain('grupo-fornecedor');
+    expect(CSS).toContain('tr.grupo-fornecedor');
+  });
+
   it('filtro que não casa nada diz o porquê e oferece a volta', () => {
     // Visto em produção: nota com 7 itens conferidos, filtro "Prontos", tela em
     // branco. Sem erro, sem mensagem — a mesma forma do bug do `pode()`: a tela

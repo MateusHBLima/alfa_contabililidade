@@ -2979,3 +2979,65 @@ describe('XML corrigido: a página deixa de ser beco — prévia real e exporta�
     expect((await req(`/api/empresas/${empresaId}/xml-corrigidos.zip?competencia=2026-08`, '')).status).toBe(401);
   });
 });
+
+describe('importações: os lotes de 20 de um mesmo envio viram UMA importação', () => {
+  /* "Veio uns 70 XML de uma vez. Seria interessante agrupar." A tela manda os
+     arquivos em lotes de 20 com um id de envio; a lista precisa devolver o envio
+     inteiro, com o resultado por arquivo — inclusive o aviso de evento. */
+
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+
+  let ck = '';
+  let empresaId = '';
+  const req = (c: string) =>
+    app.fetch(new Request(`http://x${c}`, { headers: { Cookie: ck } }), ambiente());
+  const subir = (arquivos: [string, string][], envio?: string) => {
+    const fd = new FormData();
+    for (const [nome, xml] of arquivos) fd.append('arquivos', new File([xml], nome, { type: 'text/xml' }));
+    if (envio) fd.append('envio', envio);
+    return app.fetch(new Request(`http://x/api/empresas/${empresaId}/importar`, {
+      method: 'POST', body: fd, headers: { Cookie: ck },
+    }), ambiente());
+  };
+
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    empresaId = await repo.criarEmpresa({
+      cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'industrializacao',
+    });
+  });
+
+  it('dois lotes com o mesmo envio aparecem como uma importação só, somando os resultados e guardando o evento', async () => {
+    const envio = 'envio-teste-0001';
+    await subir([['a.xml', outraNota(XML, '11')], ['b.xml', outraNota(XML, '22')]], envio);
+    await subir([['c.xml', outraNota(XML, '33')], ['NFe_Evento.xml', EVENTO], ['b.xml', outraNota(XML, '22')]], envio);
+    // Um envio antigo, separado.
+    await subir([['d.xml', outraNota(XML, '44')]]);
+
+    const lista: any[] = await (await req(`/api/empresas/${empresaId}/importacoes`)).json() as any;
+    expect(lista).toHaveLength(2);
+    const grande = lista.find((i) => i.id === envio);
+    expect(grande).toMatchObject({ arquivos: 5, importadas: 3, duplicadas: 1, eventos: 1, recusadas: 0, notas: 3 });
+    expect(grande.lotes).toHaveLength(2);
+    expect(grande.resultados.find((r: any) => r.status === 'evento').motivo).toMatch(/CANCELAMENTO/);
+    // As notas sabem de qual lote vieram, e os lotes pertencem ao envio.
+    const notas: any[] = await (await req(`/api/empresas/${empresaId}/notas`)).json() as any;
+    expect(notas.filter((n) => grande.lotes.includes(n.lote_id))).toHaveLength(3);
+  });
+
+  it('envio inválido é ignorado, não recusado', async () => {
+    const r = await subir([['a.xml', outraNota(XML, '11')]], 'x');
+    expect(r.status).toBe(200);
+    const lista: any[] = await (await req(`/api/empresas/${empresaId}/importacoes`)).json() as any;
+    expect(lista).toHaveLength(1);
+    expect(lista[0].id).not.toBe('x');
+  });
+});
