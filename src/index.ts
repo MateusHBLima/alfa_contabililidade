@@ -1620,8 +1620,13 @@ app.post('/api/empresas/:id/importar', async (c) => {
     arquivos.push({ nome: f.name, conteudo: await f.text() });
   }
 
+  // A tela manda um id por envio para os lotes de 20 aparecerem como UMA importação.
+  const envioBruto = form.get('envio');
+  const envioId =
+    typeof envioBruto === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(envioBruto) ? envioBruto : null;
+
   const resultado = await importarArquivos(
-    c.get('repo'), c.env.XML_ORIGINAL, empresaId, arquivos, 'upload',
+    c.get('repo'), c.env.XML_ORIGINAL, empresaId, arquivos, 'upload', envioId,
   );
   return c.json(resultado);
 });
@@ -1633,6 +1638,16 @@ app.get('/api/empresas/:id/notas', async (c) =>
     await c.get('repo').listarNotas(c.req.param('id'), c.req.query('competencia') ?? undefined),
   ),
 );
+
+/**
+ * As importações da empresa (um envio da tela = vários lotes de 20), com o
+ * resultado por arquivo — é onde o aviso de evento de cancelamento volta a ser
+ * legível depois que a tela de importação foi embora.
+ */
+app.get('/api/empresas/:id/importacoes', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  return c.json(await c.get('repo').listarImportacoes(c.req.param('id')));
+});
 
 /** As competências que a empresa tem, para os seletores de ano e mês. */
 app.get('/api/empresas/:id/competencias', async (c) => {

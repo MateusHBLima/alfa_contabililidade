@@ -447,3 +447,10 @@ tr.marca-cfop.marca-novo:not(.marca-apagada) td:nth-child(-n+2){background:#dfee
 pre.xml.orig-xml-pre{max-height:70vh;overflow:auto;white-space:pre;font-size:11.5px;line-height:1.45}
 .orig-xml-pre mark{background:#ffe08a;color:#1b1300;border-radius:3px;padding:0 2px}
 pre.xml .xml-antes{color:#8fa3bd;font-style:italic}
+
+/* Lista de notas dobrada por fornecedor. */
+tr.grupo-fornecedor td{background:#eef3f9;border-top:2px solid #d5e0ee;cursor:pointer;padding:9px 12px;font-size:12.5px}
+tr.grupo-fornecedor.pronto td{background:#eef8f3}
+tr.grupo-fornecedor .seta{display:inline-block;width:14px;color:var(--muted)}
+tr.grupo-fornecedor .grupo-meta{color:var(--muted);margin:0 10px}
+#btn-agrupar.on{background:var(--primary);border-color:var(--primary);color:#fff}

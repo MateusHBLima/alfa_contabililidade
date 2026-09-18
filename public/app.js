@@ -13,6 +13,10 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const estado = {
   filtroNotas: 'todas',
+  importacoes: [],
+  importacaoId: '',
+  agruparFornecedor: false,
+  fornecedoresFechados: new Set(),
   eu: null,
   empresas: [],
   empresaId: null,
@@ -80,6 +84,13 @@ const moeda = (v) =>
   v == null ? '—' : Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const dataCurta = (iso) => (iso ? String(iso).slice(0, 10).split('-').reverse().join('/') : '—');
+/** Data e hora locais, para distinguir duas importacoes do mesmo dia. */
+const dataHora = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return dataCurta(iso);
+  return d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+};
 
 // ------------------------------------------------------------------ login
 
@@ -476,7 +487,9 @@ $('#sel-empresa').addEventListener('change', async (e) => {
   // Competencia e recorte da empresa ANTERIOR. Levar "setembro/2026" para uma
   // empresa que so tem notas de 2025 devolveria lista vazia sem explicacao.
   estado.competencia = '';
+  estado.importacaoId = '';
   await carregarCompetencias();
+  await carregarImportacoes();
   // Trocar de empresa nao pode deixar na tela a lista da empresa anterior.
   const aberta = ['vFornecedores', 'vRegras', 'vRelatorios', 'v3']
     .find((v) => !$('#' + v).classList.contains('hidden'));
@@ -604,6 +617,7 @@ async function carregarEmpresas() {
     .join('');
   estado.empresaId = estado.empresas[0].id;
   marcarEscopo();
+  await carregarImportacoes();
   await carregarNotas();
 }
 
@@ -654,6 +668,8 @@ async function enviar(arquivos) {
   const log = $('#log-import');
   log.classList.remove('hidden');
   const empresaDoEnvio = estado.empresaId;
+  // Um id por envio: os lotes de 20 viram UMA importacao na lista.
+  const envioId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2));
   const tot = { importadas: 0, duplicadas: 0, duplicadasTratadas: 0, eventos: 0, recusadas: 0 };
   const linhas = [];
   let feitos = 0;
@@ -670,6 +686,7 @@ async function enviar(arquivos) {
       const fatia = xmls.slice(i, i + TAMANHO_LOTE_IMPORT);
       const form = new FormData();
       for (const f of fatia) form.append('arquivos', f, f.name);
+      form.append('envio', envioId);
       try {
         const r = await api(`/api/empresas/${empresaDoEnvio}/importar`, { method: 'POST', body: form });
         tot.importadas += r.importadas;
@@ -687,32 +704,11 @@ async function enviar(arquivos) {
       log.textContent = `importando… ${feitos} de ${xmls.length}\n${placar()}`;
     }
 
-    const marca = { importada: '✓', duplicada: '=', evento: '⚠', recusada: '✕' };
-    const texto = (a) => {
-      const extra = a.status === 'importada'
-        ? `${a.itens} itens${a.preenchidos ? `, ${a.preenchidos} já preenchidos pelo padrão` : ''}${a.motivo ? ' · ' + a.motivo : ''}`
-        : (a.motivo ?? '');
-      return `${marca[a.status] ?? '?'} ${a.arquivo}  ${extra}`;
-    };
-    // O que pede acao dela vem primeiro: evento, depois recusa. O resto e conferencia.
-    const ordem = { evento: 0, recusada: 1, importada: 2, duplicada: 3 };
-    linhas.sort((a, b) => (ordem[a.status] ?? 9) - (ordem[b.status] ?? 9));
-
-    const cabecalho = [`${xmls.length} arquivo(s) · ${placar()}`];
-    if (tot.duplicadas > 0) {
-      cabecalho.push(
-        tot.duplicadasTratadas > 0
-          ? `${tot.duplicadas} nota(s) já estavam no sistema — ${tot.duplicadasTratadas} com itens que você já conferiu. Nenhuma foi alterada.`
-          : `${tot.duplicadas} nota(s) já estavam no sistema. Nenhuma foi alterada.`,
-      );
-    }
-    if (tot.eventos > 0) {
-      cabecalho.push(`ATENÇÃO: ${tot.eventos} arquivo(s) são EVENTO de nota (cancelamento/correção) — veja logo abaixo qual nota.`);
-    }
-    log.textContent = cabecalho.join('\n') + '\n\n' + linhas.map(texto).join('\n');
+    log.textContent = textoResultadoImportacao(xmls.length, tot, linhas);
 
     // Nota nova pode trazer competencia nova: o seletor tem que saber dela.
     await carregarCompetencias();
+    await carregarImportacoes();
     await carregarNotas();
   } catch (e) {
     log.textContent = 'falhou: ' + e.message;
@@ -721,6 +717,99 @@ async function enviar(arquivos) {
     inputArquivo.value = '';
   }
 }
+
+/** O resultado de uma importacao em texto — usado na hora e ao reabrir a importacao depois. */
+function textoResultadoImportacao(totalArquivos, tot, linhas) {
+  const marca = { importada: '✓', duplicada: '=', evento: '⚠', recusada: '✕' };
+  const texto = (a) => {
+    const extra = a.status === 'importada'
+      ? `${a.itens} itens${a.preenchidos ? `, ${a.preenchidos} já preenchidos pelo padrão` : ''}${a.motivo ? ' · ' + a.motivo : ''}`
+      : (a.motivo ?? '');
+    return `${marca[a.status] ?? '?'} ${a.arquivo}  ${extra}`;
+  };
+  // O que pede acao dela vem primeiro: evento, depois recusa. O resto e conferencia.
+  const ordem = { evento: 0, recusada: 1, importada: 2, duplicada: 3 };
+  const ordenadas = [...linhas].sort((a, b) => (ordem[a.status] ?? 9) - (ordem[b.status] ?? 9));
+
+  const placar = `${tot.importadas} importada(s) · ${tot.duplicadas} já existia(m)` +
+    (tot.eventos ? ` · ${tot.eventos} evento(s)` : '') + ` · ${tot.recusadas} recusada(s)`;
+  const cabecalho = [`${totalArquivos} arquivo(s) · ${placar}`];
+  if (tot.duplicadas > 0) {
+    cabecalho.push(
+      tot.duplicadasTratadas > 0
+        ? `${tot.duplicadas} nota(s) já estavam no sistema — ${tot.duplicadasTratadas} com itens que você já conferiu. Nenhuma foi alterada.`
+        : `${tot.duplicadas} nota(s) já estavam no sistema. Nenhuma foi alterada.`,
+    );
+  }
+  if (tot.eventos > 0) {
+    cabecalho.push(`ATENÇÃO: ${tot.eventos} arquivo(s) são EVENTO de nota (cancelamento/correção) — veja logo abaixo qual nota.`);
+  }
+  return cabecalho.join('\n') + '\n\n' + ordenadas.map(texto).join('\n');
+}
+
+// ------------------------------------------------------------------ importacoes (lotes)
+//
+// "Veio uns 70 XML de uma vez. Seria interessante agrupar." Cada envio da tela
+// vira uma importacao na lista: da para ver o que entrou AGORA e o que ja
+// estava (ela importa quinzenal), filtrar so por ela, e reler o resultado -
+// inclusive o aviso de evento de cancelamento, que antes sumia ao sair da tela.
+
+async function carregarImportacoes() {
+  const sel = $('#sel-importacao');
+  if (!estado.empresaId) { estado.importacoes = []; sel.innerHTML = '<option value="">todas</option>'; return; }
+  try {
+    estado.importacoes = await api(`/api/empresas/${estado.empresaId}/importacoes`);
+  } catch {
+    estado.importacoes = [];
+  }
+  const atual = estado.importacaoId;
+  sel.innerHTML = '<option value="">todas as importações</option>' + estado.importacoes.map((i) => {
+    const resumo = `${i.arquivos} arquivo(s): ${i.importadas} nota(s)` +
+      (i.duplicadas ? `, ${i.duplicadas} já existia(m)` : '') +
+      (i.eventos ? `, ${i.eventos} evento(s)` : '') +
+      (i.recusadas ? `, ${i.recusadas} recusada(s)` : '');
+    return `<option value="${esc(i.id)}">${esc(dataHora(i.criadoEm))}${i.quem ? ' · ' + esc(i.quem) : ''} — ${esc(resumo)}</option>`;
+  }).join('');
+  sel.value = estado.importacoes.some((i) => i.id === atual) ? atual : '';
+  if (sel.value !== atual) estado.importacaoId = '';
+  mostrarDetalheImportacao();
+}
+
+function mostrarDetalheImportacao() {
+  const box = $('#detalhe-importacao');
+  const imp = estado.importacoes.find((i) => i.id === estado.importacaoId);
+  if (!imp) { box.classList.add('hidden'); box.textContent = ''; return; }
+  const tot = {
+    importadas: imp.importadas, duplicadas: imp.duplicadas, recusadas: imp.recusadas, eventos: imp.eventos,
+    duplicadasTratadas: imp.resultados.filter((r) => r.status === 'duplicada' && (r.itensConferidos ?? 0) > 0).length,
+  };
+  box.textContent = `Importação de ${dataHora(imp.criadoEm)}${imp.quem ? ' por ' + imp.quem : ''}\n` +
+    textoResultadoImportacao(imp.arquivos, tot, imp.resultados);
+  box.classList.remove('hidden');
+}
+
+document.addEventListener('click', (ev) => {
+  const g = ev.target.closest('tr.grupo-fornecedor');
+  if (!g) return;
+  const k = g.dataset.grupo;
+  if (estado.fornecedoresFechados.has(k)) estado.fornecedoresFechados.delete(k); else estado.fornecedoresFechados.add(k);
+  renderNotas();
+});
+
+$('#sel-importacao').addEventListener('change', (e) => {
+  estado.importacaoId = e.target.value;
+  mostrarDetalheImportacao();
+  renderNotas();
+});
+
+$('#btn-agrupar').addEventListener('click', () => {
+  estado.agruparFornecedor = !estado.agruparFornecedor;
+  try { localStorage.setItem('agruparFornecedor', estado.agruparFornecedor ? '1' : '0'); } catch {}
+  $('#btn-agrupar').classList.toggle('on', estado.agruparFornecedor);
+  renderNotas();
+});
+try { estado.agruparFornecedor = localStorage.getItem('agruparFornecedor') === '1'; } catch {}
+$('#btn-agrupar').classList.toggle('on', !!estado.agruparFornecedor);
 
 async function carregarNotas() {
   if (!estado.empresaId) return;
@@ -753,7 +842,10 @@ function renderNotas() {
   // Empresa com 200 notas nao se trata num dia. Separar o que ja passou por gente
   // do que ainda nao passou foi o primeiro pedido da contadora depois de usar.
   const tratada = (n) => (n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens;
+  const imp = estado.importacoes.find((i) => i.id === estado.importacaoId);
+  const lotesDaImportacao = imp ? new Set(imp.lotes) : null;
   const visiveis = estado.notas.filter((n) => {
+    if (lotesDaImportacao && !lotesDaImportacao.has(n.lote_id)) return false;
     if (estado.filtroNotas === 'tratar') return !tratada(n);
     if (estado.filtroNotas === 'tratadas') return tratada(n);
     return true;
@@ -761,12 +853,13 @@ function renderNotas() {
 
   if (visiveis.length === 0) {
     corpo.innerHTML = `<tr><td colspan="8" class="vazio">${
-      estado.filtroNotas === 'tratadas' ? 'Nenhuma nota tratada ainda.' : 'Nenhuma nota pendente.'
+      lotesDaImportacao ? 'Nenhuma nota desta importação neste filtro.'
+      : estado.filtroNotas === 'tratadas' ? 'Nenhuma nota tratada ainda.' : 'Nenhuma nota pendente.'
     }</td></tr>`;
     return;
   }
 
-  corpo.innerHTML = visiveis.map((n) => {
+  const linhaNota = (n) => {
     const total = n.total_itens ?? 0;
     const feitos = n.itens_revisados ?? 0;
     const pendentes = total - feitos;
@@ -805,6 +898,37 @@ function renderNotas() {
         ${pode('notas.apagar') ? `<button class="btn sm perigo" data-apagar-nota="${n.id}" title="Apagar esta nota">Apagar</button>` : ''}
       </td>
     </tr>`;
+  };
+
+  if (!estado.agruparFornecedor) {
+    corpo.innerHTML = visiveis.map(linhaNota).join('');
+    return;
+  }
+
+  // Dobrado por fornecedor. A decisao de CFOP e quase sempre por fornecedor
+  // (medido: 2 de 22 misturam), entao e assim que ela ganha tempo: trata a
+  // primeira nota, fixa o padrao do fornecedor, e as outras vem prontas.
+  const grupos = new Map();
+  for (const n of visiveis) {
+    const k = n.emit_cnpj ?? '?';
+    const g = grupos.get(k) ?? { cnpj: k, nome: n.emit_nome ?? k, notas: [], itens: 0, revisados: 0, valor: 0 };
+    g.notas.push(n);
+    g.itens += n.total_itens ?? 0;
+    g.revisados += n.itens_revisados ?? 0;
+    g.valor += n.valor_total ?? 0;
+    grupos.set(k, g);
+  }
+  const ordenados = [...grupos.values()].sort((a, b) => b.notas.length - a.notas.length || a.nome.localeCompare(b.nome, 'pt-BR'));
+  corpo.innerHTML = ordenados.map((g) => {
+    const fechado = estado.fornecedoresFechados.has(g.cnpj);
+    const pronto = g.itens > 0 && g.revisados >= g.itens;
+    return `<tr class="grupo-fornecedor${pronto ? ' pronto' : ''}" data-grupo="${esc(g.cnpj)}">
+      <td colspan="8">
+        <span class="seta">${fechado ? '▸' : '▾'}</span>
+        <b>${esc(g.nome)}</b>
+        <span class="grupo-meta">${g.notas.length} nota(s) · ${g.itens} itens · ${g.revisados} conferidos · R$ ${moeda(g.valor)}</span>
+        ${pronto ? '<span class="tag ok">✓ tudo tratado</span>' : g.revisados === 0 ? `<span class="tag warn">${g.itens} a revisar</span>` : `<span class="tag info">faltam ${g.itens - g.revisados}</span>`}
+      </td></tr>` + (fechado ? '' : g.notas.map(linhaNota).join(''));
   }).join('');
 
   $$('#tbl-notas button[data-nota]').forEach((b) =>

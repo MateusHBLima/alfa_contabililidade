@@ -48,6 +48,7 @@ export type ResultadoArquivo = {
 
 export type ResultadoLote = {
   loteId: string;
+  envioId: string | null;
   total: number;
   importadas: number;
   duplicadas: number;
@@ -64,6 +65,8 @@ export async function importarArquivos(
   empresaId: string,
   arquivos: { nome: string; conteudo: string }[],
   origem: 'upload' | 'email' | 'sefaz' | 'integracao' = 'upload',
+  /** Amarra os lotes de um mesmo envio da tela (20 arquivos por requisicao). */
+  envioId: string | null = null,
 ): Promise<ResultadoLote> {
   const empresa = await repo.obterEmpresa(empresaId);
   if (!empresa) throw new ErroParserNFe('Empresa não encontrada ou fora do seu acesso.');
@@ -105,14 +108,15 @@ export async function importarArquivos(
     .prepare(
       `INSERT INTO lotes_importacao
          (id, tenant_id, empresa_id, origem, nome_arquivo, total_arquivos,
-          importadas, duplicadas, recusadas, detalhe, criado_em, criado_por)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          importadas, duplicadas, recusadas, detalhe, criado_em, criado_por, envio_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .bind(
       loteId, repo.contexto.sessao.tenantId, empresaId, origem,
       arquivos.length === 1 ? arquivos[0]!.nome : `${arquivos.length} arquivos`,
       arquivos.length, importadas, duplicadas, recusadas,
       JSON.stringify(resultados), repo.agora(), repo.contexto.sessao.usuarioId,
+      envioId,
     )
     .run();
 
@@ -132,7 +136,7 @@ export async function importarArquivos(
   });
 
   return {
-    loteId, total: arquivos.length, importadas, duplicadas, duplicadasTratadas,
+    loteId, envioId, total: arquivos.length, importadas, duplicadas, duplicadasTratadas,
     eventos, recusadas, arquivos: resultados,
   };
 }
