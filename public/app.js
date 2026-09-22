@@ -2547,12 +2547,17 @@ async function carregarRelatorio() {
 
   const qtd = (v) => Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 4 });
   if (rel.qual === 'cfop') {
-    cab.innerHTML = '<tr><th>CFOP de entrada</th><th>Natureza</th><th class="num">Itens</th><th class="num">Conferidos</th><th class="num">Valor total</th><th>CFOP original (itens)</th></tr>';
-    corpo.innerHTML = r.linhas.map((l) => `<tr>
-      <td class="mono"><b>${esc(l.cfop)}</b></td><td>${esc(l.natureza)}</td>
-      <td class="num">${l.itens}</td><td class="num">${l.conferidos}</td>
-      <td class="num">${moeda(l.valor)}</td><td class="tiny">${esc(l.origem)}</td></tr>`).join('');
-    pe.innerHTML = `<tr><th>Total</th><th></th><th class="num">${r.totais.itens}</th><th class="num">${r.totais.conferidos}</th><th class="num">${moeda(r.totais.valor)}</th><th></th></tr>`;
+    // Sintetico no formato do livro de entradas; clicar na linha abre as notas
+    // daquele CFOP (analitico). Pedido da Tais, 22/09: "so um CFOP fechou (...)
+    // eu nao consigo procurar a minha diferenca".
+    cab.innerHTML = '<tr><th>CFOP de entrada</th><th>Natureza</th><th class="num">Notas</th><th class="num">Itens</th><th class="num">Conferidos</th><th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th class="num">ICMS ST</th><th class="num">IPI</th><th>CFOP original (itens)</th></tr>';
+    corpo.innerHTML = r.linhas.map((l) => `<tr class="rel-cfop" data-rel-cfop="${esc(l.cfop)}" title="Clique para ver as notas deste CFOP">
+      <td class="mono"><span class="seta">▸</span> <b>${esc(l.cfop)}</b></td><td>${esc(l.natureza)}</td>
+      <td class="num">${l.notas}</td><td class="num">${l.itens}</td><td class="num">${l.conferidos}</td>
+      <td class="num"><b>${moeda(l.valorContabil)}</b></td><td class="num">${moeda(l.baseIcms)}</td><td class="num">${moeda(l.icms)}</td>
+      <td class="num">${moeda(l.st)}</td><td class="num">${moeda(l.ipi)}</td><td class="tiny">${esc(l.origem)}</td></tr>`).join('');
+    const t = r.totais;
+    pe.innerHTML = `<tr><th>Total</th><th></th><th class="num">${t.notas}</th><th class="num">${t.itens}</th><th class="num">${t.conferidos}</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.baseIcms)}</th><th class="num">${moeda(t.icms)}</th><th class="num">${moeda(t.st)}</th><th class="num">${moeda(t.ipi)}</th><th></th></tr>`;
   } else {
     cab.innerHTML = '<tr><th>Produto</th><th>Un.</th><th class="num">Quantidade</th><th class="num">Unitário médio</th><th class="num">Valor total</th><th>CFOP</th><th>Cód. fornecedor</th><th class="num">Notas</th></tr>';
     corpo.innerHTML = r.linhas.map((l) => `<tr>
@@ -2577,6 +2582,52 @@ $$('#rel-qual button').forEach((b) => b.addEventListener('click', () => {
   carregarRelatorio();
 }));
 $('#rel-competencia').addEventListener('change', (e) => { rel.competencia = e.target.value; carregarRelatorio(); });
+// Abre/fecha as notas de um CFOP logo abaixo da linha dele.
+$('#tbl-relatorio').addEventListener('click', async (ev) => {
+  const abrir = ev.target.closest('button[data-abrir-nota-rel]');
+  if (abrir) return abrirNota(abrir.dataset.abrirNotaRel);
+  const baixarCfop = ev.target.closest('button[data-baixar-cfop]');
+  if (baixarCfop) {
+    return baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&cfop=${encodeURIComponent(baixarCfop.dataset.baixarCfop)}&formato=csv`);
+  }
+  const linha = ev.target.closest('tr[data-rel-cfop]');
+  if (!linha) return;
+  const cfop = linha.dataset.relCfop;
+  const aberto = linha.nextElementSibling?.classList.contains('rel-notas');
+  if (aberto) { linha.nextElementSibling.remove(); linha.querySelector('.seta').textContent = '▸'; return; }
+  linha.querySelector('.seta').textContent = '▾';
+  const sub = document.createElement('tr');
+  sub.className = 'rel-notas';
+  sub.innerHTML = '<td colspan="11" class="vazio">carregando as notas…</td>';
+  linha.after(sub);
+  try {
+    const r = await api(`/api/empresas/${estado.empresaId}/relatorios/notas?competencia=${rel.competencia}&cfop=${encodeURIComponent(cfop)}`);
+    const soma = (k) => r.notas.reduce((s, n) => s + n[k], 0);
+    sub.innerHTML = `<td colspan="11"><div class="rel-notas-caixa">
+      <div class="rel-notas-topo"><b>${r.notas.length} nota(s) no CFOP ${esc(cfop)}</b>
+        <span class="tiny">os valores somam só os itens deste CFOP; "Total da nota" é a nota inteira</span>
+        <button class="btn sm" data-baixar-cfop="${esc(cfop)}">⇩ Analítico deste CFOP (item a item)</button></div>
+      <table><thead><tr><th>Emissão</th><th>Número</th><th>Fornecedor</th><th class="num">Itens</th><th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th class="num">ICMS ST</th><th class="num">IPI</th><th class="num">Total da nota</th><th></th></tr></thead>
+      <tbody>${r.notas.map((n) => `<tr>
+        <td class="tiny">${esc(dataCurta(n.data))}</td><td class="mono">${esc(n.numero)}</td>
+        <td>${esc(n.fornecedor)}<span class="porque">${esc(n.cnpj)}</span></td>
+        <td class="num">${n.itens}${n.conferidos < n.itens ? `<span class="porque">${n.conferidos} conf.</span>` : ''}</td>
+        <td class="num"><b>${moeda(n.valorContabil)}</b></td><td class="num">${moeda(n.baseIcms)}</td><td class="num">${moeda(n.icms)}</td>
+        <td class="num">${moeda(n.st)}</td><td class="num">${moeda(n.ipi)}</td>
+        <td class="num tiny">${moeda(n.valorNota)}${Math.abs(n.valorNota - n.valorContabil) > 0.009 ? '<span class="porque">tem itens em outro CFOP</span>' : ''}</td>
+        <td><button class="btn sm" data-abrir-nota-rel="${esc(n.notaId)}">Abrir →</button></td></tr>`).join('')}</tbody>
+      <tfoot><tr><th colspan="3">Total do CFOP ${esc(cfop)}</th><th class="num">${soma('itens')}</th><th class="num">${moeda(soma('valorContabil'))}</th><th class="num">${moeda(soma('baseIcms'))}</th><th class="num">${moeda(soma('icms'))}</th><th class="num">${moeda(soma('st'))}</th><th class="num">${moeda(soma('ipi'))}</th><th></th><th></th></tr></tfoot>
+      </table></div></td>`;
+  } catch (e) {
+    sub.innerHTML = `<td colspan="11" class="vazio">Não consegui listar as notas: ${esc(e.message)}</td>`;
+  }
+});
+
+$('#rel-baixar-analitico').addEventListener('click', () => {
+  if (!estado.empresaId || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
+  baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&formato=csv`);
+});
+
 $('#rel-baixar').addEventListener('click', () => {
   if (!estado.empresaId || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
   baixar(`/api/empresas/${estado.empresaId}/relatorios/${rel.qual}?competencia=${rel.competencia}&formato=csv`);

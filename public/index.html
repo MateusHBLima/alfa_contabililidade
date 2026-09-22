@@ -425,7 +425,7 @@
       <!-- ------------------------------------------------- RELATÓRIOS -->
       <section id="vRelatorios" class="hidden">
         <h1>Relatórios <span class="escopo-empresa" id="escopo-relatorios"></span></h1>
-        <p class="page-desc">Como as notas ficaram depois do tratamento, para bater com o outro sistema.</p>
+        <p class="page-desc">Como as notas ficaram depois do tratamento, para bater com o outro sistema. No relatório por CFOP, clique numa linha para ver as notas daquele CFOP.</p>
         <div class="card">
           <div class="toolbar">
             <div class="filters" id="rel-qual">
@@ -434,7 +434,8 @@
             </div>
             <select id="rel-competencia" style="font-size:12px;width:210px"></select>
             <div class="sep"></div>
-            <button class="btn sm primary" id="rel-baixar">⇩ Baixar planilha</button>
+            <button class="btn sm primary" id="rel-baixar" title="O relatório que está na tela">⇩ Baixar planilha</button>
+            <button class="btn sm" id="rel-baixar-analitico" title="Um item por linha, com a nota, o CFOP e os impostos — para filtrar e bater no Excel">⇩ Planilha analítica (item a item)</button>
           </div>
           <div id="rel-aviso" class="placar sutil hidden" style="margin:0 14px 8px"></div>
           <div class="body tight">

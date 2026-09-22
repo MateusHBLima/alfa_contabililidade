@@ -454,3 +454,12 @@ tr.grupo-fornecedor.pronto td{background:#eef8f3}
 tr.grupo-fornecedor .seta{display:inline-block;width:14px;color:var(--muted)}
 tr.grupo-fornecedor .grupo-meta{color:var(--muted);margin:0 10px}
 #btn-agrupar.on{background:var(--primary);border-color:var(--primary);color:#fff}
+
+/* Relatorio por CFOP: linha clicavel abre as notas (analitico). */
+tr.rel-cfop{cursor:pointer}
+tr.rel-cfop:hover td{background:var(--primary-soft)}
+tr.rel-cfop .seta{display:inline-block;width:12px;color:var(--muted)}
+tr.rel-notas>td{background:#f6f9fd;padding:8px 10px 14px 26px}
+.rel-notas-caixa table{width:100%;font-size:12px;background:#fff;border:1px solid var(--line-2);border-radius:6px}
+.rel-notas-topo{display:flex;gap:12px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.rel-notas-topo .btn{margin-left:auto}
