@@ -21,7 +21,7 @@ import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from '.
 import { aprender, chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
 import { detectarAlertas, estiloDaLinha, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
-import { montarRelatorioCfop, montarRelatorioProdutos, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico } from './relatorios/relatorios';
+import { montarRelatorioCfop, montarRelatorioProdutos, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 
 type Env = {
@@ -1670,14 +1670,18 @@ app.get('/api/empresas/:id/competencias', async (c) => {
 async function garantirValoresFiscais(c: any, empresaId: string, competencia?: string): Promise<void> {
   const repo = c.get('repo');
   const pendentes = await repo.notasSemValoresFiscais(empresaId, competencia);
-  for (const n of pendentes) {
-    if (!n.r2_original) continue;
-    const obj = await c.env.XML_ORIGINAL.get(n.r2_original);
-    if (!obj) continue;
-    let nota;
-    try { nota = parseNFe(await obj.text()); } catch { continue; }
-    await repo.gravarValoresFiscais(n.id, nota.itens.map((it: any) => ({ nItem: it.nItem, valores: valoresFiscaisBind(it) })));
-  }
+  for (const n of pendentes) await lerValoresFiscaisDaNota(c, n.id, n.r2_original);
+}
+
+/** Uma nota: le o original guardado e grava os valores fiscais dos itens. Falha = fica como estava. */
+async function lerValoresFiscaisDaNota(c: any, notaId: string, r2Original: string | null): Promise<boolean> {
+  if (!r2Original) return false;
+  const obj = await c.env.XML_ORIGINAL.get(r2Original);
+  if (!obj) return false;
+  let nota;
+  try { nota = parseNFe(await obj.text()); } catch { return false; }
+  await c.get('repo').gravarValoresFiscais(notaId, nota.itens.map((it: any) => ({ nItem: it.nItem, valores: valoresFiscaisBind(it) })));
+  return true;
 }
 
 const csvResposta = (corpo: string, nome: string) =>
@@ -1753,8 +1757,15 @@ app.get('/api/notas/:id', async (c) => {
   // permissão explícita. O recorte por empresa não substitui isso.
   exigir(c.get('sessao'), 'notas.visualizar');
   const repo = c.get('repo');
-  const r = await repo.obterNotaComItens(c.req.param('id'));
+  let r = await repo.obterNotaComItens(c.req.param('id'));
   if (!r) return c.json({ erro: 'nota não encontrada' }, 404);
+  // Nota importada antes da 0013: frete/despesas/ICMS por item ainda nao foram lidos.
+  // Le do original guardado na primeira abertura (so leitura do XML; nada que ela fez muda).
+  if (r.itens.some((i: any) => Number(i.valores_lidos) !== 1)) {
+    if (await lerValoresFiscaisDaNota(c, r.nota.id, r.nota.r2_original)) {
+      r = (await repo.obterNotaComItens(r.nota.id))!;
+    }
+  }
 
   const historico = await repo.carregarHistoricoProdutos(
     r.nota.empresa_id, r.nota.emit_cnpj, r.nota.id,
@@ -1829,7 +1840,10 @@ app.get('/api/notas/:id', async (c) => {
     })),
   );
 
-  return c.json({ nota: r.nota, itens, resumo });
+  // Rodape da tela: total por CFOP desta nota, produto e valor contabil (pedido de 22/09).
+  const totaisCfop = totaisPorCfopDaNota(r.itens, r.nota.valor_total);
+
+  return c.json({ nota: r.nota, itens, resumo, totaisCfop });
 });
 
 /**
