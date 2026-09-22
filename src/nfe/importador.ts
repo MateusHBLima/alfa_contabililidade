@@ -1,7 +1,7 @@
 import { parseNFe, lerEventoNFe, hashXml } from './parser';
 import { ErroParserNFe } from './tipos';
 import type { Repo } from '../db/repo';
-import { chavesDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from '../rules/engine';
+import { chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from '../rules/engine';
 import { TODOS_CAMPOS, type Campo } from '../rules/campos';
 
 /**
@@ -238,7 +238,7 @@ async function importarUma(
     );
 
   // --- motor de regras: uma consulta para a nota inteira -----------------
-  const todasChaves = nota.itens.flatMap((it) => chavesDoItem(it, nota.emit.cnpj));
+  const todasChaves = nota.itens.flatMap((it) => chavesParaBuscar(it, nota.emit.cnpj));
   const candidatas = await repo.carregarRegrasCandidatas(empresa.id, todasChaves);
 
   const contexto: ContextoNota = {
@@ -251,10 +251,8 @@ async function importarUma(
   const inserts: D1PreparedStatement[] = [];
 
   for (const item of nota.itens) {
-    const chaves = chavesDoItem(item, nota.emit.cnpj);
-    const doItem = candidatas.filter((r) =>
-      chaves.some((c) => c.nivel === r.nivel && c.chave === r.chave),
-    );
+    // Cada regra casa pela chave do PROPRIO campo: a de CFOP inclui o CFOP de saida.
+    const doItem = regrasDoItem(item, nota.emit.cnpj, candidatas);
 
     const sug: Record<Campo, ReturnType<typeof sugerir>> = {} as any;
     for (const campo of TODOS_CAMPOS) {
@@ -296,8 +294,10 @@ async function importarUma(
               cfop_novo, cfop_origem, x_prod_novo, x_prod_origem,
               cst_entrada, cst_entrada_origem, conta_contabil, conta_contabil_origem,
               credito_icms, credito_icms_origem, credito_pis, credito_pis_origem,
-              credito_cofins, credito_cofins_origem, confianca, revisado)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+              credito_cofins, credito_cofins_origem, confianca, revisado,
+              v_desc, v_frete, v_seg, v_outro, v_bc_icms, v_icms, v_bc_st, v_st, v_fcp_st, v_ipi,
+              valor_contabil, valores_lidos)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,1)`,
         )
         .bind(
           repo.novoId(), tenant, notaId, item.nItem, item.cProd, item.cEAN, item.xProd,
@@ -311,6 +311,7 @@ async function importarUma(
           vazioParaNulo(sug['credito_pis']!.valor), sug['credito_pis']!.origem,
           vazioParaNulo(sug['credito_cofins']!.valor), sug['credito_cofins']!.origem,
           confianca,
+          ...valoresFiscaisBind(item),
         ),
     );
   }
@@ -334,6 +335,16 @@ async function importarUma(
 function dataBr(iso: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
   return m ? `${m[3]}/${m[2]}/${m[1]}` : iso;
+}
+
+/** Os valores fiscais do item na ordem das colunas v_desc..valor_contabil. */
+export function valoresFiscaisBind(item: { vProd: number | null; fiscal?: import('./tipos').ValoresFiscais }): number[] {
+  const f = item.fiscal;
+  if (!f) {
+    const vp = item.vProd ?? 0;
+    return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, vp];
+  }
+  return [f.vDesc, f.vFrete, f.vSeg, f.vOutro, f.vBC, f.vICMS, f.vBCST, f.vST, f.vFCPST, f.vIPI, f.valorContabil];
 }
 
 function vazioParaNulo(v: string): string | null {

@@ -13,6 +13,31 @@ export type ItemNFe = {
   /** CST ou CSOSN do ICMS, conforme o regime do emitente. Nunca alteramos: so conferimos. */
   cstIcms: string | null;
   temIbsCbs: boolean;
+  /**
+   * Valores fiscais do item, copiados do XML. So leitura e relatorio (resumo por
+   * CFOP no formato do livro de entradas) - nunca entram no XML corrigido.
+   * Opcionais porque o motor de regras e os testes montam itens sem eles.
+   */
+  fiscal?: ValoresFiscais;
+};
+
+export type ValoresFiscais = {
+  vDesc: number;
+  vFrete: number;
+  vSeg: number;
+  vOutro: number;
+  vBC: number;
+  vICMS: number;
+  vBCST: number;
+  vST: number;
+  vFCPST: number;
+  vIPI: number;
+  /**
+   * Valor contabil do item: o que o livro de entradas soma por CFOP.
+   * vProd - vDesc + vFrete + vSeg + vOutro + vST + vFCPST + vIPI.
+   * A soma dos itens fecha com o vNF da nota nos casos de compra comum.
+   */
+  valorContabil: number;
 };
 
 export type NotaFiscal = {

@@ -1,5 +1,5 @@
 import { XMLParser } from 'fast-xml-parser';
-import { ErroParserNFe, type EventoNFe, type ItemNFe, type NotaFiscal } from './tipos';
+import { ErroParserNFe, type EventoNFe, type ItemNFe, type NotaFiscal, type ValoresFiscais } from './tipos';
 
 /**
  * Leitor de NF-e (modelo 55).
@@ -114,6 +114,49 @@ export function lerEventoNFe(xml: string): EventoNFe | null {
   };
 }
 
+/** Soma um campo dentro do grupo de imposto, qualquer que seja a variante (ICMS00, ICMSSN900, IPITrib...). */
+function doGrupo(grupo: No | undefined, campo: string): number {
+  if (!grupo || typeof grupo !== 'object') return 0;
+  for (const k of Object.keys(grupo)) {
+    const g = grupo[k];
+    if (g && typeof g === 'object') {
+      const v = numero(g[campo]);
+      if (v !== null) return v;
+    }
+  }
+  return 0;
+}
+
+const centavos = (v: number) => Math.round(v * 100) / 100;
+
+/**
+ * Valores fiscais do item, como o livro de entradas os soma por CFOP.
+ * Retorno da Tais, 22/09: o relatorio somava so o valor dos produtos, e o dela
+ * soma o valor contabil - a Sailor ficou R$ 42,43 diferente (frete e outras
+ * despesas de duas notas), e so um CFOP fechou.
+ */
+export function valoresFiscaisDoItem(prod: No, imposto: No | undefined): ValoresFiscais {
+  const n = (v: unknown) => numero(v) ?? 0;
+  const icms = imposto?.['ICMS'];
+  const v = {
+    vDesc: n(prod['vDesc']),
+    vFrete: n(prod['vFrete']),
+    vSeg: n(prod['vSeg']),
+    vOutro: n(prod['vOutro']),
+    vBC: doGrupo(icms, 'vBC'),
+    vICMS: doGrupo(icms, 'vICMS'),
+    vBCST: doGrupo(icms, 'vBCST'),
+    vST: doGrupo(icms, 'vICMSST'),
+    vFCPST: doGrupo(icms, 'vFCPST'),
+    vIPI: doGrupo(imposto?.['IPI'], 'vIPI'),
+  };
+  const vProd = n(prod['vProd']);
+  return {
+    ...v,
+    valorContabil: centavos(vProd - v.vDesc + v.vFrete + v.vSeg + v.vOutro + v.vST + v.vFCPST + v.vIPI),
+  };
+}
+
 export function parseNFe(xml: string): NotaFiscal {
   let raiz: No;
   try {
@@ -187,6 +230,7 @@ export function parseNFe(xml: string): NotaFiscal {
       vProd: numero(prod['vProd']),
       cstIcms: extrairCstIcms(det['imposto']),
       temIbsCbs: det['imposto']?.['IBSCBS'] !== undefined,
+      fiscal: valoresFiscaisDoItem(prod, det['imposto']),
     };
   });
 
