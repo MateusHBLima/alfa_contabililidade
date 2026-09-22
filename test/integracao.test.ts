@@ -2754,9 +2754,11 @@ describe('relatórios por CFOP e por produto — o instrumento da comparação d
     expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]); // BOM: sem ele o Excel quebra os acentos
     const texto = new TextDecoder().decode(bytes);
     const linhas = texto.trim().split('\r\n');
-    expect(linhas[0]).toContain('CFOP de entrada;Natureza;Itens');
+    expect(linhas[0]).toContain('CFOP de entrada;Natureza;Notas;Itens;Itens conferidos;Valor contábil');
     const tela: any = await (await req(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`)).json();
-    expect(linhas.at(-1)).toBe(`TOTAL;;6;2;${tela.totais.valor.toFixed(2).replace('.', ',')};`);
+    const br = (v: number) => v.toFixed(2).replace('.', ',');
+    const t = tela.totais;
+    expect(linhas.at(-1)).toBe(`TOTAL;;${t.notas};6;2;${br(t.valorContabil)};${br(t.baseIcms)};${br(t.icms)};${br(t.st)};${br(t.ipi)};${br(t.valor)};`);
   });
 
   it('descrição de fornecedor que começa com "=" não vira fórmula na planilha', async () => {
@@ -3039,5 +3041,248 @@ describe('importações: os lotes de 20 de um mesmo envio viram UMA importação
     const lista: any[] = await (await req(`/api/empresas/${empresaId}/importacoes`)).json() as any;
     expect(lista).toHaveLength(1);
     expect(lista[0].id).not.toBe('x');
+  });
+});
+
+
+describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o seu CFOP', () => {
+  /* Áudios da Taís, 22/09: "o mesmo pudim que veio 5102, esse fornecedor fez um
+     ajuste e emitiu outra nota no 5949 (...) cada um tem que entrar de uma maneira
+     (...) ele não poderia aprender a ser 1949 esse produto sempre."
+     Caso real: The Sailor, NF 2987604 da OESA. */
+
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+
+  let ck = '';
+  let empresaId = '';
+  const req = (c: string, o: RequestInit = {}) =>
+    app.fetch(new Request(`http://x${c}`, {
+      ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+    }), ambiente());
+
+  /** Nota do mesmo fornecedor, mesmos produtos, com outro CFOP de saída em todos os itens. */
+  const comCfop = (sufixo: string, cfop: string) =>
+    outraNota(XML, sufixo).replace(/<CFOP>\d{4}<\/CFOP>/g, `<CFOP>${cfop}</CFOP>`);
+
+  const itensDa = (sufixo: string) =>
+    db.consultar(`SELECT i.* FROM itens i JOIN notas n ON n.id = i.nota_id WHERE n.chave LIKE '%${sufixo}' ORDER BY i.n_item`) as any[];
+
+  const corrigir = async (itemId: string, cfop: string) =>
+    req(`/api/itens/${itemId}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: cfop }] }) });
+
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    empresaId = await repo.criarEmpresa({
+      cnpj: '11222333000181', razaoSocial: 'THE SAILOR TESTE', uf: 'SC', perfil: 'revenda',
+    });
+  });
+
+  it('ensinar 1949 na nota de ajuste NÃO muda o que o produto recebe na próxima compra em 5102', async () => {
+    // 1) compra normal em 5102: ela ensina 1101
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'compra.xml', conteudo: comCfop('11', '5102') }]);
+    for (const i of itensDa('11')) await corrigir(i.id, '1101');
+
+    // 2) nota de ajuste em 5949 com os mesmos produtos: ela ensina 1949
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ajuste.xml', conteudo: comCfop('22', '5949') }]);
+    for (const i of itensDa('22')) await corrigir(i.id, '1949');
+
+    // 3) nova compra em 5102: tem de vir 1101, pela regra — não 1949
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'compra2.xml', conteudo: comCfop('33', '5102') }]);
+    for (const i of itensDa('33')) {
+      expect(i.cfop_novo, `item ${i.n_item} em 5102`).toBe('1101');
+      expect(String(i.cfop_origem)).toMatch(/^regra:/);
+    }
+
+    // 4) novo ajuste em 5949: tem de vir 1949
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ajuste2.xml', conteudo: comCfop('44', '5949') }]);
+    for (const i of itensDa('44')) expect(i.cfop_novo, `item ${i.n_item} em 5949`).toBe('1949');
+  });
+
+  it('outro fornecedor, mesmo NCM, em 5102: a regra de NCM aprendida no ajuste não contamina', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ajuste.xml', conteudo: comCfop('22', '5949') }]);
+    for (const i of itensDa('22')) await corrigir(i.id, '1949');
+
+    // Mesmo NCM, OUTRO fornecedor, produto nunca visto, em 5102.
+    const outroForn = comCfop('55', '5102')
+      .replaceAll('83646984003044', '99888777000166')
+      .replace(/<cProd>[^<]+<\/cProd>/g, (m, off) => `<cProd>NOVO${off}</cProd>`)
+      .replace(/<cEAN>[^<]+<\/cEAN>/g, '<cEAN>SEM GTIN</cEAN>');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'outro.xml', conteudo: outroForn }]);
+    for (const i of itensDa('55')) expect(i.cfop_novo, `item ${i.n_item}`).not.toBe('1949');
+  });
+
+  it('descrição continua sendo do produto: ensinada no 5102, vale também na nota de ajuste', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'compra.xml', conteudo: comCfop('11', '5102') }]);
+    const i1 = itensDa('11')[0];
+    await req(`/api/itens/${i1.id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'descricao', valor: 'PUDIM MORANGO 520G' }] }) });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ajuste.xml', conteudo: comCfop('22', '5949') }]);
+    expect(itensDa('22')[0].x_prod_novo).toBe('PUDIM MORANGO 520G');
+  });
+});
+
+describe('migração 0012: regras de CFOP refeitas com o CFOP de saída na chave', () => {
+  /* Simula o banco de produção de 22/09: regras no formato antigo (sem '#'), uma
+     delas fixada, e itens que a Taís conferiu — o pudim em 5102 (1101) e o mesmo
+     pudim numa nota de ajuste em 5949 (1949). Aplica a 0012 de novo e confere. */
+  const SQL_0012 = readFileSync(new URL('../migrations/0012_regra_cfop_por_operacao.sql', import.meta.url), 'utf8');
+
+  it('as antigas ficam inativas (não somem), as novas nascem por operação, e a fixada continua fixada', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'SAILOR', uf: 'SC', perfil: 'revenda' });
+    const comCfop = (s: string, c: string) => outraNota(XML, s).replace(/<CFOP>\d{4}<\/CFOP>/g, `<CFOP>${c}</CFOP>`);
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'compra.xml', conteudo: comCfop('11', '5102') },
+      { nome: 'ajuste.xml', conteudo: comCfop('22', '5949') },
+      { nome: 'palpite.xml', conteudo: comCfop('33', '5102') },
+    ]);
+    const nota = (s: string) => (db.consultar(`SELECT id FROM notas WHERE chave LIKE '%${s}'`)[0] as any).id;
+    // Ela conferiu a compra (1101) no dia 17 e o ajuste (1949) no dia 18. A nota ...33 ficou no palpite, sem ninguém olhar.
+    db.consultar(`UPDATE itens SET cfop_novo='1101', revisado=1, revisado_em='2026-09-17T10:00:00Z', cfop_origem='manual' WHERE nota_id=?`, nota('11'));
+    db.consultar(`UPDATE itens SET cfop_novo='1949', revisado=1, revisado_em='2026-09-18T10:00:00Z', cfop_origem='manual' WHERE nota_id=?`, nota('22'));
+    db.consultar(`UPDATE itens SET cfop_novo='1556', revisado=0, cfop_origem='perfil' WHERE nota_id=?`, nota('33'));
+
+    // O estado antigo: regras sem o CFOP de saída. A última gravação (o ajuste) venceu.
+    db.consultar(`DELETE FROM regras`);
+    const item1 = db.consultar(`SELECT * FROM itens WHERE nota_id=? AND n_item=1`, nota('11'))[0] as any;
+    const antigaBase = `83646984003044|${String(item1.c_prod).toUpperCase()}`;
+    db.consultar(`INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, usos, acertos, confianca, criada_em, fixada, fixada_em)
+                  VALUES ('velha-fix','alfa',?,1,?,'cfop','1101',2,2,0.75,'2026-09-17',1,'2026-09-17T10:00:00Z')`, empresaId, antigaBase);
+    db.consultar(`INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, usos, acertos, confianca, criada_em)
+                  VALUES ('velha-ncm','alfa',?,6,?,'cfop','1949',1,1,0.66,'2026-09-18')`, empresaId, String(item1.ncm));
+    db.consultar(`INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, criada_em)
+                  VALUES ('desc','alfa',?,1,?,'descricao','PUDIM','2026-09-18')`, empresaId, antigaBase);
+    const itensAntes = JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'));
+
+    (db as any).db.exec(SQL_0012);
+
+    // Nada do trabalho dela mudou.
+    expect(JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'))).toBe(itensAntes);
+    // As antigas de CFOP ficam, inativas. A de descrição não é tocada.
+    expect((db.consultar(`SELECT ativa FROM regras WHERE id='velha-ncm'`)[0] as any).ativa).toBe(0);
+    expect((db.consultar(`SELECT ativa FROM regras WHERE id='velha-fix'`)[0] as any).ativa).toBe(0);
+    expect((db.consultar(`SELECT ativa FROM regras WHERE id='desc'`)[0] as any).ativa).toBe(1);
+
+    const nova = (nivel: number, chave: string) =>
+      db.consultar(`SELECT * FROM regras WHERE ativa=1 AND campo='cfop' AND nivel=? AND chave=?`, nivel, chave)[0] as any;
+    // Produto: uma regra por operação.
+    expect(nova(1, `${antigaBase}#5102`)).toMatchObject({ valor: '1101', fixada: 1, fixada_em: '2026-09-17T10:00:00Z' });
+    expect(nova(1, `${antigaBase}#5949`)).toMatchObject({ valor: '1949', fixada: 0 });
+    // NCM de qualquer fornecedor: o 1949 fica preso ao 5949.
+    expect(nova(6, `${item1.ncm}#5949`).valor).toBe('1949');
+    expect(nova(6, `${item1.ncm}#5102`).valor).toBe('1101');
+    // Palpite que ninguém conferiu não virou regra.
+    expect(db.consultar(`SELECT * FROM regras WHERE ativa=1 AND campo='cfop' AND valor='1556'`)).toHaveLength(0);
+
+    // E o motor, com as regras refeitas, sugere certo numa nota nova de cada tipo.
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'compra2.xml', conteudo: comCfop('44', '5102') },
+      { nome: 'ajuste2.xml', conteudo: comCfop('55', '5949') },
+    ]);
+    const cfopDe = (s: string) => (db.consultar(`SELECT cfop_novo FROM itens WHERE nota_id=? ORDER BY n_item`, nota(s)) as any[]).map((i) => i.cfop_novo);
+    expect(new Set(cfopDe('44'))).toEqual(new Set(['1101']));
+    expect(new Set(cfopDe('55'))).toEqual(new Set(['1949']));
+  });
+});
+
+describe('relatório no formato do livro de entradas: valor contábil, ICMS e analítico por CFOP', () => {
+  /* Áudios da Taís, 22/09: o total do relatório (R$ 10.351,25) não fechava com o de
+     "Notas recebidas" (R$ 10.393,68) — R$ 42,43 de frete e outras despesas de duas
+     notas. E "só um CFOP fechou": ela precisa abrir o CFOP e ver as notas, com ICMS. */
+
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+
+  let ck = '';
+  let empresaId = '';
+  const req = (c: string) => app.fetch(new Request(`http://x${c}`, { headers: { Cookie: ck } }), ambiente());
+  const json = async (c: string) => (await req(c)).json() as Promise<any>;
+
+  /** Como a nota da SOS: frete 19,98 e outras 3,86 no item 1, e o vNF inclui os dois. */
+  const comFrete = (sufixo: string) =>
+    outraNota(XML, sufixo)
+      .replace('<vProd>85.00</vProd>', '<vProd>85.00</vProd><vFrete>19.98</vFrete><vOutro>3.86</vOutro>')
+      .replace('<vNF>289.00</vNF>', '<vNF>312.84</vNF>');
+
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'SAILOR', uf: 'SC', perfil: 'industrializacao' });
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'a.xml', conteudo: comFrete('11') },
+      { nome: 'b.xml', conteudo: outraNota(XML, '22') },
+    ]);
+    // Ela tratou: na nota ...11 o item 1 foi para 1556; o resto ficou 1101.
+    db.consultar(`UPDATE itens SET cfop_novo = '1101'`);
+    db.consultar(`UPDATE itens SET cfop_novo = '1556' WHERE n_item = 1 AND nota_id = (SELECT id FROM notas WHERE chave LIKE '%11')`);
+  });
+
+  it('o total do relatório por CFOP fecha com o total das notas (vNF) — o caso dos R$ 42,43 da Sailor', async () => {
+    const r = await json(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`);
+    const somaVNF = (db.consultar(`SELECT SUM(valor_total) AS v FROM notas`)[0] as any).v;
+    expect(r.totais.valorContabil).toBeCloseTo(somaVNF, 2);
+    expect(r.totais.valorContabil).toBeCloseTo(289 + 312.84, 2);
+    expect(r.totais.valor).toBeCloseTo(289 * 2, 2); // só produtos: a diferença é exatamente frete + outras
+    expect(r.totais.valorContabil - r.totais.valor).toBeCloseTo(23.84, 2);
+    // O frete caiu no CFOP do item que o carrega.
+    const l1556 = r.linhas.find((l: any) => l.cfop === '1556');
+    expect(l1556).toMatchObject({ notas: 1, itens: 1 });
+    expect(l1556.valorContabil).toBeCloseTo(85 + 23.84, 2);
+    expect(l1556.icms).toBeCloseTo(15.3, 2);
+    expect(r.totais.icms).toBeCloseTo((15.3 + 6.91) * 2, 2);
+    expect(r.totais.notas).toBe(2);
+  });
+
+  it('clicar no CFOP: as notas dele, somando só os itens daquele CFOP', async () => {
+    const r = await json(`/api/empresas/${empresaId}/relatorios/notas?competencia=2026-08&cfop=1101`);
+    expect(r.notas).toHaveLength(2);
+    const comDois = r.notas.find((n: any) => n.itens === 2);   // a nota ...11: um item foi para 1556
+    expect(comDois.valorContabil).toBeCloseTo(165.6 + 38.4, 2);
+    expect(comDois.valorNota).toBeCloseTo(312.84, 2);             // a nota inteira, para ela ver que há outro CFOP
+    const soma = r.notas.reduce((s: number, n: any) => s + n.valorContabil, 0);
+    const sint = await json(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`);
+    expect(soma).toBeCloseTo(sint.linhas.find((l: any) => l.cfop === '1101').valorContabil, 2);
+  });
+
+  it('planilha analítica: um item por linha, filtrável por CFOP, e o total bate com o sintético', async () => {
+    const resp = await req(`/api/empresas/${empresaId}/relatorios/analitico?competencia=2026-08&cfop=1556&formato=csv`);
+    expect(resp.headers.get('content-disposition')).toContain('relatorio-analitico-11222333000181-2026-08-cfop-1556.csv');
+    const linhas = (await resp.text()).trim().split('\r\n');
+    expect(linhas[0]).toContain('Número;Série;Fornecedor');
+    expect(linhas[0]).toContain('Valor contábil;Base de cálculo ICMS;ICMS');
+    expect(linhas).toHaveLength(3); // cabeçalho + 1 item + TOTAL
+    expect(linhas[1]).toContain(';1556;');
+    expect(linhas[1]).toContain(';19,98;');       // frete na coluna dele
+    expect(linhas[1]).toContain(';108,84;');      // valor contábil do item
+    const todos = (await (await req(`/api/empresas/${empresaId}/relatorios/analitico?competencia=2026-08&formato=csv`)).text()).trim().split('\r\n');
+    expect(todos).toHaveLength(1 + 6 + 1);
+  });
+
+  it('notas importadas antes desta versão: os valores são lidos do XML guardado, sem tocar no original', async () => {
+    const antes = await json(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`);
+    db.consultar(`UPDATE itens SET v_frete = NULL, v_outro = NULL, v_icms = NULL, valor_contabil = NULL, valores_lidos = 0`);
+    const xmlAntes = JSON.stringify([...r2.objetos.entries()]);
+    expect(r2.objetos.size).toBe(2);
+    const depois = await json(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`);
+    expect(depois.totais).toEqual(antes.totais);
+    expect(db.consultar(`SELECT * FROM itens WHERE valores_lidos = 0`)).toHaveLength(0);
+    expect(JSON.stringify([...r2.objetos.entries()])).toBe(xmlAntes);
+  });
+
+  it('CFOP malformado é recusado, e "notas" exige o CFOP', async () => {
+    expect((await req(`/api/empresas/${empresaId}/relatorios/notas?competencia=2026-08`)).status).toBe(400);
+    expect((await req(`/api/empresas/${empresaId}/relatorios/analitico?competencia=2026-08&cfop=x1'`)).status).toBe(400);
   });
 });
