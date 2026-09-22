@@ -339,3 +339,29 @@ describe('tela: "como estava" — a trilha na linha do item', () => {
     expect(fn).toMatch(/nunca é apagada/);
   });
 });
+
+describe('tela: colunas da tabela de itens', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const cabecalho = HTML.slice(HTML.indexOf('id="tbl-itens"'), HTML.indexOf('</thead>', HTML.indexOf('id="tbl-itens"')));
+  const nTh = (cabecalho.match(/<th\b/g) ?? []).length;
+  const corpoLinha = APP.slice(APP.indexOf('function linhaItem('), APP.indexOf('function podeFixar('));
+  const retorno = corpoLinha.slice(corpoLinha.lastIndexOf('return `<tr'));
+
+  it('o cabeçalho tem "Valor" e, ao lado, "Valor contábil"', () => {
+    expect(cabecalho).toMatch(/>Valor<\/th>\s*<th[^>]*>Valor contábil<\/th>/);
+  });
+
+  it('cada linha tem uma célula por coluna do cabeçalho — senão os valores andam de coluna', () => {
+    expect((retorno.match(/<td\b/g) ?? []).length).toBe(nTh);
+  });
+
+  it('a mensagem de "nenhum item" ocupa a largura toda', () => {
+    expect(APP).toContain(`colspan="${nTh}" class="vazio"`);
+  });
+
+  it('o rodapé com o total por CFOP da nota existe e vem do servidor', () => {
+    expect(HTML).toContain('id="totais-cfop"');
+    expect(APP).toMatch(/function renderTotaisCfop\(n\)/);
+    expect(APP).toContain('n?.totaisCfop');
+  });
+});

@@ -3281,6 +3281,80 @@ describe('relatório no formato do livro de entradas: valor contábil, ICMS e an
     expect(JSON.stringify([...r2.objetos.entries()])).toBe(xmlAntes);
   });
 
+  // ---- tela de tratamento (áudios de 22/09, 15h23–15h30): valor contábil por item e total por CFOP da nota
+  const idDa = (sufixo: string) =>
+    (db.consultar(`SELECT id FROM notas WHERE chave LIKE '%${sufixo}'`)[0] as any).id as string;
+
+  it('abrir a nota: cada item traz o valor contábil, e o rodapé soma por CFOP só daquela nota', async () => {
+    const r = await json(`/api/notas/${idDa('11')}`);
+    const item1 = r.itens.find((i: any) => i.n_item === 1);
+    expect(item1.valor_total).toBeCloseTo(85, 2);          // a coluna "Valor" continua sendo o produto
+    expect(item1.valor_contabil).toBeCloseTo(108.84, 2);   // ao lado: produto + frete + outras
+    const t = r.totaisCfop;
+    expect(t.linhas.map((l: any) => l.cfop)).toEqual(['1101', '1556']);
+    const l1556 = t.linhas.find((l: any) => l.cfop === '1556');
+    expect(l1556).toMatchObject({ itens: 1 });
+    expect(l1556.valor).toBeCloseTo(85, 2);
+    expect(l1556.valorContabil).toBeCloseTo(108.84, 2);
+    expect(t.linhas.find((l: any) => l.cfop === '1101').valorContabil).toBeCloseTo(204, 2);
+    expect(t.totais.valor).toBeCloseTo(289, 2);
+    expect(t.totais.valorContabil).toBeCloseTo(312.84, 2);  // fecha com o vNF
+    expect(t.valorNota).toBeCloseTo(312.84, 2);
+    expect(t.diferenca).toBe(0);
+    expect(t.valoresLidos).toBe(true);
+  });
+
+  it('o rodapé da nota usa a mesma conta do relatório por CFOP', async () => {
+    const nota = (await json(`/api/notas/${idDa('11')}`)).totaisCfop;
+    const outra = (await json(`/api/notas/${idDa('22')}`)).totaisCfop;
+    const rel = await json(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`);
+    for (const l of rel.linhas) {
+      const soma = [nota, outra].flatMap((t: any) => t.linhas).filter((x: any) => x.cfop === l.cfop)
+        .reduce((s: number, x: any) => s + x.valorContabil, 0);
+      expect(soma).toBeCloseTo(l.valorContabil, 2);
+    }
+  });
+
+  it('trocar o CFOP de um item move o valor dele no rodapé', async () => {
+    const id = idDa('11');
+    const item2 = (db.consultar(`SELECT id FROM itens WHERE nota_id = '${id}' AND n_item = 2`)[0] as any).id;
+    const resp = await app.fetch(new Request(`http://x/api/itens/${item2}`, {
+      method: 'PATCH', headers: { Cookie: ck, 'content-type': 'application/json' },
+      body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1556' }] }),
+    }), ambiente());
+    expect(resp.status).toBe(200);
+    const t = (await json(`/api/notas/${id}`)).totaisCfop;
+    expect(t.linhas.find((l: any) => l.cfop === '1556').itens).toBe(2);
+    expect(t.totais.valorContabil).toBeCloseTo(312.84, 2);  // o total da nota não muda
+  });
+
+  it('nota importada antes desta versão: abrir lê frete e despesas do XML guardado, sem mexer no que ela fez', async () => {
+    const id = idDa('11');
+    db.consultar(`UPDATE itens SET revisado = 1 WHERE nota_id = '${id}' AND n_item = 1`);
+    db.consultar(`UPDATE itens SET v_frete = NULL, v_outro = NULL, valor_contabil = NULL, valores_lidos = 0 WHERE nota_id = '${id}'`);
+    const decisoes = () => JSON.stringify(db.consultar(`SELECT n_item, cfop_novo, x_prod_novo, revisado, cfop_origem FROM itens WHERE nota_id = '${id}' ORDER BY n_item`));
+    const antes = decisoes();
+    const trilha = (db.consultar(`SELECT COUNT(*) AS n FROM auditoria`)[0] as any).n;
+    const xml = JSON.stringify([...r2.objetos.entries()]);
+    const r = await json(`/api/notas/${id}`);
+    expect(r.itens.find((i: any) => i.n_item === 1).valor_contabil).toBeCloseTo(108.84, 2);
+    expect(r.totaisCfop.diferenca).toBe(0);
+    expect(db.consultar(`SELECT * FROM itens WHERE nota_id = '${id}' AND valores_lidos = 0`)).toHaveLength(0);
+    expect(decisoes()).toBe(antes);
+    expect((db.consultar(`SELECT COUNT(*) AS n FROM auditoria`)[0] as any).n).toBe(trilha);
+    expect(JSON.stringify([...r2.objetos.entries()])).toBe(xml);
+  });
+
+  it('sem o XML original guardado: a tela avisa que o valor contábil está incompleto, e não inventa frete', async () => {
+    const id = idDa('11');
+    db.consultar(`UPDATE notas SET r2_original = NULL WHERE id = '${id}'`);
+    db.consultar(`UPDATE itens SET v_frete = NULL, v_outro = NULL, valor_contabil = NULL, valores_lidos = 0 WHERE nota_id = '${id}'`);
+    const r = await json(`/api/notas/${id}`);
+    expect(r.totaisCfop.valoresLidos).toBe(false);
+    expect(r.totaisCfop.totais.valorContabil).toBeCloseTo(289, 2);   // cai para o valor do produto
+    expect(r.totaisCfop.diferenca).toBeCloseTo(23.84, 2);             // e a diferença fica à mostra
+  });
+
   it('CFOP malformado é recusado, e "notas" exige o CFOP', async () => {
     expect((await req(`/api/empresas/${empresaId}/relatorios/notas?competencia=2026-08`)).status).toBe(400);
     expect((await req(`/api/empresas/${empresaId}/relatorios/analitico?competencia=2026-08&cfop=x1'`)).status).toBe(400);
