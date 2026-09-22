@@ -18,9 +18,10 @@ import { ErroParserNFe } from './nfe/tipos';
 import { lerNotaOriginal, compararComApp } from './nfe/visao';
 import { montarZip } from './nfe/zip';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
-import { aprender, chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
+import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
 import { detectarAlertas, estiloDaLinha, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
+import { aprendizadoDaConferencia } from './rules/conferencia';
 import { montarRelatorioCfop, montarRelatorioProdutos, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 
@@ -1776,6 +1777,11 @@ app.get('/api/notas/:id', async (c) => {
     .filter((o: string | null) => typeof o === 'string' && o.startsWith('regra:'))
     .map((o: string) => o.slice('regra:'.length));
   const fichas = await repo.regrasDeOrigem(r.nota.empresa_id, idsRegra);
+  // Padrao fixado deste fornecedor, para a linha mostrar o "PADRAO FIXADO" logo
+  // depois do "e sempre assim" (antes so aparecia na proxima nota).
+  const fixadas = new Set(
+    (await repo.regrasFixadasDoFornecedor(r.nota.empresa_id, r.nota.emit_cnpj)).map((x: any) => `${x.nivel} ${x.chave} ${x.valor}`),
+  );
 
   // De onde veio o valor que a contadora esta vendo. O CFOP manda, porque e o campo
   // que ela de fato decide; a descricao acompanha. Sem isto a tela nao tem como
@@ -1802,13 +1808,22 @@ app.get('/api/notas/:id', async (c) => {
       qCom: i.quantidade, vUnCom: i.valor_unitario, vProd: i.valor_total,
       cstIcms: i.cst_origem ?? null, temIbsCbs: false,
     };
+    const cfopDaLinha = String(i.cfop_novo ?? '').trim();
+    const ehPadraoFixado =
+      cfopDaLinha !== '' &&
+      ([1, 2] as const).some((n) => {
+        const k = chaveDoNivel(item as any, r!.nota.emit_cnpj, n, 'cfop');
+        return k !== null && fixadas.has(`${n} ${k} ${cfopDaLinha}`);
+      });
 
     const usouRegraSuspeita = [i.cfop_origem, i.x_prod_origem].some(
       (o: string | null) =>
         typeof o === 'string' && o.startsWith('regra:') && fichas.get(o.slice(6))?.suspeita === true,
     );
 
-    const procedencia = procedenciaDe(i.cfop_origem);
+    // O valor da linha E o padrao que a contabilidade fixou para este produto nesta
+    // operacao: isso e o que a marca precisa dizer, venha de onde vier o valor.
+    const procedencia: Procedencia = ehPadraoFixado ? { fonte: 'fixada' } : procedenciaDe(i.cfop_origem);
 
     // Descricao padronizada ainda igual a do fornecedor = ninguem ensinou.
     // Nao trava a linha (quem decide e o CFOP), mas nao some da tela.
@@ -2018,6 +2033,16 @@ app.post('/api/notas/:id/conferir', async (c) => {
 
   // Sem lista = a nota inteira.
   const ids = corpo.itens ?? r.itens.map((i: any) => i.id);
+
+  // Conferir ensina (22/09): o CFOP que ela conferiu vira padrao aprendido, como se
+  // tivesse digitado o mesmo valor. So o CFOP - descricao conferida pode ser a do
+  // fornecedor, que nao e decisao de ninguem. Linha digitada a mao ja ensinou na hora.
+  // Quem so pode ver a nota confere, mas nao ensina: ensinar CFOP e editar CFOP.
+  const acoes = sessao.permissoes.has('notas.editar_cfop')
+    ? aprendizadoDaConferencia(r.itens, r.nota.emit_cnpj, ids)
+    : [];
+  await repo.aprenderEmLote(r.nota.empresa_id, acoes);
+
   const conferidos = await repo.conferirItens(r.nota.id, ids);
 
   return c.json({ ok: true, conferidos });

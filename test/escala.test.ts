@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { D1Local, R2Local } from './d1-local';
+import { aprendizadoDaConferencia } from '../src/rules/conferencia';
 import { Repo } from '../src/db/repo';
 import { importarArquivos } from '../src/nfe/importador';
 import { TODAS_PERMISSOES, type Sessao } from '../src/auth/permissoes';
@@ -108,6 +109,22 @@ describe('a nota no tamanho máximo que a NF-e admite', () => {
 
     expect(idas, `${idas} idas ao banco para 990 itens — voltou a ser uma por item?`)
       .toBeLessThan(200);
+  }, 60000);
+
+  it('conferir a nota inteira de 990 itens ensina tudo em lote, sem uma ida ao banco por item', async () => {
+    const empresaId = await criarEmpresa();
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'g.xml', conteudo: notaGrande(990) }]);
+    const nota = db.consultar('SELECT * FROM notas')[0] as any;
+    const linhas = db.consultar('SELECT * FROM itens WHERE nota_id = ?', nota.id) as any[];
+
+    const c = contarIdas();
+    await repo.aprenderEmLote(empresaId, aprendizadoDaConferencia(linhas, nota.emit_cnpj, linhas.map((l) => l.id)));
+    const idas = c.ler();
+    c.parar();
+
+    expect(idas, `${idas} idas ao banco para conferir 990 itens`).toBeLessThan(250);
+    const porProduto = db.consultar(`SELECT COUNT(*) AS n FROM regras WHERE campo = 'cfop' AND nivel = 1`)[0] as any;
+    expect(porProduto.n).toBe(990);
   }, 60000);
 
   it('dois itens dividindo o código de barras não derrubam o lote inteiro', async () => {

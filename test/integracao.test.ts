@@ -2523,6 +2523,133 @@ describe('"é sempre assim": a contadora fixa um produto, não o mundo', () => {
   });
 });
 
+describe('teste geral de 22/09: o "é sempre assim" aparece na hora, e conferir ensina', () => {
+  /* Dois achados do teste geral. (1) Depois do "é sempre assim" a linha continuava
+     "palpite do perfil" e o botão continuava lá — o padrão só aparecia na próxima
+     nota. (2) "✓ Conferido" não ensinava: o palpite conferido voltava como palpite. */
+
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  let ck = '';
+  const req = (c: string, o: RequestInit = {}) =>
+    app.fetch(new Request(`http://x${c}`, {
+      ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+    }), ambiente());
+  const json = async (c: string, o: RequestInit = {}) => (await req(c, o)).json() as Promise<any>;
+  const entrar = async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  };
+  const subir = async (empresaId: string, xml: string) => {
+    const fd = new FormData();
+    fd.append('arquivos', new File([xml], 'n.xml', { type: 'text/xml' }));
+    await app.fetch(new Request(`http://x/api/empresas/${empresaId}/importar`, {
+      method: 'POST', body: fd, headers: { Cookie: ck },
+    }), ambiente());
+    return (db.consultar('SELECT id FROM notas WHERE chave = ?', parseNFe(xml).chave)[0] as any).id as string;
+  };
+  let empresaId = '';
+  beforeEach(async () => {
+    await entrar();
+    empresaId = (await json('/api/empresas', {
+      method: 'POST', body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'PILOTO', uf: 'SC', perfil: 'revenda' }),
+    })).id;
+  });
+  const regrasCfop = () => db.consultar(`SELECT * FROM regras WHERE campo = 'cfop' AND ativa = 1`) as any[];
+
+  it('"é sempre assim" no valor que já estava: a linha já volta como PADRÃO FIXADO', async () => {
+    const notaId = await subir(empresaId, XML);
+    const antes = await json(`/api/notas/${notaId}`);
+    const i0 = antes.itens[0];
+    expect(i0.procedencia.fonte).toBe('perfil');
+    await req(`/api/itens/${i0.id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: i0.cfop_novo }], fixar: true }) });
+    const depois = await json(`/api/notas/${notaId}`);
+    expect(depois.itens[0].procedencia.fonte).toBe('fixada');
+    expect(depois.itens[1].procedencia.fonte).toBe('perfil');   // só o que ela fixou
+  });
+
+  it('"é sempre assim" trocando o valor, e "salvar todos como padrão": todas as linhas marcadas na hora', async () => {
+    const notaId = await subir(empresaId, XML);
+    const n = await json(`/api/notas/${notaId}`);
+    await req(`/api/itens/${n.itens[0].id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1556' }], fixar: true }) });
+    expect((await json(`/api/notas/${notaId}`)).itens[0].procedencia.fonte).toBe('fixada');
+    const r = await req(`/api/notas/${notaId}/fixar-padrao`, { method: 'POST', body: JSON.stringify({ itens: n.itens.map((i: any) => i.id) }) });
+    expect(r.status).toBe(200);
+    expect((await json(`/api/notas/${notaId}`)).itens.map((i: any) => i.procedencia.fonte)).toEqual(['fixada', 'fixada', 'fixada']);
+  });
+
+  it('padrão fixado para OUTRO CFOP de saída não marca a linha (o pudim em 5949 não fala pelo 5102)', async () => {
+    const notaId = await subir(empresaId, XML);
+    const i0 = (await json(`/api/notas/${notaId}`)).itens[0];
+    db.consultar(`INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, criada_em, fixada, ativa)
+                  VALUES ('f5949','alfa',?,1,?,'cfop',?,'2026-09-22',1,1)`, empresaId, `83646984003044|${String(i0.c_prod).toUpperCase()}#5949`, i0.cfop_novo);
+    expect((await json(`/api/notas/${notaId}`)).itens[0].procedencia.fonte).toBe('perfil');
+  });
+
+  it('conferir ensina: a nota seguinte vem como "vocês ensinaram", com o mesmo CFOP', async () => {
+    const n1 = await subir(empresaId, XML);
+    const a = await json(`/api/notas/${n1}`);
+    expect(a.itens.every((i: any) => i.procedencia.fonte === 'perfil')).toBe(true);
+    expect(regrasCfop()).toHaveLength(0);
+    const itensAntes = JSON.stringify(db.consultar('SELECT cfop_novo, x_prod_novo, cfop_origem FROM itens ORDER BY n_item'));
+
+    expect((await req(`/api/notas/${n1}/conferir`, { method: 'POST', body: '{}' })).status).toBe(200);
+    expect(JSON.stringify(db.consultar('SELECT cfop_novo, x_prod_novo, cfop_origem FROM itens ORDER BY n_item'))).toBe(itensAntes);
+    expect(regrasCfop().length).toBeGreaterThan(0);
+    expect(regrasCfop().every((r) => r.fixada === 0 && r.chave.includes('#'))).toBe(true);
+    expect(db.consultar(`SELECT * FROM regras WHERE campo = 'descricao'`)).toHaveLength(0); // descrição conferida não ensina
+
+    const n2 = await subir(empresaId, outraNota(XML, '81'));
+    const b = await json(`/api/notas/${n2}`);
+    expect(b.itens.map((i: any) => i.cfop_novo)).toEqual(a.itens.map((i: any) => i.cfop_novo));
+    expect(b.itens.every((i: any) => i.procedencia.fonte === 'aprendida')).toBe(true);
+
+    // Conferir a segunda: a regra que sugeriu ganha um acerto.
+    const origem = String(b.itens[0].cfop_origem).slice('regra:'.length);
+    const usos = (db.consultar('SELECT acertos FROM regras WHERE id = ?', origem)[0] as any).acertos;
+    await req(`/api/notas/${n2}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [b.itens[0].id] }) });
+    expect((db.consultar('SELECT acertos FROM regras WHERE id = ?', origem)[0] as any).acertos).toBe(usos + 1);
+    // Conferir de novo o que já está conferido não conta outra vez.
+    await req(`/api/notas/${n2}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [b.itens[0].id] }) });
+    expect((db.consultar('SELECT acertos FROM regras WHERE id = ?', origem)[0] as any).acertos).toBe(usos + 1);
+  });
+
+  it('linha digitada já ensinou: conferir depois não ensina de novo', async () => {
+    const n1 = await subir(empresaId, XML);
+    const i0 = (await json(`/api/notas/${n1}`)).itens[0];
+    await req(`/api/itens/${i0.id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1556' }] }) });
+    await req(`/api/itens/${i0.id}/desconferir`, { method: 'POST' });
+    const antes = JSON.stringify(regrasCfop());
+    await req(`/api/notas/${n1}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [i0.id] }) });
+    expect(JSON.stringify(regrasCfop())).toBe(antes);
+  });
+
+  it('conferir não passa por cima de padrão fixado', async () => {
+    const n1 = await subir(empresaId, XML);
+    const i0 = (await json(`/api/notas/${n1}`)).itens[0];
+    const chave = `83646984003044|${String(i0.c_prod).toUpperCase()}#${i0.cfop_original}`;
+    db.consultar(`INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, criada_em, fixada, ativa)
+                  VALUES ('fx','alfa',?,1,?,'cfop','1949','2026-09-22',1,1)`, empresaId, chave);
+    await req(`/api/notas/${n1}/conferir`, { method: 'POST', body: '{}' });
+    expect((db.consultar(`SELECT valor, fixada FROM regras WHERE id = 'fx'`)[0] as any)).toMatchObject({ valor: '1949', fixada: 1 });
+  });
+
+  it('quem não pode editar CFOP confere, mas não ensina', async () => {
+    db.consultar(`DELETE FROM papel_permissoes WHERE papel_id = 'papel-admin' AND permissao = 'notas.editar_cfop'`);
+    await entrar();
+    const n1 = await subir(empresaId, XML);
+    const r = await json(`/api/notas/${n1}/conferir`, { method: 'POST', body: '{}' });
+    expect(r.conferidos).toBe(3);
+    expect(regrasCfop()).toHaveLength(0);
+  });
+});
+
 describe('"quero ver como que tava" — a trilha do item', () => {
   /* Último pedido da contadora no primeiro uso real, e o único que faltava.
      Até aqui o `desfazer` da linha só tirava a marca de conferido — o VALOR
