@@ -162,6 +162,47 @@ export function montarRelatorioCfop(brutas: LinhaCfopBruta[]): { linhas: LinhaCf
   };
 }
 
+// ------------------------------------------------------------ uma nota so
+
+/**
+ * Total por CFOP de UMA nota, no rodape da tela de tratamento. Pedido da Taís em
+ * 22/09: "quando eu clico em ver, embaixo ja me apareca o total de um CFOP e o total
+ * de outro so daquela nota" - e com frete e despesas, para fechar com o total da nota.
+ *
+ * Usa a MESMA montagem do relatorio por CFOP, item a item: o numero do rodape e o
+ * numero do relatorio nao podem divergir por criterio. `diferenca` e o quanto o valor
+ * contabil somado fica longe do vNF; zero e o esperado.
+ */
+export function totaisPorCfopDaNota(itens: any[], valorNota: number) {
+  const rel = montarRelatorioCfop(
+    itens.map((i) => {
+      const lidos = Number(i.valores_lidos) === 1;
+      return {
+        cfop_novo: i.cfop_novo ?? null,
+        cfop_original: i.cfop_original ?? null,
+        itens: 1,
+        conferidos: i.revisado ? 1 : 0,
+        valor: Number(i.valor_total ?? 0),
+        valor_contabil: lidos ? Number(i.valor_contabil ?? i.valor_total ?? 0) : null,
+        v_bc: lidos ? Number(i.v_bc_icms ?? 0) : 0,
+        v_icms: lidos ? Number(i.v_icms ?? 0) : 0,
+        v_st: lidos ? Number(i.v_st ?? 0) + Number(i.v_fcp_st ?? 0) : 0,
+        v_ipi: lidos ? Number(i.v_ipi ?? 0) : 0,
+        notas: '',
+      } as LinhaCfopBruta;
+    }),
+  );
+  const vNF = centavos(Number(valorNota ?? 0));
+  return {
+    linhas: rel.linhas.map(({ notas: _n, ...l }) => l),
+    totais: { itens: rel.totais.itens, valor: rel.totais.valor, valorContabil: rel.totais.valorContabil },
+    valorNota: vNF,
+    /** false quando algum item nao tem os valores do XML (sem original guardado): o contabil vira o do produto */
+    valoresLidos: itens.every((i) => Number(i.valores_lidos) === 1),
+    diferenca: centavos(vNF - rel.totais.valorContabil),
+  };
+}
+
 // ------------------------------------------------------------------ analitico
 
 /**
