@@ -1181,6 +1181,7 @@ function renderItens() {
   const n = estado.notaAberta;
   const corpo = $('#tbl-itens tbody');
   $('#vazio-itens').classList.toggle('hidden', !!n);
+  renderTotaisCfop(n);
   if (!n) { corpo.innerHTML = ''; $('#faixa-resumo').innerHTML = ''; return; }
 
   $('#titulo-nota').textContent = `Nota ${n.nota.numero} — ${n.nota.emit_nome ?? n.nota.emit_cnpj}`;
@@ -1224,7 +1225,7 @@ function renderItens() {
           conferido: 'Nenhum item conferido ainda.',
         }[estado.filtro] ?? 'Nenhum item nesta situação.';
     corpo.innerHTML =
-      `<tr><td colspan="9" class="vazio">${esc(porque)}
+      `<tr><td colspan="10" class="vazio">${esc(porque)}
         <button class="btn sm" id="limpar-filtro-itens">Ver todos os ${n.itens.length} itens</button>
       </td></tr>`;
     $('#limpar-filtro-itens')?.addEventListener('click', () => {
@@ -1253,6 +1254,54 @@ function renderItens() {
   $$('#tbl-itens [data-campo]').forEach((el) => {
     el.addEventListener('change', () => salvarCampo(el.dataset.item, el.dataset.campo, el.value));
   });
+}
+
+/**
+ * Rodape da nota: o total de cada CFOP SO desta nota (pedido da Taís, 22/09).
+ * Duas colunas de valor, como ela pediu: o dos produtos (bate com o relatório por
+ * produto) e o contábil, com frete e despesas (bate com o total da nota e com o
+ * relatório por CFOP). Vem pronto do servidor, pela mesma conta do relatório, e é
+ * da nota inteira: filtro e busca da tabela não mudam o rodapé.
+ */
+function renderTotaisCfop(n) {
+  const el = $('#totais-cfop');
+  if (!el) return;
+  const t = n?.totaisCfop;
+  if (!t || !t.linhas?.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+  const fecha = Math.abs(t.diferenca) < 0.005;
+  el.innerHTML =
+    `<div class="totais-topo"><b>Total por CFOP desta nota</b>
+       ${!t.valoresLidos
+         ? '<span class="tag warn" title="Algum item não tem o XML original guardado; o valor contábil dele entra como o valor do produto">valor contábil incompleto</span>'
+         : fecha
+           ? `<span class="tag ok">fecha com o total da nota · R$ ${moeda(t.valorNota)}</span>`
+           : `<span class="tag dan" title="Total da nota (vNF) menos a soma do valor contábil dos itens">difere do total da nota em R$ ${moeda(t.diferenca)}</span>`}
+     </div>
+     <table><thead><tr>
+       <th>CFOP de entrada</th><th class="num">Itens</th>
+       <th class="num">Valor dos produtos</th><th class="num">Valor contábil</th>
+     </tr></thead><tbody>` +
+    t.linhas.map((l) => `<tr>
+       <td><b class="mono">${esc(l.cfop)}</b>${l.natureza ? ` <span class="porque">${esc(l.natureza)}</span>` : ''}</td>
+       <td class="num">${l.itens}</td>
+       <td class="num">${moeda(l.valor)}</td>
+       <td class="num"><b>${moeda(l.valorContabil)}</b></td>
+     </tr>`).join('') +
+    `</tbody><tfoot><tr>
+       <td>Total</td><td class="num">${t.totais.itens}</td>
+       <td class="num">${moeda(t.totais.valor)}</td><td class="num">${moeda(t.totais.valorContabil)}</td>
+     </tr></tfoot></table>`;
+}
+
+/** "produto 174,96 + frete 15,60 + outras 2,99" — o que compõe o valor contábil do item. */
+function composicaoContabil(i) {
+  const partes = [`produto ${moeda(i.valor_total)}`];
+  const soma = (rot, v) => { if (Number(v) > 0) partes.push(`+ ${rot} ${moeda(v)}`); };
+  soma('frete', i.v_frete); soma('seguro', i.v_seg); soma('outras despesas', i.v_outro);
+  soma('ST', Number(i.v_st ?? 0) + Number(i.v_fcp_st ?? 0)); soma('IPI', i.v_ipi);
+  if (Number(i.v_desc) > 0) partes.push(`− desconto ${moeda(i.v_desc)}`);
+  return partes.join(' ');
 }
 
 function linhaItem(i) {
@@ -1301,6 +1350,9 @@ function linhaItem(i) {
          title="O que já mudou neste item, quem mudou e quando">↩ como estava</button>` : ''}
     </td>
     <td class="num">${moeda(i.valor_total)}</td>
+    <td class="num contabil">${i.valores_lidos === 1 && i.valor_contabil != null
+      ? `<span title="${esc(composicaoContabil(i))}">${moeda(i.valor_contabil)}</span>`
+      : '<span class="tiny" title="Sem o XML original guardado não dá para ler frete e despesas deste item">—</span>'}</td>
     <td>
       <span class="selo selo-${est.estado}"><span class="ic">${est.icone}</span>${esc(est.rotulo)}</span>
       ${i.revisado ? `<span class="porque">${esc(quemConferiu(i))}</span>` : ''}
