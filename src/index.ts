@@ -11,16 +11,18 @@ import {
   gerarSegredo, conferirTotp, uriDeProvisionamento, segredoLegivel,
 } from './auth/totp';
 import { importarArquivos } from './nfe/importador';
+import { parseNFe } from './nfe/parser';
 import { analisarCnaes } from './empresas/cnae';
 import { gerarXmlCorrigido, verificarInvariantes } from './nfe/serializer';
 import { ErroParserNFe } from './nfe/tipos';
 import { lerNotaOriginal, compararComApp } from './nfe/visao';
 import { montarZip } from './nfe/zip';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
-import { aprender, chavesDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
+import { aprender, chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
 import { detectarAlertas, estiloDaLinha, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
-import { montarRelatorioCfop, montarRelatorioProdutos, csvCfop, csvProdutos } from './relatorios/relatorios';
+import { montarRelatorioCfop, montarRelatorioProdutos, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico } from './relatorios/relatorios';
+import { valoresFiscaisBind } from './nfe/importador';
 
 type Env = {
   DB: D1Database;
@@ -1660,33 +1662,79 @@ app.get('/api/empresas/:id/competencias', async (c) => {
  * JSON para a tela; `?formato=csv` para a planilha. Regra e formato em
  * src/relatorios/relatorios.ts.
  */
+/**
+ * Itens importados antes da migração 0013 não têm os valores fiscais: lê o XML
+ * ORIGINAL guardado e preenche. Uma vez por nota; depois disso é consulta pura.
+ * O original não é tocado (invariante 1) — só lido.
+ */
+async function garantirValoresFiscais(c: any, empresaId: string, competencia?: string): Promise<void> {
+  const repo = c.get('repo');
+  const pendentes = await repo.notasSemValoresFiscais(empresaId, competencia);
+  for (const n of pendentes) {
+    if (!n.r2_original) continue;
+    const obj = await c.env.XML_ORIGINAL.get(n.r2_original);
+    if (!obj) continue;
+    let nota;
+    try { nota = parseNFe(await obj.text()); } catch { continue; }
+    await repo.gravarValoresFiscais(n.id, nota.itens.map((it: any) => ({ nItem: it.nItem, valores: valoresFiscaisBind(it) })));
+  }
+}
+
+const csvResposta = (corpo: string, nome: string) =>
+  new Response(corpo, {
+    headers: {
+      'content-type': 'text/csv; charset=utf-8',
+      'content-disposition': `attachment; filename="${nome}"`,
+      'cache-control': 'no-store',
+    },
+  });
+
+/**
+ * Relatórios de conferência por empresa e competência.
+ *   cfop      — sintético por CFOP no formato do livro de entradas (valor contábil, BC, ICMS, ST, IPI)
+ *   produtos  — por produto
+ *   analitico — um item por linha, com a nota; `?cfop=` filtra pelo CFOP de entrada
+ *   notas     — as notas de UM CFOP (`?cfop=`), somando só os itens daquele CFOP
+ * JSON para a tela; `?formato=csv` para a planilha. Regra e formato em src/relatorios.
+ */
 app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   exigir(c.get('sessao'), 'notas.visualizar');
   const qual = c.req.param('qual');
-  if (qual !== 'cfop' && qual !== 'produtos') return c.json({ erro: 'relatório desconhecido' }, 404);
+  if (!['cfop', 'produtos', 'analitico', 'notas'].includes(qual)) return c.json({ erro: 'relatório desconhecido' }, 404);
 
   const competencia = c.req.query('competencia') || undefined;
   if (competencia && !/^\d{4}(-\d{2})?$/.test(competencia)) {
     return c.json({ erro: 'competência inválida (use AAAA-MM ou AAAA)' }, 400);
   }
+  const cfopFiltro = c.req.query('cfop');
+  if (cfopFiltro !== undefined && cfopFiltro !== '(sem CFOP)' && !/^\d{4}$/.test(cfopFiltro)) {
+    return c.json({ erro: 'CFOP inválido' }, 400);
+  }
+  if (qual === 'notas' && cfopFiltro === undefined) return c.json({ erro: 'informe o CFOP' }, 400);
+
   const repo = c.get('repo');
   const empresaId = c.req.param('id');
+  const csv = c.req.query('formato') === 'csv';
+  const empresa = await repo.obterEmpresa(empresaId);
+  const sufixo = `${empresa?.cnpj ?? 'empresa'}-${competencia ?? 'tudo'}`;
+
+  if (qual !== 'produtos') await garantirValoresFiscais(c, empresaId, competencia);
+
+  if (qual === 'analitico' || qual === 'notas') {
+    const linhas = await repo.relatorioAnalitico(empresaId, competencia, cfopFiltro);
+    const doCfop = cfopFiltro ? `-cfop-${cfopFiltro.replace(/\D/g, '') || 'sem'}` : '';
+    if (csv) return csvResposta(csvAnalitico(linhas), `relatorio-analitico-${sufixo}${doCfop}.csv`);
+    if (qual === 'notas') return c.json({ competencia: competencia ?? null, cfop: cfopFiltro, notas: notasDoAnalitico(linhas) });
+    return c.json({ competencia: competencia ?? null, cfop: cfopFiltro ?? null, linhas });
+  }
+
   const rel =
     qual === 'cfop'
       ? montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia))
       : montarRelatorioProdutos(await repo.relatorioProdutos(empresaId, competencia));
 
-  if (c.req.query('formato') === 'csv') {
-    const corpo = qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any);
-    const empresa = await repo.obterEmpresa(empresaId);
-    const nome = `relatorio-${qual}-${empresa?.cnpj ?? 'empresa'}-${competencia ?? 'tudo'}.csv`;
-    return new Response(corpo, {
-      headers: {
-        'content-type': 'text/csv; charset=utf-8',
-        'content-disposition': `attachment; filename="${nome}"`,
-        'cache-control': 'no-store',
-      },
-    });
+  if (csv) {
+    return csvResposta(qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any), `relatorio-${qual}-${sufixo}.csv`);
   }
   return c.json({ competencia: competencia ?? null, ...rel });
 });
@@ -1847,8 +1895,10 @@ app.patch('/api/itens/:id', async (c) => {
     ufDestinatario: empresa.uf,
   };
 
-  const chaves = chavesDoItem(item, linha.emit_cnpj);
-  const candidatas = await repo.carregarRegrasCandidatas(empresa.id, chaves);
+  const candidatas = regrasDoItem(
+    item, linha.emit_cnpj,
+    await repo.carregarRegrasCandidatas(empresa.id, chavesParaBuscar(item, linha.emit_cnpj)),
+  );
 
   // Aplicar a todo o fornecedor = aprender só no nível 5 (padrão do fornecedor).
   //
