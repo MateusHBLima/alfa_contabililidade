@@ -930,13 +930,20 @@ function renderNotas() {
         ${pronto ? '<span class="tag ok">✓ tudo tratado</span>' : g.revisados === 0 ? `<span class="tag warn">${g.itens} a revisar</span>` : `<span class="tag info">faltam ${g.itens - g.revisados}</span>`}
       </td></tr>` + (fechado ? '' : g.notas.map(linhaNota).join(''));
   }).join('');
-
-  $$('#tbl-notas button[data-nota]').forEach((b) =>
-    b.addEventListener('click', () => abrirNota(b.dataset.nota)));
-
-  $$('#tbl-notas button[data-apagar-nota]').forEach((b) =>
-    b.addEventListener('click', () => apagarNota(b.dataset.apagarNota)));
 }
+
+// Os botoes da lista de notas escutam pela TABELA, uma vez so, e nao botao a botao
+// depois de cada desenho. Em 18/09 a lista ganhou um segundo jeito de ser
+// desenhada (agrupada por fornecedor); o caminho nao agrupado - o padrao - saia
+// com `return` antes da ligacao, e Tratar/Ver/Continuar/Apagar ficaram mortos
+// para todo mundo ate 22/09. Ouvinte na tabela nao depende de como ela foi
+// desenhada, nem agora nem no proximo jeito que aparecer.
+$('#tbl-notas').addEventListener('click', (ev) => {
+  const abrir = ev.target.closest('button[data-nota]');
+  if (abrir) return abrirNota(abrir.dataset.nota);
+  const apagar = ev.target.closest('button[data-apagar-nota]');
+  if (apagar) return apagarNota(apagar.dataset.apagarNota);
+});
 
 /**
  * Apagar nota. Some com os itens e com o XML guardado; as REGRAS aprendidas

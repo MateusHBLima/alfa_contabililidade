@@ -170,6 +170,13 @@ describe('a tela desenha tudo que o servidor manda', () => {
     expect(CSS).toContain('tr.grupo-fornecedor');
   });
 
+  it('botões da lista de notas funcionam agrupada OU não: ouvinte na tabela, nunca por botão', () => {
+    // Bug de 18-22/09: o caminho nao agrupado saia antes de ligar os botoes.
+    expect(APP).toMatch(/\$\('#tbl-notas'\)\.addEventListener\('click'/);
+    expect(APP).not.toMatch(/\$\$\('#tbl-notas button\[data-nota\]'\)/);
+    expect(APP).not.toMatch(/\$\$\('#tbl-notas button\[data-apagar-nota\]'\)/);
+  });
+
   it('filtro que não casa nada diz o porquê e oferece a volta', () => {
     // Visto em produção: nota com 7 itens conferidos, filtro "Prontos", tela em
     // branco. Sem erro, sem mensagem — a mesma forma do bug do `pode()`: a tela
