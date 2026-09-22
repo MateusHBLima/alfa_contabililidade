@@ -1144,10 +1144,12 @@ const CFOPS = [
   ['1407', 'Compra de material de uso e consumo — ST'],
   ['1551', 'Compra de bem para o ativo imobilizado'],
   ['1202', 'Devolução de venda'],
+  ['1949', 'Outra entrada não especificada'],
   ['2102', 'Compra para revenda — outro estado'],
   ['2101', 'Compra para industrialização — outro estado'],
   ['2556', 'Compra de uso e consumo — outro estado'],
   ['2403', 'Compra para revenda com ST — outro estado'],
+  ['2949', 'Outra entrada não especificada — outro estado'],
 ];
 
 function montarSeletorCfop() {
