@@ -3191,6 +3191,60 @@ describe('migração 0012: regras de CFOP refeitas com o CFOP de saída na chave
   });
 });
 
+describe('migração 0014: o "é sempre assim" que só tinha aparecido em nota de ajuste volta para a compra', () => {
+  /* Conferência em produção, 22/09: na Sailor, touca e luva da OESA fixadas em 1556 e
+     canela em 1101 só tinham vindo numa nota de ajuste 5949, lançada 1949. A 0012
+     refez "#5949 = 1949" e o padrão fixado dela sumiu da compra normal. */
+  const SQL_0012 = readFileSync(new URL('../migrations/0012_regra_cfop_por_operacao.sql', import.meta.url), 'utf8');
+  const SQL_0014 = readFileSync(new URL('../migrations/0014_fixadas_voltam_na_compra.sql', import.meta.url), 'utf8');
+
+  it('recria o fixado em #5102, não toca no ajuste nem em decisão dela numa compra, e a próxima compra vem com o padrão', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'SAILOR', uf: 'SC', perfil: 'revenda' });
+    const comCfop = (s: string, c: string) => outraNota(XML, s).replace(/<CFOP>\d{4}<\/CFOP>/g, `<CFOP>${c}</CFOP>`);
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'ajuste.xml', conteudo: comCfop('22', '5949') },
+      { nome: 'compra.xml', conteudo: comCfop('11', '5102') },
+    ]);
+    const nota = (s: string) => (db.consultar(`SELECT id FROM notas WHERE chave LIKE '%${s}'`)[0] as any).id;
+    const itens = db.consultar(`SELECT * FROM itens WHERE nota_id=? ORDER BY n_item`, nota('22')) as any[];
+    const base = (i: any) => `83646984003044|${String(i.c_prod).toUpperCase()}`;
+    // Ajuste lançado 1949 por ela. Na compra, só o item 2 foi decidido por ela (1102); o resto é palpite.
+    db.consultar(`UPDATE itens SET cfop_novo='1949', revisado=1, revisado_em='2026-09-18T10:00:00Z', cfop_origem='manual' WHERE nota_id=?`, nota('22'));
+    db.consultar(`UPDATE itens SET cfop_novo='1101', revisado=0, cfop_origem='perfil' WHERE nota_id=?`, nota('11'));
+    db.consultar(`UPDATE itens SET cfop_novo='1102', revisado=1, revisado_em='2026-09-19T10:00:00Z', cfop_origem='manual' WHERE nota_id=? AND n_item=2`, nota('11'));
+    // Estado de antes da 0012: os itens 1 e 2 fixados (sem o CFOP de saída na chave).
+    db.consultar(`DELETE FROM regras`);
+    db.consultar(`INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, usos, acertos, confianca, criada_em, fixada, fixada_por, fixada_em)
+                  VALUES ('fix-1','alfa',?,1,?,'cfop','1556',2,2,0.75,'2026-09-15','1',?,'2026-09-15T10:00:00Z')`, empresaId, base(itens[0]), 'u1');
+    db.consultar(`INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, usos, acertos, confianca, criada_em, fixada, fixada_em)
+                  VALUES ('fix-2','alfa',?,1,?,'cfop','1556',2,2,0.75,'2026-09-15','1','2026-09-15T10:00:00Z')`, empresaId, base(itens[1]));
+    const itensAntes = JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'));
+
+    (db as any).db.exec(SQL_0012);
+    const regra = (chave: string) => db.consultar(`SELECT * FROM regras WHERE ativa=1 AND campo='cfop' AND nivel=1 AND chave=?`, chave)[0] as any;
+    expect(regra(`${base(itens[0])}#5102`)).toBeUndefined();  // o problema visto em produção
+
+    (db as any).db.exec(SQL_0014);
+    (db as any).db.exec(SQL_0014);                              // rodar de novo não duplica nem muda nada
+
+    expect(JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'))).toBe(itensAntes);
+    expect(regra(`${base(itens[0])}#5102`)).toMatchObject({ valor: '1556', fixada: 1, fixada_por: 'u1', fixada_em: '2026-09-15T10:00:00Z' });
+    expect(regra(`${base(itens[0])}#5949`)).toMatchObject({ valor: '1949', fixada: 0 });      // o ajuste continua 1949
+    expect(regra(`${base(itens[1])}#5102`)).toMatchObject({ valor: '1102' });                 // decisão dela numa compra vence
+    expect(db.consultar(`SELECT * FROM regras WHERE chave LIKE '%#5102' AND nivel=1 AND chave=?`, `${base(itens[0])}#5102`)).toHaveLength(1);
+    expect((db.consultar(`SELECT ativa, observacao FROM regras WHERE id='fix-1'`)[0] as any)).toMatchObject({ ativa: 0 });
+    expect((db.consultar(`SELECT observacao FROM regras WHERE id='fix-1'`)[0] as any).observacao).toContain('[0014]');
+    expect((db.consultar(`SELECT observacao FROM regras WHERE id='fix-2'`)[0] as any).observacao).not.toContain('[0014]');
+
+    // A próxima compra normal traz o padrão fixado dela, e diz de onde veio.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'compra2.xml', conteudo: comCfop('44', '5102') }]);
+    const novo = db.consultar(`SELECT * FROM itens WHERE nota_id=? AND n_item=1`, nota('44'))[0] as any;
+    expect(novo.cfop_novo).toBe('1556');
+    const origem = String(novo.cfop_origem).slice('regra:'.length);
+    expect((db.consultar(`SELECT fixada FROM regras WHERE id=?`, origem)[0] as any).fixada).toBe(1);
+  });
+});
+
 describe('relatório no formato do livro de entradas: valor contábil, ICMS e analítico por CFOP', () => {
   /* Áudios da Taís, 22/09: o total do relatório (R$ 10.351,25) não fechava com o de
      "Notas recebidas" (R$ 10.393,68) — R$ 42,43 de frete e outras despesas de duas
