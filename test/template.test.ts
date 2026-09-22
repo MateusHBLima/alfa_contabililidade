@@ -115,7 +115,9 @@ describe('padrão por fornecedor — nível 5', () => {
     const criadas = acoes.filter((a: any) => a.tipo === 'criar');
     expect(criadas).toHaveLength(1);
     expect((criadas[0] as any).nivel).toBe(5);
-    expect((criadas[0] as any).chave).toBe(CNPJ);
+    // A chave do CFOP carrega o CFOP de saida: o padrao do fornecedor em 5102 nao
+    // responde pelas notas de ajuste dele em 5949 (retorno da Tais, 22/09).
+    expect((criadas[0] as any).chave).toBe(`${CNPJ}#${item1.CFOP}`);
   });
 
   it('o padrão do fornecedor vale para produto que nunca foi visto', () => {

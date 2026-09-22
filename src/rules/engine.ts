@@ -85,39 +85,82 @@ const CFOP_POR_PERFIL: Record<PerfilEmpresa, { dentroUF: string; foraUF: string 
 // ------------------------------------------------------------------ chaves
 
 /** Chave canonica de cada nivel. Null quando o item nao tem o dado necessario. */
-export function chaveDoNivel(item: ItemNFe, emitCnpj: string, nivel: Nivel): string | null {
+/**
+ * A chave de cada nivel.
+ *
+ * PARA O CFOP, A CHAVE INCLUI O CFOP DE SAIDA DO FORNECEDOR (`#5102`, `#5949`).
+ * O CFOP de entrada nao depende so do produto: depende do par (produto, operacao).
+ * Caso real, The Sailor, 22/09: o mesmo pudim da OESA vem em 5102 (compra, vira 1101)
+ * e numa nota de ajuste em 5949 (vira 1949). Com a chave so por produto, lancar a
+ * nota de ajuste reescrevia a regra, e o proximo pudim em 5102 chegava sugerido
+ * 1949 - e no nivel 6 (NCM, qualquer fornecedor) ate produto de OUTRO fornecedor.
+ * Nao da para trocar por "5949 vira sempre 1949": na Italiana o detergente da OESA
+ * em 5949 vira 1556. Quem sabe e a contadora, uma vez por par.
+ *
+ * Descricao e os demais campos seguem so pelo produto: o pudim tem o mesmo nome
+ * nas duas notas.
+ */
+export function chaveDoNivel(item: ItemNFe, emitCnpj: string, nivel: Nivel, campo?: Campo): string | null {
   const cnpj = emitCnpj.replace(/\D/g, '');
+  let base: string | null;
   switch (nivel) {
-    case 1: return item.cProd ? `${cnpj}|${item.cProd.trim().toUpperCase()}` : null;
-    case 2: return item.cEAN ? `${cnpj}|${item.cEAN}` : null;
-    case 3: return item.cEAN ?? null;
-    case 4: return item.NCM ? `${cnpj}|${item.NCM}` : null;
-    case 5: return cnpj || null;
-    case 6: return item.NCM ?? null;
+    case 1: base = item.cProd ? `${cnpj}|${item.cProd.trim().toUpperCase()}` : null; break;
+    case 2: base = item.cEAN ? `${cnpj}|${item.cEAN}` : null; break;
+    case 3: base = item.cEAN ?? null; break;
+    case 4: base = item.NCM ? `${cnpj}|${item.NCM}` : null; break;
+    case 5: base = cnpj || null; break;
+    case 6: base = item.NCM ?? null; break;
     case 7: return 'perfil';
   }
+  if (base === null) return null;
+  return campo === 'cfop' ? `${base}#${String(item.CFOP ?? '').trim() || '?'}` : base;
 }
 
-export function chavesDoItem(item: ItemNFe, emitCnpj: string): { nivel: Nivel; chave: string }[] {
+/** As chaves de um item PARA UM CAMPO. Sem campo: as chaves dos campos que nao sao CFOP. */
+export function chavesDoItem(item: ItemNFe, emitCnpj: string, campo?: Campo): { nivel: Nivel; chave: string }[] {
   const out: { nivel: Nivel; chave: string }[] = [];
   for (const { nivel } of NIVEIS) {
-    const chave = chaveDoNivel(item, emitCnpj, nivel);
+    const chave = chaveDoNivel(item, emitCnpj, nivel, campo);
     if (chave !== null) out.push({ nivel, chave });
   }
   return out;
+}
+
+/** Tudo o que precisa ser buscado no banco para sugerir TODOS os campos de um item. */
+export function chavesParaBuscar(item: ItemNFe, emitCnpj: string): { nivel: Nivel; chave: string }[] {
+  return [...chavesDoItem(item, emitCnpj), ...chavesDoItem(item, emitCnpj, 'cfop')];
+}
+
+/**
+ * Das regras carregadas, so as que valem para ESTE item, conferindo a chave do
+ * proprio campo da regra. Uma regra de CFOP aprendida em 5949 nunca responde por
+ * um item que veio em 5102.
+ */
+export function regrasDoItem(item: ItemNFe, emitCnpj: string, candidatas: Regra[]): Regra[] {
+  const cache = new Map<string, Set<string>>();
+  const chavesDe = (campo: Campo) => {
+    const k = campo === 'cfop' ? 'cfop' : 'outros';
+    let s = cache.get(k);
+    if (!s) {
+      s = new Set(chavesDoItem(item, emitCnpj, campo === 'cfop' ? 'cfop' : undefined).map((c) => `${c.nivel} ${c.chave}`));
+      cache.set(k, s);
+    }
+    return s;
+  };
+  return candidatas.filter((r) => chavesDe(r.campo).has(`${r.nivel} ${r.chave}`));
 }
 
 /**
  * Niveis gravados quando o operador corrige um item, sem pedir nada de especial.
  * Exclui o nivel 5 - ver o comentario em NIVEIS.
  */
-export function chavesAprendiveis(item: ItemNFe, emitCnpj: string) {
-  return chavesDoItem(item, emitCnpj).filter(({ nivel }) => NIVEIS[nivel - 1]?.implicito);
+export function chavesAprendiveis(item: ItemNFe, emitCnpj: string, campo?: Campo) {
+  return chavesDoItem(item, emitCnpj, campo).filter(({ nivel }) => NIVEIS[nivel - 1]?.implicito);
 }
 
 /** Niveis que podem ser gravados quando alguem pede explicitamente. */
-export function chavesAprendiveisExplicitas(item: ItemNFe, emitCnpj: string) {
-  return chavesDoItem(item, emitCnpj).filter(({ nivel }) => NIVEIS[nivel - 1]?.aprende);
+export function chavesAprendiveisExplicitas(item: ItemNFe, emitCnpj: string, campo?: Campo) {
+  return chavesDoItem(item, emitCnpj, campo).filter(({ nivel }) => NIVEIS[nivel - 1]?.aprende);
 }
 
 // ------------------------------------------------------------------ confianca
@@ -285,8 +328,8 @@ export function aprender(params: {
   // Sem `apenasNiveis`, grava só o que aprende sozinho (nunca o padrão do fornecedor).
   // Com `apenasNiveis`, é pedido explícito — aí o nível 5 entra.
   const alvos = apenasNiveis
-    ? chavesAprendiveisExplicitas(item, emitCnpj).filter(({ nivel }) => apenasNiveis.includes(nivel))
-    : chavesAprendiveis(item, emitCnpj);
+    ? chavesAprendiveisExplicitas(item, emitCnpj, campo).filter(({ nivel }) => apenasNiveis.includes(nivel))
+    : chavesAprendiveis(item, emitCnpj, campo);
 
   for (const { nivel, chave } of alvos) {
     out.push({ tipo: 'criar', nivel, chave, campo, valor: valorFinal, fixada: fixar });

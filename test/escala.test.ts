@@ -127,7 +127,7 @@ describe('a nota no tamanho máximo que a NF-e admite', () => {
     // A regra daquele código de barras existe UMA vez, não 118 — os outros
     // níveis 2 que aparecem são dos itens próprios da nota de exemplo.
     const compartilhado = db.consultar(
-      "SELECT COUNT(*) AS n FROM regras WHERE nivel = 2 AND chave LIKE '%7891000100103'",
+      "SELECT COUNT(*) AS n FROM regras WHERE nivel = 2 AND chave LIKE '%7891000100103#%'",
     )[0].n;
     expect(compartilhado).toBe(1);
   }, 60000);
