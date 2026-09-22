@@ -177,6 +177,14 @@ describe('a tela desenha tudo que o servidor manda', () => {
     expect(APP).not.toMatch(/\$\$\('#tbl-notas button\[data-apagar-nota\]'\)/);
   });
 
+  it('"aplicar CFOP" oferece 1949 e 2949 (pedido da ALFA em 22/09)', () => {
+    const lista = APP.match(/const CFOPS = \[([\s\S]*?)\];/)![1]!;
+    const cfops = [...lista.matchAll(/\['(\d{4})'/g)].map((m) => m[1]);
+    expect(cfops).toContain('1949');
+    expect(cfops).toContain('2949');
+    expect(new Set(cfops).size).toBe(cfops.length);
+  });
+
   it('filtro que não casa nada diz o porquê e oferece a volta', () => {
     // Visto em produção: nota com 7 itens conferidos, filtro "Prontos", tela em
     // branco. Sem erro, sem mensagem — a mesma forma do bug do `pode()`: a tela
