@@ -37,6 +37,23 @@ function outraNota(xml: string, sufixo: string, mudancas: [string, string][] = [
   return out;
 }
 
+/** Lê um zip "store": devolve nome -> conteúdo. Leitor independente do escritor. */
+const lerZip = (b: Uint8Array) => {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const out = new Map<string, string>();
+  let p = 0;
+  while (dv.getUint32(p, true) === 0x04034b50) {
+    const tam = dv.getUint32(p + 18, true);
+    const nomeLen = dv.getUint16(p + 26, true);
+    const extra = dv.getUint16(p + 28, true);
+    const nome = new TextDecoder().decode(b.slice(p + 30, p + 30 + nomeLen));
+    const ini = p + 30 + nomeLen + extra;
+    out.set(nome, new TextDecoder().decode(b.slice(ini, ini + tam)));
+    p = ini + tam;
+  }
+  return out;
+};
+
 let db: D1Local;
 let r2: R2Local;
 let sessao: Sessao;
@@ -250,13 +267,13 @@ describe('importar uma nota de verdade', () => {
     expect(a.motivo).toMatch(/CANCELAMENTO da NF 123 \(série 1\) em 20\/07\/2026/);
     expect(a.motivo).toMatch(/faturamento incorreto/);
     expect(a.motivo).toMatch(/não está no sistema/);
-    expect(a.motivo).toMatch(/manualmente/);
+    expect(a.motivo).toMatch(/Marcar como cancelada/);   // desde 23/09: se ela vier depois
     expect(a.evento).toMatchObject({ tipo: '110111', cancela: true, notaNoSistema: false });
     // Evento nao vira nota nem item.
     expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
   });
 
-  it('evento de nota que JÁ está no sistema avisa isso — e não mexe nela', async () => {
+  it('evento de nota que JÁ está no sistema: marca a nota como cancelada, sem mexer nos itens (23/09)', async () => {
     await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'n.xml', conteudo: XML }]);
     db.consultar('UPDATE itens SET revisado = 1');
     const doEvento = EVENTO.replaceAll('42260711222333000181550010000001231000000019', CHAVE_ORIGINAL);
@@ -266,7 +283,15 @@ describe('importar uma nota de verdade', () => {
     expect(r.arquivos[0]!.motivo).toMatch(/ESTÁ no sistema/);
     expect(r.arquivos[0]!.motivo).toMatch(/3 item\(ns\) já conferido/);
     expect(r.arquivos[0]!.notaId).toBeTruthy();
+    expect(r.arquivos[0]!.motivo).toMatch(/Marcada como CANCELADA/);
     expect(db.consultar('SELECT * FROM itens WHERE revisado = 1')).toHaveLength(3);
+    const n = db.consultar('SELECT cancelada_em, cancelada_motivo FROM notas')[0] as any;
+    expect(n.cancelada_em).toBeTruthy();
+    expect(n.cancelada_motivo).toMatch(/faturamento incorreto/);
+    // Reimportar o mesmo evento não repete nada.
+    const trilha = (db.consultar(`SELECT COUNT(*) AS q FROM auditoria WHERE campo = 'cancelada'`)[0] as any).q;
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ev.xml', conteudo: doEvento }]);
+    expect((db.consultar(`SELECT COUNT(*) AS q FROM auditoria WHERE campo = 'cancelada'`)[0] as any).q).toBe(trilha);
   });
 
   it('os dois nProt do evento não se confundem: o da nota e o do evento', () => {
@@ -2725,6 +2750,116 @@ describe('23/09: "Resolver" que não saía — conferir resolve, e o ajuste 5949
   });
 });
 
+describe('23/09: nota cancelada vale zero, e "aplicar na nota toda" numa requisição só', () => {
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  let ck = '';
+  const req = (c: string, o: RequestInit = {}) =>
+    app.fetch(new Request(`http://x${c}`, {
+      ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+    }), ambiente());
+  const json = async (c: string, o: RequestInit = {}) => (await req(c, o)).json() as Promise<any>;
+  const post = (c: string, corpo: unknown) => req(c, { method: 'POST', body: JSON.stringify(corpo) });
+  const entrar = async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  };
+  const subir = async (empresaId: string, xml: string) => {
+    const fd = new FormData();
+    fd.append('arquivos', new File([xml], 'n.xml', { type: 'text/xml' }));
+    await app.fetch(new Request(`http://x/api/empresas/${empresaId}/importar`, { method: 'POST', body: fd, headers: { Cookie: ck } }), ambiente());
+    return (db.consultar('SELECT id FROM notas WHERE chave = ?', parseNFe(xml).chave)[0] as any).id as string;
+  };
+  let empresaId = '';
+  beforeEach(async () => {
+    await entrar();
+    empresaId = (await json('/api/empresas', {
+      method: 'POST', body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'ITALIANA', uf: 'SC', perfil: 'revenda' }),
+    })).id;
+  });
+
+  it('marcar como cancelada: continua na lista, sai das somas, relatórios e exportação — e dá para desfazer', async () => {
+    const a = await subir(empresaId, outraNota(XML, '71'));
+    const b = await subir(empresaId, outraNota(XML, '72'));
+    await post(`/api/notas/${a}/conferir`, {});
+    await post(`/api/notas/${b}/conferir`, {});
+    const antes = await json(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`);
+    expect(antes.totais.valorContabil).toBeCloseTo(578, 2);
+
+    expect((await post(`/api/notas/${a}/cancelada`, { cancelada: true })).status).toBe(200);
+    const lista = await json(`/api/empresas/${empresaId}/notas`);
+    const la = (lista.notas ?? lista).find((n: any) => n.id === a);
+    expect(la.cancelada_em).toBeTruthy();
+    expect(la.valor_total).toBeCloseTo(289, 2);             // o XML não muda; quem zera é a soma
+    const nota = await json(`/api/notas/${a}`);
+    expect(nota.totaisCfop.cancelada).toBe(true);
+
+    const cfop = await json(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`);
+    expect(cfop.totais.valorContabil).toBeCloseTo(289, 2);
+    expect(cfop.totais.notas).toBe(1);
+    expect(cfop.canceladas).toBe(1);
+    expect((await json(`/api/empresas/${empresaId}/relatorios/produtos?competencia=2026-08`)).totais.valor).toBeCloseTo(289, 2);
+    expect((await json(`/api/empresas/${empresaId}/relatorios/analitico?competencia=2026-08`)).linhas).toHaveLength(3);
+
+    const zip = lerZip(new Uint8Array(await (await req(`/api/empresas/${empresaId}/xml-corrigidos.zip?competencia=2026-08`)).arrayBuffer()));
+    expect([...zip.keys()].filter((k) => k.endsWith('-corrigido.xml'))).toHaveLength(1);
+    expect([...zip.values()].join('')).toMatch(/cancelada/);
+
+    const trilha = db.consultar(`SELECT valor_depois, origem FROM auditoria WHERE entidade = 'nota' AND campo = 'cancelada'`) as any[];
+    expect(trilha).toHaveLength(1);
+    expect(trilha[0].origem).toBe('manual');
+
+    await post(`/api/notas/${a}/cancelada`, { cancelada: false });
+    expect((await json(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`)).totais.valorContabil).toBeCloseTo(578, 2);
+  });
+
+  it('marcar cancelada exige poder importar', async () => {
+    const a = await subir(empresaId, outraNota(XML, '73'));
+    db.consultar(`DELETE FROM papel_permissoes WHERE papel_id = 'papel-admin' AND permissao = 'notas.importar'`);
+    await entrar();
+    expect((await post(`/api/notas/${a}/cancelada`, { cancelada: true })).status).toBe(403);
+  });
+
+  it('aplicar CFOP na nota toda: uma requisição, muda, confere, fica na trilha e ensina', async () => {
+    const n1 = await subir(empresaId, outraNota(XML, '74'));
+    const itens = (await json(`/api/notas/${n1}`)).itens;
+    const r = await post(`/api/notas/${n1}/aplicar-cfop`, { cfop: '1949', itens: itens.map((i: any) => i.id) });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ alterados: 3, conferidos: 3 });
+    const depois = (await json(`/api/notas/${n1}`)).itens;
+    expect(depois.every((i: any) => i.cfop_novo === '1949' && i.revisado === 1 && i.cfop_origem === 'manual')).toBe(true);
+    const trilha = db.consultar(`SELECT * FROM auditoria WHERE entidade = 'item_nota' AND campo = 'cfop' AND valor_depois = '1949'`);
+    expect(trilha).toHaveLength(3);                          // "como estava" continua funcionando
+    const n2 = await subir(empresaId, outraNota(XML, '75'));
+    const seguinte = (await json(`/api/notas/${n2}`)).itens;
+    expect(seguinte.every((i: any) => i.cfop_novo === '1949' && i.procedencia.fonte === 'aprendida')).toBe(true);
+  });
+
+  it('fixar para o fornecedor em lote: padrão do fornecedor fixado', async () => {
+    const n1 = await subir(empresaId, outraNota(XML, '76'));
+    const itens = (await json(`/api/notas/${n1}`)).itens;
+    await post(`/api/notas/${n1}/aplicar-cfop`, { cfop: '1556', itens: itens.map((i: any) => i.id), escopo: 'fornecedor' });
+    const r5 = db.consultar(`SELECT * FROM regras WHERE nivel = 5 AND campo = 'cfop' AND ativa = 1`) as any[];
+    // Um padrão por operação do fornecedor: a nota tem itens em 5102 e em 5405.
+    expect(r5.map((r) => r.chave).sort()).toEqual(['83646984003044#5102', '83646984003044#5405']);
+    expect(r5.every((r) => r.valor === '1556' && r.fixada === 1)).toBe(true);
+  });
+
+  it('CFOP inválido, lista vazia ou maior que 200 são recusados', async () => {
+    const n1 = await subir(empresaId, outraNota(XML, '77'));
+    const ids = (await json(`/api/notas/${n1}`)).itens.map((i: any) => i.id);
+    expect((await post(`/api/notas/${n1}/aplicar-cfop`, { cfop: '19', itens: ids })).status).toBe(400);
+    expect((await post(`/api/notas/${n1}/aplicar-cfop`, { cfop: '1949', itens: [] })).status).toBe(400);
+    expect((await post(`/api/notas/${n1}/aplicar-cfop`, { cfop: '1949', itens: Array.from({ length: 201 }, () => ids[0]) })).status).toBe(400);
+  });
+});
+
 describe('"quero ver como que tava" — a trilha do item', () => {
   /* Último pedido da contadora no primeiro uso real, e o único que faltava.
      Até aqui o `desfazer` da linha só tirava a marca de conferido — o VALOR
@@ -3076,22 +3211,6 @@ describe('XML corrigido: a página deixa de ser beco — prévia real e exporta�
   const req = (c: string, cookie = ck) =>
     app.fetch(new Request(`http://x${c}`, { headers: { Cookie: cookie } }), ambiente());
 
-  /** Lê um zip "store": devolve nome -> conteúdo. Leitor independente do escritor. */
-  const lerZip = (b: Uint8Array) => {
-    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
-    const out = new Map<string, string>();
-    let p = 0;
-    while (dv.getUint32(p, true) === 0x04034b50) {
-      const tam = dv.getUint32(p + 18, true);
-      const nomeLen = dv.getUint16(p + 26, true);
-      const extra = dv.getUint16(p + 28, true);
-      const nome = new TextDecoder().decode(b.slice(p + 30, p + 30 + nomeLen));
-      const ini = p + 30 + nomeLen + extra;
-      out.set(nome, new TextDecoder().decode(b.slice(ini, ini + tam)));
-      p = ini + tam;
-    }
-    return out;
-  };
 
   beforeEach(async () => {
     const l = await app.fetch(new Request('http://x/api/login', {

@@ -144,7 +144,8 @@ describe('a tela desenha tudo que o servidor manda', () => {
     // O XML mostrado e o ARQUIVO guardado (mesma rota do download), nunca remontado do banco.
     expect(APP).toContain('/original?formato=xml');
     // irPara precisa conhecer a tela, senao ela abre por cima das outras.
-    expect(APP).toMatch(/\[[^\]]*'vOriginal'[^\]]*\]\.forEach/);
+    expect(APP).toMatch(/const TELAS = \[[^\]]*'vOriginal'[^\]]*\]/);
+    expect(APP).toMatch(/TELAS\.forEach/);
   });
 
   it('XML corrigido não é mais beco: abre preenchida pelo MENU, tem lista, prévia real e zip', () => {
@@ -363,5 +364,25 @@ describe('tela: colunas da tabela de itens', () => {
     expect(HTML).toContain('id="totais-cfop"');
     expect(APP).toMatch(/function renderTotaisCfop\(n\)/);
     expect(APP).toContain('n?.totaisCfop');
+  });
+});
+
+describe('tela: 23/09 — aplicar em lote, aguarde e endereço', () => {
+  const corpo = APP.slice(APP.indexOf('async function aplicarEmLote('), APP.indexOf('function mostrarEspera('));
+  it('"Aplicar na nota toda" não é mais uma requisição por item', () => {
+    expect(corpo).toContain('/aplicar-cfop');
+    expect(corpo).not.toContain('/api/itens/${i.id}');
+  });
+  it('mostra o aguarde e sempre o tira, mesmo com erro', () => {
+    expect(corpo).toContain('mostrarEspera(');
+    expect(corpo).toMatch(/finally \{\s*esconderEspera\(\)/);
+  });
+  it('atualizar a página volta para a mesma nota', () => {
+    expect(APP).toMatch(/await restaurarEndereco\(\)/);
+    expect(APP).toMatch(/function gravarEndereco/);
+  });
+  it('o aguarde respeita quem pediu menos movimento', () => {
+    const CSS = readFileSync(new URL('../public/estilo.css', import.meta.url), 'utf8');
+    expect(CSS).toMatch(/prefers-reduced-motion[^}]*\.espera-roda\{animation:none/);
   });
 });
