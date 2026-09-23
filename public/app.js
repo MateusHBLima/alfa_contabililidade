@@ -466,11 +466,45 @@ function marcarEscopo() {
   }
 }
 
+const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vUsuarios', 'vPapeis'];
+
+function telaAtual() {
+  return TELAS.find((v) => !$('#' + v).classList.contains('hidden')) ?? 'v1';
+}
+
+/**
+ * O endereco guarda empresa, tela e nota aberta (#e=…&t=…&n=…). Atualizar a pagina
+ * (F5) ou voltar do navegador reabre o mesmo lugar - antes voltava sempre para a
+ * lista, e ela tinha que achar a nota de novo (audio de 23/09).
+ */
+function gravarEndereco(view = telaAtual()) {
+  const p = new URLSearchParams();
+  if (estado.empresaId) p.set('e', estado.empresaId);
+  p.set('t', view);
+  if ((view === 'v2' || view === 'vOriginal') && estado.notaAberta?.nota?.id) p.set('n', estado.notaAberta.nota.id);
+  try { history.replaceState(null, '', '#' + p.toString()); } catch { /* sem historia: segue */ }
+}
+
+async function restaurarEndereco() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  const e = p.get('e');
+  if (e && e !== estado.empresaId && estado.empresas.some((x) => x.id === e)) {
+    $('#sel-empresa').value = e;
+    await trocarEmpresa(e);
+  }
+  const t = p.get('t');
+  const n = p.get('n');
+  if (n && (t === 'v2' || t === 'vOriginal')) {
+    try { await abrirNota(n); return; } catch { /* nota apagada ou sem acesso: fica na lista */ }
+  }
+  if (t && TELAS.includes(t) && t !== 'v2' && t !== 'vOriginal') irPara(t);
+}
+
 function irPara(view) {
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
-  ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vUsuarios', 'vPapeis'].forEach((v) =>
-    $('#' + v).classList.toggle('hidden', v !== view));
+  TELAS.forEach((v) => $('#' + v).classList.toggle('hidden', v !== view));
   marcarEscopo();
+  gravarEndereco(view);
   if (view === 'vEmpresas') renderEmpresas();
   if (view === 'vFornecedores') carregarFornecedores();
   if (view === 'vRegras') carregarRegras();
@@ -480,8 +514,10 @@ function irPara(view) {
   if (view === 'vPapeis') carregarPapeis();
 }
 
-$('#sel-empresa').addEventListener('change', async (e) => {
-  estado.empresaId = e.target.value;
+$('#sel-empresa').addEventListener('change', (e) => trocarEmpresa(e.target.value));
+
+async function trocarEmpresa(empresaId) {
+  estado.empresaId = empresaId;
   estado.notaAberta = null;
   marcarEscopo();
   // Competencia e recorte da empresa ANTERIOR. Levar "setembro/2026" para uma
@@ -498,7 +534,8 @@ $('#sel-empresa').addEventListener('change', async (e) => {
   if (aberta === 'vRelatorios') await abrirRelatorios();
   if (aberta === 'v3') await abrirXmlCorrigido();
   await carregarNotas();
-});
+  gravarEndereco();
+}
 
 /**
  * Ano e mes, nesta ordem, porque e assim que a contadora procura: primeiro o
@@ -602,6 +639,7 @@ async function iniciar() {
 
   await carregarEmpresas();
   montarSeletorCfop();
+  await restaurarEndereco();
 }
 
 async function carregarEmpresas() {
@@ -819,6 +857,11 @@ async function carregarNotas() {
   renderNotas();
 }
 
+/** O valor que a nota soma: zero se cancelada (o XML continua com o valor original). */
+function valorQueConta(n) {
+  return n?.cancelada_em ? 0 : (n?.valor_total ?? 0);
+}
+
 function renderNotas() {
   const corpo = $('#tbl-notas tbody');
   const vazio = $('#vazio-notas');
@@ -826,7 +869,8 @@ function renderNotas() {
 
   const totalItens = estado.notas.reduce((s, n) => s + (n.total_itens ?? 0), 0);
   const revisados = estado.notas.reduce((s, n) => s + (n.itens_revisados ?? 0), 0);
-  const valor = estado.notas.reduce((s, n) => s + (n.valor_total ?? 0), 0);
+  // Nota cancelada vale zero (23/09, NF 419887): fica na lista, fora da soma.
+  const valor = estado.notas.reduce((s, n) => s + valorQueConta(n), 0);
   const fornecedores = new Set(estado.notas.map((n) => n.emit_cnpj)).size;
 
   $('#kpis-notas').innerHTML = [
@@ -841,7 +885,7 @@ function renderNotas() {
 
   // Empresa com 200 notas nao se trata num dia. Separar o que ja passou por gente
   // do que ainda nao passou foi o primeiro pedido da contadora depois de usar.
-  const tratada = (n) => (n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens;
+  const tratada = (n) => !!n.cancelada_em || ((n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens);
   const imp = estado.importacoes.find((i) => i.id === estado.importacaoId);
   const lotesDaImportacao = imp ? new Set(imp.lotes) : null;
   const visiveis = estado.notas.filter((n) => {
@@ -867,8 +911,10 @@ function renderNotas() {
     // Três estados, não dois. "Comecei e parei no meio" é o caso normal numa
     // empresa de 200 notas, e era exatamente o que não dava para ver: tudo que
     // não estava 100% aparecia igual a nunca tocada.
-    const estagio = total === 0 ? 'vazia' : feitos === 0 ? 'nova' : pendentes === 0 ? 'pronta' : 'andando';
+    const estagio = n.cancelada_em ? 'cancelada'
+      : total === 0 ? 'vazia' : feitos === 0 ? 'nova' : pendentes === 0 ? 'pronta' : 'andando';
     const selo = {
+      cancelada: '<span class="tag dan" title="Nota cancelada: vale zero e fica fora das somas, dos relatórios e da exportação">CANCELADA</span>',
       vazia: '<span class="tag mut">sem itens</span>',
       nova: `<span class="tag warn">${pendentes} a revisar</span>`,
       andando: `<span class="tag info">${feitos} de ${total} conferidos</span>`,
@@ -879,6 +925,7 @@ function renderNotas() {
     // para um trabalho que já foi feito; e quem parou no meio precisa saber que
     // é para continuar, não para começar de novo.
     const acao = {
+      cancelada: { rotulo: 'Ver →', classe: '', dica: 'Nota cancelada' },
       vazia: { rotulo: 'Abrir →', classe: '', dica: 'Nota sem itens' },
       nova: { rotulo: 'Tratar →', classe: 'primary', dica: 'Começar a tratar esta nota' },
       andando: { rotulo: 'Continuar →', classe: 'primary', dica: `Faltam ${pendentes} item(ns)` },
@@ -890,7 +937,9 @@ function renderNotas() {
       <td class="mono">${esc(n.numero)}</td>
       <td>${esc(n.emit_nome ?? n.emit_cnpj)}<span class="porque">${esc(n.emit_cnpj)}</span></td>
       <td class="mono tiny">${esc(String(n.chave).slice(0, 12))}…</td>
-      <td class="num">${moeda(n.valor_total)}</td>
+      <td class="num">${n.cancelada_em
+        ? `<span title="Valor do XML: R$ ${moeda(n.valor_total)} — nota cancelada, vale zero">0,00</span>`
+        : moeda(n.valor_total)}</td>
       <td class="num">${n.total_itens ?? 0}</td>
       <td>${selo}</td>
       <td class="acoes">
@@ -915,7 +964,7 @@ function renderNotas() {
     g.notas.push(n);
     g.itens += n.total_itens ?? 0;
     g.revisados += n.itens_revisados ?? 0;
-    g.valor += n.valor_total ?? 0;
+    g.valor += valorQueConta(n);
     grupos.set(k, g);
   }
   const ordenados = [...grupos.values()].sort((a, b) => b.notas.length - a.notas.length || a.nome.localeCompare(b.nome, 'pt-BR'));
@@ -1185,12 +1234,24 @@ function renderItens() {
   if (!n) { corpo.innerHTML = ''; $('#faixa-resumo').innerHTML = ''; return; }
 
   $('#titulo-nota').textContent = `Nota ${n.nota.numero} — ${n.nota.emit_nome ?? n.nota.emit_cnpj}`;
-  $('#hint-nota').textContent = `${dataCurta(n.nota.dh_emi)} · R$ ${moeda(n.nota.valor_total)}`;
+  const cancelada = !!n.nota.cancelada_em;
+  $('#hint-nota').textContent = cancelada
+    ? `${dataCurta(n.nota.dh_emi)} · CANCELADA (XML: R$ ${moeda(n.nota.valor_total)})`
+    : `${dataCurta(n.nota.dh_emi)} · R$ ${moeda(n.nota.valor_total)}`;
+  const bc = $('#btn-cancelada');
+  if (bc) {
+    bc.classList.toggle('hidden', !pode('notas.importar'));
+    bc.textContent = cancelada ? '↺ Desfazer cancelamento' : '⊘ Marcar como cancelada';
+  }
 
   // A faixa do topo vem pronta do servidor: o critério de gravidade é um só.
   const r = n.resumo;
   const classe = r.criticos > 0 ? 'critico' : r.atencao > 0 ? 'atencao' : 'ok';
   $('#faixa-resumo').innerHTML =
+    (cancelada
+      ? `<div class="faixa critico"><b>⊘ Nota cancelada</b> — vale zero: fica fora das somas, dos relatórios e do XML corrigido.
+           <span class="porque">${esc(n.nota.cancelada_motivo ?? '')}${n.nota.cancelada_em ? ' · ' + dataCurta(n.nota.cancelada_em) : ''}</span></div>`
+      : '') +
     `<div class="faixa ${classe}"><b>${esc(r.chamada)}</b>
       ${r.bloqueiaExportacao ? '<span class="tag dan">exportação bloqueada</span>' : ''}
     </div>` +
@@ -1269,6 +1330,11 @@ function renderTotaisCfop(n) {
   const t = n?.totaisCfop;
   if (!t || !t.linhas?.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
   el.classList.remove('hidden');
+  if (t.cancelada) {
+    el.innerHTML = `<div class="totais-topo"><b>Total por CFOP desta nota</b>
+      <span class="tag dan">nota cancelada · vale R$ 0,00 — fora das somas e dos relatórios</span></div>`;
+    return;
+  }
   const fecha = Math.abs(t.diferenca) < 0.005;
   el.innerHTML =
     `<div class="totais-topo"><b>Total por CFOP desta nota</b>
@@ -1316,6 +1382,7 @@ function linhaItem(i) {
      </div>`).join('');
 
   const proc = selinhoProcedencia(i.procedencia);
+  const notaCancelada = !!estado.notaAberta?.nota?.cancelada_em;
 
   // Terceiro eixo (invariante 9c): o quanto a NOTA foge do normal. Pedido da
   // contadora para a lista "Todos", onde ela trabalha: CFOP original fora do
@@ -1352,8 +1419,12 @@ function linhaItem(i) {
       ${pode('auditoria.visualizar') ? `<button class="btn sm sutil historico" data-trilha="${i.id}"
          title="O que já mudou neste item, quem mudou e quando">↩ como estava</button>` : ''}
     </td>
-    <td class="num">${moeda(i.valor_total)}</td>
-    <td class="num contabil">${i.valores_lidos === 1 && i.valor_contabil != null
+    <td class="num">${notaCancelada
+      ? `<span title="Valor do XML: ${moeda(i.valor_total)} — nota cancelada, vale zero">0,00</span>`
+      : moeda(i.valor_total)}</td>
+    <td class="num contabil">${notaCancelada
+      ? '<span title="Nota cancelada, vale zero">0,00</span>'
+      : i.valores_lidos === 1 && i.valor_contabil != null
       ? `<span title="${esc(composicaoContabil(i))}">${moeda(i.valor_contabil)}</span>`
       : '<span class="tiny" title="Sem o XML original guardado não dá para ler frete e despesas deste item">—</span>'}</td>
     <td>
@@ -1458,6 +1529,7 @@ function avisarSalvo(texto = 'Salvo') {
 /** Conferir = "olhei e concordo". Não muda valor nenhum; marca que houve gente. */
 async function conferirItens(ids) {
   if (!estado.notaAberta || ids.length === 0) return;
+  mostrarEspera(`Conferindo ${ids.length} item(ns)…`);
   try {
     const r = await api(`/api/notas/${estado.notaAberta.nota.id}/conferir`, {
       method: 'POST',
@@ -1468,6 +1540,8 @@ async function conferirItens(ids) {
     await carregarNotas();
   } catch (e) {
     alerta(e.message);
+  } finally {
+    esconderEspera();
   }
 }
 
@@ -1652,6 +1726,7 @@ $('#btn-fixar-visiveis').addEventListener('click', async () => {
   });
   if (!ok) return;
 
+  mostrarEspera(`Salvando ${alvos.length} padrão(ões)…`);
   try {
     const r = await api(`/api/notas/${estado.notaAberta.nota.id}/fixar-padrao`, {
       method: 'POST', body: JSON.stringify({ itens: alvos.map((i) => i.id) }),
@@ -1660,6 +1735,8 @@ $('#btn-fixar-visiveis').addEventListener('click', async () => {
     await recarregarNota();
   } catch (e) {
     alerta('Não consegui salvar os padrões: ' + e.message);
+  } finally {
+    esconderEspera();
   }
 });
 
@@ -1699,18 +1776,86 @@ async function aplicarEmLote(escopo) {
     if (!ok) return;
   }
 
-  for (const i of alvos) {
-    await api(`/api/itens/${i.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        mudancas: [{ campo: 'cfop', valor: cfop }],
-        escopo,
-        fixar: escopo === 'fornecedor',
-      }),
-    });
+  if (alvos.length === 0) return alerta('Nenhum item na tela para aplicar.');
+
+  // Uma requisicao por fatia de 200 (nao uma por item): antes a tela mandava os itens
+  // em fila, sem aviso, e uma falha no meio parava o resto calada (audio de 23/09).
+  const notaId = estado.notaAberta.nota.id;
+  const FATIA = 200;
+  let feitos = 0;
+  mostrarEspera(`Aplicando ${cfop} em ${alvos.length} item(ns)…`);
+  try {
+    for (let k = 0; k < alvos.length; k += FATIA) {
+      const fatia = alvos.slice(k, k + FATIA);
+      await api(`/api/notas/${notaId}/aplicar-cfop`, {
+        method: 'POST',
+        body: JSON.stringify({ cfop, itens: fatia.map((i) => i.id), escopo }),
+      });
+      feitos += fatia.length;
+      if (feitos < alvos.length) mostrarEspera(`Aplicando ${cfop}… ${feitos} de ${alvos.length}`);
+    }
+    avisarSalvo(`${cfop} aplicado em ${alvos.length} item(ns)`);
+  } catch (e) {
+    alerta(`Parou no meio: ${feitos} de ${alvos.length} item(ns) ficaram com ${cfop}. ` +
+      `Nada se perdeu — clique de novo para terminar. (${e.message})`);
+  } finally {
+    esconderEspera();
+    await recarregarNota().catch(() => {});
   }
-  await recarregarNota();
 }
+
+// ------------------------------------------------------------------ espera
+
+/**
+ * "Aguarde" que ocupa a tela enquanto uma acao em lote roda: gira, diz o que esta
+ * fazendo e impede clique duplo. Pedido de 23/09 ("animacao de carregando ate que
+ * finalize"). Quem prefere menos movimento ve so o texto.
+ */
+function mostrarEspera(texto) {
+  let el = $('#espera');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'espera';
+    el.className = 'espera';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    el.innerHTML = '<div class="espera-caixa"><span class="espera-roda" aria-hidden="true"></span><span class="espera-texto"></span></div>';
+    document.body.appendChild(el);
+  }
+  el.querySelector('.espera-texto').textContent = texto;
+  el.classList.remove('hidden');
+}
+
+function esconderEspera() {
+  $('#espera')?.classList.add('hidden');
+}
+
+// ------------------------------------------------------------------ nota cancelada
+
+$('#btn-cancelada')?.addEventListener('click', async () => {
+  const n = estado.notaAberta;
+  if (!n) return;
+  const cancelar = !n.nota.cancelada_em;
+  const ok = await confirmar({
+    titulo: cancelar ? 'Marcar nota como cancelada' : 'Desfazer cancelamento',
+    ok: cancelar ? 'Marcar como cancelada' : 'Desfazer',
+    perigo: cancelar,
+    corpo: cancelar
+      ? `<p class="dialogo-texto">A NF <b>${esc(n.nota.numero)}</b> continua na lista, com a chave, mas passa a valer <b>zero</b>:</p>
+         <ul class="dialogo-lista"><li>sai da soma de "Notas recebidas" e dos relatórios</li>
+         <li>não entra no XML corrigido</li><li>fica registrado quem marcou — e dá para desfazer</li></ul>`
+      : `<p class="dialogo-texto">A NF <b>${esc(n.nota.numero)}</b> volta a contar nas somas e nos relatórios.</p>`,
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/notas/${n.nota.id}/cancelada`, { method: 'POST', body: JSON.stringify({ cancelada: cancelar }) });
+    avisarSalvo(cancelar ? 'Nota marcada como cancelada' : 'Cancelamento desfeito');
+    await recarregarNota();
+    await carregarNotas();
+  } catch (e) {
+    alerta(e.message);
+  }
+});
 
 // ------------------------------------------------------------------ ambiente 3
 
@@ -2595,10 +2740,12 @@ async function carregarRelatorio() {
   // O relatorio inclui o que ainda nao foi conferido - e diz isso, para o total
   // bater com o do outro sistema sem fazer palpite passar por decisao.
   const pendentes = r.totais.itens - r.totais.conferidos;
-  aviso.classList.toggle('hidden', pendentes === 0);
-  aviso.textContent = pendentes > 0
-    ? `⚠ ${pendentes} de ${r.totais.itens} itens ainda não foram conferidos — entram aqui com o valor sugerido pelo sistema.`
-    : '';
+  const canceladas = Number(r.canceladas ?? 0);
+  aviso.classList.toggle('hidden', pendentes === 0 && canceladas === 0);
+  aviso.textContent = [
+    pendentes > 0 ? `⚠ ${pendentes} de ${r.totais.itens} itens ainda não foram conferidos — entram aqui com o valor sugerido pelo sistema.` : '',
+    canceladas > 0 ? `⊘ ${canceladas} nota(s) cancelada(s) fora do relatório.` : '',
+  ].filter(Boolean).join(' ');
 
   const qtd = (v) => Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 4 });
   if (rel.qual === 'cfop') {
