@@ -127,6 +127,19 @@ describe('a nota no tamanho máximo que a NF-e admite', () => {
     expect(porProduto.n).toBe(990);
   }, 60000);
 
+  it('aplicar um CFOP a 200 itens de uma vez cabe em poucas idas ao banco', async () => {
+    const empresaId = await criarEmpresa();
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'g.xml', conteudo: notaGrande(990) }]);
+    const nota = db.consultar('SELECT * FROM notas')[0] as any;
+    const linhas = (db.consultar('SELECT * FROM itens WHERE nota_id = ? ORDER BY n_item', nota.id) as any[]).slice(0, 200);
+    const c = contarIdas();
+    const r = await repo.aplicarCfopEmLote(nota.id, linhas, '1949', 'manual');
+    const idas = c.ler();
+    c.parar();
+    expect(r).toEqual({ alterados: 200, conferidos: 200 });
+    expect(idas, `${idas} idas para 200 itens`).toBeLessThan(15);
+  }, 60000);
+
   it('dois itens dividindo o código de barras não derrubam o lote inteiro', async () => {
     // Acontece de verdade: mesmo produto, lotes diferentes, na mesma nota. Sem
     // juntar as regras repetidas antes de gravar, o banco recusa o lote e leva

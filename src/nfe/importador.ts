@@ -26,10 +26,10 @@ import { TODOS_CAMPOS, type Campo } from '../rules/campos';
  *   - `duplicada` diz quantos itens ela ja tinha conferido e que nada foi alterado.
  *     Reimportar NUNCA mexe em nota existente (a gravacao e um batch atomico e a
  *     chave e unica por tenant); o que faltava era a tela dizer isso.
- *   - `evento` e XML de cancelamento / carta de correcao. Por decisao de 17/09 o
- *     cancelamento e tratado A MAO pela contabilidade; o sistema nao grava o evento,
- *     mas diz com todas as letras qual nota foi atingida. Evento ignorado e nota
- *     cancelada sendo escriturada.
+ *   - `evento` e XML de cancelamento / carta de correcao. Desde 23/09 (pedido da
+ *     Taís, NF 419887) o CANCELAMENTO marca a nota atingida como cancelada: ela fica
+ *     com a chave, mas vale zero nas somas, relatorios e exportacao. Carta de correcao
+ *     continua so avisando. Evento ignorado e nota cancelada sendo escriturada.
  */
 
 export type ResultadoArquivo = {
@@ -158,9 +158,18 @@ async function importarUma(
       ? `A nota ESTÁ no sistema${atingida.emitNome ? ` (${atingida.emitNome})` : ''}` +
         (atingida.revisados > 0 ? `, com ${atingida.revisados} item(ns) já conferido(s)` : '') + '.'
       : 'A nota não está no sistema.';
-    const oQueFazer = evento.cancela
-      ? ' O sistema não cancela sozinho: trate esta nota manualmente.'
+    let oQueFazer = evento.cancela
+      ? ' Se ela for importada depois, use "Marcar como cancelada" na nota.'
       : ' O evento não foi gravado: confira a nota manualmente.';
+    if (evento.cancela && atingida) {
+      if (atingida.empresaId !== empresa.id) {
+        oQueFazer = ' Ela é de outra empresa: abra a nota lá e use "Marcar como cancelada".';
+      } else {
+        const motivo = `evento de cancelamento${quando}${porque}`;
+        await repo.marcarCancelada(atingida.id, true, motivo, 'importacao');
+        oQueFazer = ' Marcada como CANCELADA: continua na lista com a chave, mas vale zero e sai das somas e dos relatórios.';
+      }
+    }
     return {
       arquivo: arq.nome,
       status: 'evento',
@@ -177,6 +186,27 @@ async function importarUma(
   }
 
   const nota = parseNFe(arq.conteudo);
+
+  // Nota de OUTRA empresa e recusada (pedido da Taís, 23/09: "tem que ter algum bloqueio").
+  // Antes era so aviso, pensando em filial - mas filial tem CNPJ proprio e e tratada como
+  // empresa propria. Excecao: nota de entrada emitida pela propria empresa (produtor rural,
+  // importacao), em que ela aparece como EMITENTE.
+  const doc = (v: string | null | undefined) => String(v ?? '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+  const daEmpresa = doc(empresa.cnpj);
+  if (daEmpresa && doc(nota.dest.cnpj) && doc(nota.dest.cnpj) !== daEmpresa && doc(nota.emit.cnpj) !== daEmpresa) {
+    const outra = await repo.empresaPorCnpj(doc(nota.dest.cnpj));
+    return {
+      arquivo: arq.nome,
+      status: 'recusada',
+      chave: nota.chave,
+      motivo:
+        `NF ${nota.numero ?? ''} não é desta empresa: o destinatário é ${nota.dest.cnpj}` +
+        (nota.dest.nome ? ` (${nota.dest.nome})` : '') + '. ' +
+        (outra
+          ? `Ela é da ${outra.razao_social}: troque a empresa lá em cima e importe de novo.`
+          : 'Nenhuma empresa cadastrada tem esse CNPJ — confira se o arquivo é mesmo deste cliente.'),
+    };
+  }
 
   if (await repo.notaExiste(nota.chave)) {
     // Nota sem item e sobra de uma importacao que falhou. Deixar passar como
@@ -200,12 +230,6 @@ async function importarUma(
     }
   }
 
-  // Aviso, nao bloqueio: nota de outro CNPJ pode ser engano de pasta, mas tambem pode
-  // ser filial. Quem decide e a contadora - o sistema so nao deixa passar despercebido.
-  const motivoAviso =
-    nota.dest.cnpj && empresa.cnpj && nota.dest.cnpj !== empresa.cnpj
-      ? `destinatário ${nota.dest.cnpj} difere do CNPJ da empresa (${empresa.cnpj})`
-      : undefined;
 
   const hash = await hashXml(arq.conteudo);
   const chaveR2 = `${empresa.tenant_id}/${empresa.id}/${nota.competencia ?? 'sem-competencia'}/${nota.chave}.xml`;
@@ -327,7 +351,6 @@ async function importarUma(
     notaId,
     itens: nota.itens.length,
     preenchidos,
-    motivo: motivoAviso,
   };
 }
 
