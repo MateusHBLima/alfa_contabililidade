@@ -26,10 +26,10 @@ import { TODOS_CAMPOS, type Campo } from '../rules/campos';
  *   - `duplicada` diz quantos itens ela ja tinha conferido e que nada foi alterado.
  *     Reimportar NUNCA mexe em nota existente (a gravacao e um batch atomico e a
  *     chave e unica por tenant); o que faltava era a tela dizer isso.
- *   - `evento` e XML de cancelamento / carta de correcao. Por decisao de 17/09 o
- *     cancelamento e tratado A MAO pela contabilidade; o sistema nao grava o evento,
- *     mas diz com todas as letras qual nota foi atingida. Evento ignorado e nota
- *     cancelada sendo escriturada.
+ *   - `evento` e XML de cancelamento / carta de correcao. Desde 23/09 (pedido da
+ *     Taís, NF 419887) o CANCELAMENTO marca a nota atingida como cancelada: ela fica
+ *     com a chave, mas vale zero nas somas, relatorios e exportacao. Carta de correcao
+ *     continua so avisando. Evento ignorado e nota cancelada sendo escriturada.
  */
 
 export type ResultadoArquivo = {
@@ -158,9 +158,18 @@ async function importarUma(
       ? `A nota ESTÁ no sistema${atingida.emitNome ? ` (${atingida.emitNome})` : ''}` +
         (atingida.revisados > 0 ? `, com ${atingida.revisados} item(ns) já conferido(s)` : '') + '.'
       : 'A nota não está no sistema.';
-    const oQueFazer = evento.cancela
-      ? ' O sistema não cancela sozinho: trate esta nota manualmente.'
+    let oQueFazer = evento.cancela
+      ? ' Se ela for importada depois, use "Marcar como cancelada" na nota.'
       : ' O evento não foi gravado: confira a nota manualmente.';
+    if (evento.cancela && atingida) {
+      if (atingida.empresaId !== empresa.id) {
+        oQueFazer = ' Ela é de outra empresa: abra a nota lá e use "Marcar como cancelada".';
+      } else {
+        const motivo = `evento de cancelamento${quando}${porque}`;
+        await repo.marcarCancelada(atingida.id, true, motivo, 'importacao');
+        oQueFazer = ' Marcada como CANCELADA: continua na lista com a chave, mas vale zero e sai das somas e dos relatórios.';
+      }
+    }
     return {
       arquivo: arq.nome,
       status: 'evento',
