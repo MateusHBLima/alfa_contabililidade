@@ -637,6 +637,7 @@ async function iniciar() {
     if (b) b.classList.toggle('hidden', !pode(permissao));
   }
 
+  $('#btn-ultimas')?.classList.toggle('hidden', !pode('auditoria.visualizar'));
   await carregarEmpresas();
   montarSeletorCfop();
   await restaurarEndereco();
@@ -1179,10 +1180,25 @@ $$('#filtros button').forEach((b) => b.addEventListener('click', () => {
   renderItens();
 }));
 
-async function abrirNota(id) {
+async function abrirNota(id, itemId = null) {
   estado.notaAberta = await api(`/api/notas/${id}`);
+  if (itemId) {
+    // Veio de uma busca: a linha procurada tem que estar visivel, entao sem filtro.
+    estado.filtro = 'todos';
+    estado.busca = '';
+    const b = $('#busca'); if (b) b.value = '';
+    $$('#filtros button').forEach((x) => x.classList.toggle('on', x.dataset.f === 'todos'));
+  }
   irPara('v2');
   renderItens();
+  if (itemId) {
+    const tr = document.querySelector(`#tbl-itens tr[data-linha="${CSS.escape(itemId)}"]`);
+    if (tr) {
+      tr.classList.add('linha-procurada');
+      tr.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setTimeout(() => tr.classList.remove('linha-procurada'), 4000);
+    }
+  }
 }
 
 const CFOPS = [
@@ -1395,7 +1411,7 @@ function linhaItem(i) {
     (m.produtoNovo ? ' marca-novo' : '') +
     (i.revisado ? ' marca-apagada' : '');
 
-  return `<tr class="estado-${est.estado}${classesMarca}">
+  return `<tr class="estado-${est.estado}${classesMarca}" data-linha="${esc(i.id)}">
     <td class="num tiny">${i.n_item}</td>
     <td>
       ${esc(i.x_prod_original)}
@@ -1803,6 +1819,92 @@ async function aplicarEmLote(escopo) {
     await recarregarNota().catch(() => {});
   }
 }
+
+// ------------------------------------------------------------------ procurar
+
+/**
+ * Achar o que foi tratado errado (audios da Taís, 23/09): "só sei que o produto é
+ * energético, não sei a nota". Procura em todas as notas da empresa; "Últimas
+ * alterações" mostra o que mudou por último, pela trilha. Os dois abrem a nota já na
+ * linha do produto.
+ */
+function situacaoDoItem(it) {
+  if (it.cancelada_em) return '<span class="tag dan">nota cancelada</span>';
+  return it.revisado
+    ? `<span class="tag ok">✓ conferido</span>${it.revisado_por_nome ? `<span class="porque">${esc(it.revisado_por_nome)} · ${esc(dataCurta(it.revisado_em))}</span>` : ''}`
+    : '<span class="tag warn">a revisar</span>';
+}
+
+function tabelaDeItensAchados(itens, titulo) {
+  if (!itens.length) return `<div class="vazio">${titulo} — nada encontrado.</div>`;
+  return `<div class="rel-notas-caixa"><div class="rel-notas-topo"><b>${titulo}</b>
+      <button class="btn sm sutil" type="button" data-fechar-busca>fechar</button></div>
+    <div class="scroll"><table><thead><tr><th>Emissão</th><th>Nota</th><th>Fornecedor</th><th>Produto</th>
+      <th>CFOP saída → entrada</th><th class="num">Valor</th><th>Situação</th><th></th></tr></thead>
+    <tbody>${itens.map((it) => `<tr>
+      <td class="tiny">${esc(dataCurta(it.dh_emi))}</td>
+      <td class="mono">${esc(it.numero)}</td>
+      <td>${esc(it.emit_nome ?? it.emit_cnpj)}<span class="porque">${esc(it.emit_cnpj ?? '')}</span></td>
+      <td>${esc(it.x_prod_novo || it.x_prod_original)}${it.x_prod_novo && it.x_prod_novo !== it.x_prod_original
+        ? `<span class="porque">na nota: ${esc(it.x_prod_original)}</span>` : ''}<span class="porque">cód. ${esc(it.c_prod ?? '—')} · item ${it.n_item}</span></td>
+      <td class="mono">${esc(it.cfop_original ?? '—')} → <b>${esc(it.cfop_novo || '—')}</b></td>
+      <td class="num">${moeda(it.valor_total)}</td>
+      <td>${situacaoDoItem(it)}</td>
+      <td><button class="btn sm" type="button" data-abrir-item="${esc(it.nota_id)}" data-item="${esc(it.item_id)}">Abrir →</button></td>
+    </tr>`).join('')}</tbody></table></div></div>`;
+}
+
+$('#form-busca-itens')?.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const q = $('#busca-itens').value.trim();
+  const caixa = $('#resultado-busca');
+  if (q.length < 2) return alerta('Digite pelo menos 2 letras do produto (ou o código, o NCM, o número da nota).');
+  if (!estado.empresaId) return;
+  caixa.classList.remove('hidden');
+  caixa.innerHTML = '<div class="vazio">procurando…</div>';
+  try {
+    const r = await api(`/api/empresas/${estado.empresaId}/busca-itens?q=${encodeURIComponent(q)}`);
+    const mais = r.itens.length >= r.limite ? ` (mostrando os ${r.limite} mais recentes — refine a busca)` : '';
+    caixa.innerHTML = tabelaDeItensAchados(r.itens, `${r.itens.length} item(ns) com “${esc(q)}”${mais}`);
+  } catch (e) {
+    caixa.innerHTML = `<div class="vazio">Não consegui procurar: ${esc(e.message)}</div>`;
+  }
+});
+
+$('#btn-ultimas')?.addEventListener('click', async () => {
+  const caixa = $('#resultado-busca');
+  if (!estado.empresaId) return;
+  caixa.classList.remove('hidden');
+  caixa.innerHTML = '<div class="vazio">carregando…</div>';
+  try {
+    const r = await api(`/api/empresas/${estado.empresaId}/ultimas-alteracoes?limite=50`);
+    if (!r.alteracoes.length) { caixa.innerHTML = '<div class="vazio">Nenhuma alteração ainda nesta empresa.</div>'; return; }
+    caixa.innerHTML = `<div class="rel-notas-caixa"><div class="rel-notas-topo"><b>Últimas ${r.alteracoes.length} alterações nos itens desta empresa</b>
+        <span class="tiny">mais recente primeiro</span>
+        <button class="btn sm sutil" type="button" data-fechar-busca>fechar</button></div>
+      <div class="scroll"><table><thead><tr><th>Quando</th><th>Quem</th><th>Nota</th><th>Produto</th><th>O que mudou</th><th></th></tr></thead>
+      <tbody>${r.alteracoes.map((a) => `<tr>
+        <td class="tiny">${esc(dataCurta(a.quando))} ${esc(String(a.quando ?? '').slice(11, 16))}</td>
+        <td class="tiny">${esc(a.usuario_email ?? '—')}</td>
+        <td class="mono">${esc(a.numero)}<span class="porque">${esc(a.emit_nome ?? '')}</span></td>
+        <td>${esc(a.x_prod_novo || a.x_prod_original)}<span class="porque">cód. ${esc(a.c_prod ?? '—')} · item ${a.n_item}</span></td>
+        <td>${esc(ROTULO_CAMPO[a.campo] ?? a.campo)}: ${a.valor_antes ? `<s>${esc(a.valor_antes)}</s> → ` : ''}<b>${esc(a.valor_depois ?? '—')}</b></td>
+        <td><button class="btn sm" type="button" data-abrir-item="${esc(a.nota_id)}" data-item="${esc(a.item_id)}">Abrir →</button></td>
+      </tr>`).join('')}</tbody></table></div></div>`;
+  } catch (e) {
+    caixa.innerHTML = `<div class="vazio">Não consegui listar: ${esc(e.message)}</div>`;
+  }
+});
+
+document.addEventListener('click', (ev) => {
+  const ab = ev.target.closest('[data-abrir-item]');
+  if (ab) return abrirNota(ab.dataset.abrirItem, ab.dataset.item);
+  if (ev.target.closest('[data-fechar-busca]')) {
+    const caixa = ev.target.closest('#resultado-busca, tr.rel-notas');
+    if (caixa?.id === 'resultado-busca') { caixa.classList.add('hidden'); caixa.innerHTML = ''; }
+    else if (caixa) { caixa.previousElementSibling?.querySelector('.seta') && (caixa.previousElementSibling.querySelector('.seta').textContent = '▸'); caixa.remove(); }
+  }
+});
 
 // ------------------------------------------------------------------ espera
 
@@ -2762,8 +2864,8 @@ async function carregarRelatorio() {
     pe.innerHTML = `<tr><th>Total</th><th></th><th class="num">${t.notas}</th><th class="num">${t.itens}</th><th class="num">${t.conferidos}</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.baseIcms)}</th><th class="num">${moeda(t.icms)}</th><th class="num">${moeda(t.st)}</th><th class="num">${moeda(t.ipi)}</th><th></th></tr>`;
   } else {
     cab.innerHTML = '<tr><th>Produto</th><th>Un.</th><th class="num">Quantidade</th><th class="num">Unitário médio</th><th class="num">Valor total</th><th>CFOP</th><th>Cód. fornecedor</th><th class="num">Notas</th></tr>';
-    corpo.innerHTML = r.linhas.map((l) => `<tr>
-      <td>${esc(l.descricao)}${l.descricaoOriginal && l.descricaoOriginal !== l.descricao
+    corpo.innerHTML = r.linhas.map((l) => `<tr class="rel-cfop" data-rel-produto="${esc(l.descricao)}" data-rel-unidade="${esc(l.unidade)}" title="Clique para ver as notas deste produto">
+      <td><span class="seta">▸</span> ${esc(l.descricao)}${l.descricaoOriginal && l.descricaoOriginal !== l.descricao
         ? `<span class="porque">na nota: ${esc(l.descricaoOriginal)}</span>` : ''}</td>
       <td class="tiny">${esc(l.unidade)}</td>
       <td class="num">${qtd(l.quantidade)}</td>
@@ -2792,6 +2894,8 @@ $('#tbl-relatorio').addEventListener('click', async (ev) => {
   if (baixarCfop) {
     return baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&cfop=${encodeURIComponent(baixarCfop.dataset.baixarCfop)}&formato=csv`);
   }
+  const linhaProduto = ev.target.closest('tr[data-rel-produto]');
+  if (linhaProduto) return abrirNotasDoProduto(linhaProduto);
   const linha = ev.target.closest('tr[data-rel-cfop]');
   if (!linha) return;
   const cfop = linha.dataset.relCfop;
@@ -2824,6 +2928,24 @@ $('#tbl-relatorio').addEventListener('click', async (ev) => {
     sub.innerHTML = `<td colspan="11" class="vazio">Não consegui listar as notas: ${esc(e.message)}</td>`;
   }
 });
+
+/** Relatório por produto: clicar abre as notas em que ele aparece (23/09). */
+async function abrirNotasDoProduto(linha) {
+  const aberto = linha.nextElementSibling?.classList.contains('rel-notas');
+  if (aberto) { linha.nextElementSibling.remove(); linha.querySelector('.seta').textContent = '▸'; return; }
+  linha.querySelector('.seta').textContent = '▾';
+  const sub = document.createElement('tr');
+  sub.className = 'rel-notas';
+  sub.innerHTML = '<td colspan="8" class="vazio">carregando as notas…</td>';
+  linha.after(sub);
+  try {
+    const q = new URLSearchParams({ produto: linha.dataset.relProduto, unidade: linha.dataset.relUnidade, competencia: rel.competencia });
+    const r = await api(`/api/empresas/${estado.empresaId}/busca-itens?${q}`);
+    sub.innerHTML = `<td colspan="8">${tabelaDeItensAchados(r.itens, `${r.itens.length} item(ns) de ${esc(linha.dataset.relProduto)}`)}</td>`;
+  } catch (e) {
+    sub.innerHTML = `<td colspan="8" class="vazio">Não consegui listar: ${esc(e.message)}</td>`;
+  }
+}
 
 $('#rel-baixar-analitico').addEventListener('click', () => {
   if (!estado.empresaId || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
