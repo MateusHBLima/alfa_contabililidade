@@ -187,6 +187,27 @@ async function importarUma(
 
   const nota = parseNFe(arq.conteudo);
 
+  // Nota de OUTRA empresa e recusada (pedido da Taís, 23/09: "tem que ter algum bloqueio").
+  // Antes era so aviso, pensando em filial - mas filial tem CNPJ proprio e e tratada como
+  // empresa propria. Excecao: nota de entrada emitida pela propria empresa (produtor rural,
+  // importacao), em que ela aparece como EMITENTE.
+  const doc = (v: string | null | undefined) => String(v ?? '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+  const daEmpresa = doc(empresa.cnpj);
+  if (daEmpresa && doc(nota.dest.cnpj) && doc(nota.dest.cnpj) !== daEmpresa && doc(nota.emit.cnpj) !== daEmpresa) {
+    const outra = await repo.empresaPorCnpj(doc(nota.dest.cnpj));
+    return {
+      arquivo: arq.nome,
+      status: 'recusada',
+      chave: nota.chave,
+      motivo:
+        `NF ${nota.numero ?? ''} não é desta empresa: o destinatário é ${nota.dest.cnpj}` +
+        (nota.dest.nome ? ` (${nota.dest.nome})` : '') + '. ' +
+        (outra
+          ? `Ela é da ${outra.razao_social}: troque a empresa lá em cima e importe de novo.`
+          : 'Nenhuma empresa cadastrada tem esse CNPJ — confira se o arquivo é mesmo deste cliente.'),
+    };
+  }
+
   if (await repo.notaExiste(nota.chave)) {
     // Nota sem item e sobra de uma importacao que falhou. Deixar passar como
     // "duplicada" prenderia o arquivo para sempre.
@@ -209,12 +230,6 @@ async function importarUma(
     }
   }
 
-  // Aviso, nao bloqueio: nota de outro CNPJ pode ser engano de pasta, mas tambem pode
-  // ser filial. Quem decide e a contadora - o sistema so nao deixa passar despercebido.
-  const motivoAviso =
-    nota.dest.cnpj && empresa.cnpj && nota.dest.cnpj !== empresa.cnpj
-      ? `destinatário ${nota.dest.cnpj} difere do CNPJ da empresa (${empresa.cnpj})`
-      : undefined;
 
   const hash = await hashXml(arq.conteudo);
   const chaveR2 = `${empresa.tenant_id}/${empresa.id}/${nota.competencia ?? 'sem-competencia'}/${nota.chave}.xml`;
@@ -336,7 +351,6 @@ async function importarUma(
     notaId,
     itens: nota.itens.length,
     preenchidos,
-    motivo: motivoAviso,
   };
 }
 
