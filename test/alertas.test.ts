@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { parseNFe } from '../src/nfe/parser';
-import { detectarAlertas, estiloDaLinha, resumirNota, severidadeMaxima, type ContextoAlerta, type HistoricoProduto, marcasDaLinha } from '../src/rules/alertas';
+import { detectarAlertas, estiloDaLinha, historicoDaOperacao, resumirNota, severidadeMaxima, type ContextoAlerta, type HistoricoProduto, marcasDaLinha } from '../src/rules/alertas';
 
 const XML = readFileSync(new URL('./fixtures/nfe-exemplo.xml', import.meta.url), 'utf8');
 const nota = parseNFe(XML);
@@ -279,14 +279,22 @@ describe('linha conferida por gente', () => {
     expect(estiloDaLinha('nenhuma', alertas, true).estado).toBe('conferido');
   });
 
-  it('divergência crítica continua gritando mesmo conferida', () => {
-    // Crítico não fala do preenchimento: fala de algo que mudou no mundo.
-    // Conferir o CFOP não faz o NCM ter voltado ao que era.
+  it('divergência crítica: conferir resolve (23/09 — antes ficava "Resolver" sem saída)', () => {
+    // Mudou de propósito. Antes, NCM/ST/preço continuavam "Resolver" depois de
+    // conferidos, e não havia botão que respondesse — a Taís conferia o maracujá,
+    // fixava o padrão, e a linha seguia vermelha. Quem conferiu manda.
     const critico = [
       { codigo: 'ncm_mudou', severidade: 'critico', titulo: 'NCM mudou',
         detalhe: '', bloqueia: false } as any,
     ];
-    expect(estiloDaLinha('alta', critico, true).estado).toBe('bloqueado');
+    expect(estiloDaLinha('alta', critico, false).estado).toBe('bloqueado');
+    expect(estiloDaLinha('alta', critico, true).estado).toBe('conferido');
+    expect(estiloDaLinha('alta', critico, true, { fonte: 'fixada' }).estado).toBe('conferido');
+  });
+
+  it('sem CFOP de entrada, conferir não resolve — falta a decisão, não a leitura', () => {
+    const semCfop = detectarAlertas(item, ctx({ cfopEntrada: null }));
+    expect(estiloDaLinha('alta', semCfop, true).estado).toBe('bloqueado');
   });
 });
 
@@ -418,7 +426,17 @@ describe('o resumo do topo não pode contradizer as próprias linhas', () => {
     expect(r.chamada).toContain('Tudo conferido');
   });
 
-  it('mas divergência crítica continua contando mesmo conferida', () => {
+  it('divergência crítica conferida sai da conta de "antes de exportar"', () => {
+    const ncm = detectarAlertas(nota.itens[0]!, ctx({ historico: { ...historicoBase, ncm: '20089913' } }));
+    expect(severidadeMaxima(ncm)).toBe('critico');
+    const r = resumirNota([item({ revisado: true, alertas: ncm }), item({ revisado: true })]);
+    expect(r.criticos).toBe(0);
+    expect(r.chamada).toContain('Tudo conferido');
+    const aberto = resumirNota([item({ revisado: false, alertas: ncm })]);
+    expect(aberto.criticos).toBe(1);
+  });
+
+  it('mas item sem CFOP continua contando mesmo conferido', () => {
     // Mesmo critério de estiloDaLinha: crítico fala do mundo, não do preenchimento.
     const critico = detectarAlertas(nota.itens[0]!, ctx({ cfopEntrada: null }));
     const r = resumirNota([item({ revisado: true, alertas: critico })]);
@@ -521,5 +539,37 @@ describe('marcas da linha: o quanto a nota foge do normal', () => {
     marcasDaLinha('5949', []);
     expect(estiloDaLinha('alta', [], false, { fonte: 'fixada' })).toEqual(antes);
     expect(antes.estado).toBe('padrao');
+  });
+});
+
+describe('histórico por operação (23/09): o ajuste 5949 não contamina a compra 5102', () => {
+  const ajuste: HistoricoProduto = { ...historicoBase, cfopOrigem: '5949', precoMedio: 0.14, vezesVisto: 1 };
+  const compra: HistoricoProduto = { ...historicoBase, cfopOrigem: '5102' };
+  const h: HistoricoProduto = { ...ajuste, vezesVisto: 6, porOperacao: { '5102': compra, '5949': ajuste } };
+
+  it('compra compara com compra: sem "Preço +5950%" e sem "CFOP mudou"', () => {
+    const d = historicoDaOperacao(h, '5102');
+    expect(d.historico).toBe(compra);
+    const a = detectarAlertas(item, ctx({ historico: d.historico, operacaoNova: d.operacaoNova }));
+    expect(a).toEqual([]);
+    // Era o que acontecia comparando com a última nota, que foi o ajuste:
+    expect(codigos(detectarAlertas(item, ctx({ historico: ajuste })))).toEqual(
+      expect.arrayContaining(['preco_fora_faixa', 'cfop_origem_mudou']),
+    );
+  });
+
+  it('primeira vez numa operação: um aviso só, amarelo, e não vira "produto novo"', () => {
+    const d = historicoDaOperacao({ ...compra, porOperacao: { '5102': compra } }, '5405');
+    expect(d.historico).toBeNull();
+    expect(d.operacaoNova).toEqual({ antes: ['5102'] });
+    const a = detectarAlertas({ ...item, CFOP: '5405' }, ctx({ historico: null, operacaoNova: d.operacaoNova }));
+    expect(codigos(a)).toEqual(['cfop_origem_mudou']);
+    expect(a[0]!.severidade).toBe('atencao');
+    expect(a[0]!.titulo).toBe('Primeira vez em 5405 (antes: 5102)');
+  });
+
+  it('produto nunca visto continua "produto novo"', () => {
+    const d = historicoDaOperacao(undefined, '5102');
+    expect(codigos(detectarAlertas(item, ctx({ historico: d.historico, operacaoNova: d.operacaoNova })))).toContain('item_novo');
   });
 });

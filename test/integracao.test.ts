@@ -2650,6 +2650,81 @@ describe('teste geral de 22/09: o "é sempre assim" aparece na hora, e conferir 
   });
 });
 
+describe('23/09: "Resolver" que não saía — conferir resolve, e o ajuste 5949 não vira alarme na compra', () => {
+  /* Áudios da Taís, 23/09: maracujá da Italiana com "NCM mudou" — ela conferia e fixava
+     e a linha seguia "Resolver"; detergente da OESA numa compra 5102 com "Preço +5950%"
+     porque a nota anterior tinha sido um ajuste 5949 de valor simbólico. */
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  let ck = '';
+  const req = (c: string, o: RequestInit = {}) =>
+    app.fetch(new Request(`http://x${c}`, {
+      ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+    }), ambiente());
+  const json = async (c: string, o: RequestInit = {}) => (await req(c, o)).json() as Promise<any>;
+  const subir = async (empresaId: string, xml: string) => {
+    const fd = new FormData();
+    fd.append('arquivos', new File([xml], 'n.xml', { type: 'text/xml' }));
+    await app.fetch(new Request(`http://x/api/empresas/${empresaId}/importar`, { method: 'POST', body: fd, headers: { Cookie: ck } }), ambiente());
+    return (db.consultar('SELECT id FROM notas WHERE chave = ?', parseNFe(xml).chave)[0] as any).id as string;
+  };
+  const em = (data: string): [string, string] => ['<dhEmi>2026-08-14T09:31:00-03:00</dhEmi>', `<dhEmi>${data}T09:31:00-03:00</dhEmi>`];
+  let empresaId = '';
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    empresaId = (await json('/api/empresas', {
+      method: 'POST', body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'ITALIANA', uf: 'SC', perfil: 'revenda' }),
+    })).id;
+    await subir(empresaId, XML);   // a compra de julho, 5102, R$ 8,50
+  });
+
+  it('compra depois de um ajuste 5949 de valor simbólico: nenhum alarme de preço nem de CFOP', async () => {
+    await subir(empresaId, outraNota(XML, '61', [
+      em('2026-08-15'),
+      ['<CFOP>5102</CFOP><uCom>UN</uCom><qCom>10.0000</qCom>\n          <vUnCom>8.5000</vUnCom><vProd>85.00</vProd>',
+       '<CFOP>5949</CFOP><uCom>UN</uCom><qCom>10.0000</qCom>\n          <vUnCom>0.1400</vUnCom><vProd>1.40</vProd>'],
+    ]));
+    const compra = await subir(empresaId, outraNota(XML, '62', [em('2026-08-20')]));
+    const i1 = (await json(`/api/notas/${compra}`)).itens.find((i: any) => i.n_item === 1);
+    expect(i1.alertas.map((a: any) => a.titulo)).toEqual([]);
+    expect(i1.estilo.estado).not.toBe('bloqueado');
+  });
+
+  it('NCM mudou: "Resolver" até ela conferir; conferido, sai da conta e o aviso fica como registro', async () => {
+    const n = await subir(empresaId, outraNota(XML, '63', [em('2026-08-20'), ['<NCM>18069000</NCM>', '<NCM>17049090</NCM>']]));
+    let d = await json(`/api/notas/${n}`);
+    let i1 = d.itens.find((i: any) => i.n_item === 1);
+    expect(i1.alertas.map((a: any) => a.codigo)).toContain('ncm_mudou');
+    expect(i1.estilo.estado).toBe('bloqueado');
+    expect(d.resumo.criticos).toBe(1);
+
+    await req(`/api/notas/${n}/conferir`, { method: 'POST', body: '{}' });
+    d = await json(`/api/notas/${n}`);
+    i1 = d.itens.find((i: any) => i.n_item === 1);
+    expect(i1.estilo.estado).toBe('conferido');
+    expect(i1.alertas.map((a: any) => a.codigo)).toContain('ncm_mudou');   // continua escrito
+    expect(d.resumo.criticos).toBe(0);
+    expect(d.resumo.chamada).toContain('Tudo conferido');
+  });
+
+  it('primeira vez numa operação nova: um aviso amarelo, uma vez só', async () => {
+    const n = await subir(empresaId, outraNota(XML, '64', [em('2026-08-20'), ['<NCM>18069000</NCM><CFOP>5102</CFOP>', '<NCM>18069000</NCM><CFOP>5405</CFOP>']]));
+    const i1 = (await json(`/api/notas/${n}`)).itens.find((i: any) => i.n_item === 1);
+    expect(i1.alertas.map((a: any) => a.titulo)).toEqual(['Primeira vez em 5405 (antes: 5102)']);
+    expect(i1.estilo.estado).toBe('conferir');
+    const m = await subir(empresaId, outraNota(XML, '65', [em('2026-08-25'), ['<NCM>18069000</NCM><CFOP>5102</CFOP>', '<NCM>18069000</NCM><CFOP>5405</CFOP>']]));
+    const j1 = (await json(`/api/notas/${m}`)).itens.find((i: any) => i.n_item === 1);
+    expect(j1.alertas).toEqual([]);
+  });
+});
+
 describe('"quero ver como que tava" — a trilha do item', () => {
   /* Último pedido da contadora no primeiro uso real, e o único que faltava.
      Até aqui o `desfazer` da linha só tirava a marca de conferido — o VALOR
