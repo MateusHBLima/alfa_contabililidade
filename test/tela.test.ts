@@ -386,3 +386,22 @@ describe('tela: 23/09 — aplicar em lote, aguarde e endereço', () => {
     expect(CSS).toMatch(/prefers-reduced-motion[^}]*\.espera-roda\{animation:none/);
   });
 });
+
+describe('tela: 23/09 — achar o que foi tratado errado', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('a busca e as últimas alterações estão em Notas recebidas', () => {
+    expect(HTML).toContain('id="form-busca-itens"');
+    expect(HTML).toContain('id="btn-ultimas"');
+    expect(APP).toContain('/busca-itens?q=');
+    expect(APP).toContain('/ultimas-alteracoes');
+  });
+  it('"Abrir" leva à linha do produto, sem filtro escondendo ela', () => {
+    expect(APP).toMatch(/async function abrirNota\(id, itemId = null\)/);
+    expect(APP).toContain('data-linha="${esc(i.id)}"');
+    expect(APP).toContain("estado.filtro = 'todos'");
+  });
+  it('o relatório por produto abre as notas do produto', () => {
+    expect(APP).toContain('data-rel-produto=');
+    expect(APP).toMatch(/function abrirNotasDoProduto/);
+  });
+});

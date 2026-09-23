@@ -2860,6 +2860,109 @@ describe('23/09: nota cancelada vale zero, e "aplicar na nota toda" numa requisi
   });
 });
 
+describe('23/09: achar o que foi tratado errado, e XML de outra empresa é recusado', () => {
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  let ck = '';
+  const req = (c: string, o: RequestInit = {}) =>
+    app.fetch(new Request(`http://x${c}`, {
+      ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+    }), ambiente());
+  const json = async (c: string, o: RequestInit = {}) => (await req(c, o)).json() as Promise<any>;
+  const entrar = async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  };
+  const subir = async (empresaId: string, xml: string, nome = 'n.xml') => {
+    const fd = new FormData();
+    fd.append('arquivos', new File([xml], nome, { type: 'text/xml' }));
+    const r = await app.fetch(new Request(`http://x/api/empresas/${empresaId}/importar`, { method: 'POST', body: fd, headers: { Cookie: ck } }), ambiente());
+    return (await r.json()) as any;
+  };
+  const criar = async (cnpj: string, nome: string) => (await json('/api/empresas', {
+    method: 'POST', body: JSON.stringify({ cnpj, razaoSocial: nome, uf: 'SC', perfil: 'revenda' }),
+  })).id as string;
+  let empresaId = '';
+  beforeEach(async () => {
+    await entrar();
+    empresaId = await criar('11222333000181', 'ITALIANA');
+  });
+
+  it('procurar "energético" acha o item em qualquer nota, com ou sem acento, e diz qual nota é', async () => {
+    await subir(empresaId, outraNota(XML, '81'));
+    await subir(empresaId, outraNota(XML, '82', [['<nNF>504782</nNF>', '<nNF>504782</nNF>']]));
+    db.consultar(`UPDATE itens SET x_prod_novo = 'ENERGÉTICO LATA 473ML' WHERE n_item = 2 AND nota_id = (SELECT id FROM notas WHERE chave LIKE '%82')`);
+    for (const q of ['energético', 'energetico', 'ENERGETICO']) {
+      const r = await json(`/api/empresas/${empresaId}/busca-itens?q=${encodeURIComponent(q)}`);
+      expect(r.itens, q).toHaveLength(1);
+      expect(r.itens[0]).toMatchObject({ numero: '504782', n_item: 2, emit_nome: 'A. ANGELONI & CIA LTDA' });
+      expect(r.itens[0].nota_id).toBeTruthy();
+      expect(r.itens[0].item_id).toBeTruthy();
+    }
+    // Pela descrição do fornecedor e pelo código, nas duas notas.
+    expect((await json(`/api/empresas/${empresaId}/busca-itens?q=refrig`)).itens).toHaveLength(2);
+    expect((await json(`/api/empresas/${empresaId}/busca-itens?q=7893`)).itens).toHaveLength(2);
+    // "%" e "_" são letras, não curinga.
+    expect((await json(`/api/empresas/${empresaId}/busca-itens?q=%25%25`)).itens).toHaveLength(0);
+    expect((await req(`/api/empresas/${empresaId}/busca-itens?q=e`)).status).toBe(400);
+  });
+
+  it('relatório por produto: clicar no produto lista as notas dele', async () => {
+    await subir(empresaId, outraNota(XML, '83'));
+    await subir(empresaId, outraNota(XML, '84'));
+    const rel = await json(`/api/empresas/${empresaId}/relatorios/produtos?competencia=2026-08`);
+    const refri = rel.linhas.find((l: any) => /REFRIG/.test(l.descricao));
+    const q = new URLSearchParams({ produto: refri.descricao, unidade: refri.unidade, competencia: '2026-08' });
+    const r = await json(`/api/empresas/${empresaId}/busca-itens?${q}`);
+    expect(r.itens).toHaveLength(refri.itens);
+    expect(new Set(r.itens.map((i: any) => i.nota_id)).size).toBe(refri.notas);
+  });
+
+  it('últimas alterações: a mudança de CFOP mais recente primeiro, com a nota; conferir não entra', async () => {
+    await subir(empresaId, outraNota(XML, '85'));
+    const nota = (db.consultar(`SELECT id FROM notas WHERE chave LIKE '%85'`)[0] as any).id;
+    const itens = (await json(`/api/notas/${nota}`)).itens;
+    await req(`/api/itens/${itens[1].id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1556' }] }) });
+    await req(`/api/notas/${nota}/conferir`, { method: 'POST', body: '{}' });
+    const r = await json(`/api/empresas/${empresaId}/ultimas-alteracoes`);
+    expect(r.alteracoes[0]).toMatchObject({ campo: 'cfop', valor_depois: '1556', nota_id: nota, item_id: itens[1].id, numero: '504785' });
+    expect(r.alteracoes.every((a: any) => a.campo !== 'conferido')).toBe(true);
+    db.consultar(`DELETE FROM papel_permissoes WHERE papel_id = 'papel-admin' AND permissao = 'auditoria.visualizar'`);
+    await entrar();
+    expect((await req(`/api/empresas/${empresaId}/ultimas-alteracoes`)).status).toBe(403);
+  });
+
+  it('XML de outra empresa é recusado, e a mensagem diz de qual empresa ele é', async () => {
+    const sailor = await criar('51714504000104', 'THE SAILOR LTDA');
+    const daSailor = outraNota(XML, '86', [['<dest><CNPJ>11222333000181</CNPJ>', '<dest><CNPJ>51714504000104</CNPJ>']]);
+    const r = await subir(empresaId, daSailor, 'sailor.xml');
+    expect(r.importadas).toBe(0);
+    expect(r.recusadas).toBe(1);
+    expect(r.arquivos[0].motivo).toMatch(/não é desta empresa/);
+    expect(r.arquivos[0].motivo).toMatch(/THE SAILOR LTDA/);
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
+    // Na empresa certa, entra.
+    expect((await subir(sailor, daSailor)).importadas).toBe(1);
+    // CNPJ que ninguém tem: recusa, dizendo para conferir o arquivo.
+    const deNinguem = outraNota(XML, '87', [['<dest><CNPJ>11222333000181</CNPJ>', '<dest><CNPJ>99888777000166</CNPJ>']]);
+    expect((await subir(empresaId, deNinguem)).arquivos[0].motivo).toMatch(/Nenhuma empresa cadastrada/);
+  });
+
+  it('nota de entrada emitida pela própria empresa (ela é a emitente) continua entrando', async () => {
+    const propria = outraNota(XML, '88', [
+      ['<emit><CNPJ>83646984003044</CNPJ>', '<emit><CNPJ>11222333000181</CNPJ>'],
+      ['<dest><CNPJ>11222333000181</CNPJ>', '<dest><CNPJ>83646984003044</CNPJ>'],
+    ]);
+    expect((await subir(empresaId, propria)).importadas).toBe(1);
+  });
+});
+
 describe('"quero ver como que tava" — a trilha do item', () => {
   /* Último pedido da contadora no primeiro uso real, e o único que faltava.
      Até aqui o `desfazer` da linha só tirava a marca de conferido — o VALOR
