@@ -1702,6 +1702,28 @@ const csvResposta = (corpo: string, nome: string) =>
  *   notas     — as notas de UM CFOP (`?cfop=`), somando só os itens daquele CFOP
  * JSON para a tela; `?formato=csv` para a planilha. Regra e formato em src/relatorios.
  */
+/** Procurar produto em todas as notas da empresa (texto) ou os itens de um produto do relatório. */
+app.get('/api/empresas/:id/busca-itens', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const texto = (c.req.query('q') ?? '').trim();
+  const produto = c.req.query('produto');
+  const competencia = c.req.query('competencia') || undefined;
+  if (competencia && !/^\d{4}(-\d{2})?$/.test(competencia)) return c.json({ erro: 'competência inválida' }, 400);
+  if (produto === undefined && texto.length < 2) return c.json({ erro: 'digite pelo menos 2 letras' }, 400);
+  if (texto.length > 80) return c.json({ erro: 'busca longa demais' }, 400);
+  const itens = await c.get('repo').buscarItens(c.req.param('id'), {
+    texto: texto || undefined, produto, unidade: c.req.query('unidade') ?? '', competencia,
+  });
+  return c.json({ itens, limite: 200 });
+});
+
+/** O que mudou por último nos itens (trilha). Mesma permissão do "como estava". */
+app.get('/api/empresas/:id/ultimas-alteracoes', async (c) => {
+  exigir(c.get('sessao'), 'auditoria.visualizar');
+  const limite = Number(c.req.query('limite') ?? 50) || 50;
+  return c.json({ alteracoes: await c.get('repo').ultimasAlteracoes(c.req.param('id'), limite) });
+});
+
 app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   exigir(c.get('sessao'), 'notas.visualizar');
   const qual = c.req.param('qual');
