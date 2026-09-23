@@ -19,7 +19,7 @@ import { lerNotaOriginal, compararComApp } from './nfe/visao';
 import { montarZip } from './nfe/zip';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
 import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
-import { detectarAlertas, estiloDaLinha, marcasDaLinha, resumirNota } from './rules/alertas';
+import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
 import { montarRelatorioCfop, montarRelatorioProdutos, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
@@ -1827,8 +1827,10 @@ app.get('/api/notas/:id', async (c) => {
 
     // Descricao padronizada ainda igual a do fornecedor = ninguem ensinou.
     // Nao trava a linha (quem decide e o CFOP), mas nao some da tela.
+    const daOperacao = historicoDaOperacao(historico.get(String(i.c_prod ?? '').trim().toUpperCase()), i.cfop_original);
     const ctxAlerta = {
-      historico: historico.get(String(i.c_prod ?? '').trim().toUpperCase()) ?? null,
+      historico: daOperacao.historico,
+      operacaoNova: daOperacao.operacaoNova,
       cfopEntrada: i.cfop_novo,
       confianca: i.confianca,
       regraSuspeita: usouRegraSuspeita,

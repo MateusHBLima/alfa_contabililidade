@@ -49,11 +49,36 @@ export type HistoricoProduto = {
   xProdFornecedor: string | null;
   precoMedio: number | null;
   ultimaVezEm: string | null;
+  /** a mesma ficha, por CFOP de saida (so no historico carregado do banco) */
+  porOperacao?: Record<string, HistoricoProduto>;
 };
 
+/**
+ * O historico que vale para comparar ESTE item: o da mesma operacao (CFOP de
+ * saida). Ajuste 5949 compara com ajuste, compra 5102 com compra - a nota de ajuste
+ * vem com valor simbolico e nao pode entrar na media de preco da compra (22/09).
+ *
+ * Produto ja visto, mas nunca nesta operacao: devolve so o aviso de operacao nova
+ * (`operacaoNova`), sem comparar NCM ou preco com outra operacao.
+ */
+export function historicoDaOperacao(
+  h: HistoricoProduto | null | undefined,
+  cfopSaida: string | null | undefined,
+): { historico: HistoricoProduto | null; operacaoNova: { antes: string[] } | null } {
+  if (!h) return { historico: null, operacaoNova: null };
+  if (!h.porOperacao) return { historico: h, operacaoNova: null };
+  const cfop = String(cfopSaida ?? '').trim();
+  const mesma = h.porOperacao[cfop];
+  if (mesma) return { historico: mesma, operacaoNova: null };
+  const antes = Object.keys(h.porOperacao).filter(Boolean).sort();
+  return { historico: null, operacaoNova: antes.length ? { antes } : null };
+}
+
 export type ContextoAlerta = {
-  /** null = produto nunca visto */
+  /** null = produto nunca visto (nesta operacao, quando `operacaoNova` vem preenchido) */
   historico: HistoricoProduto | null;
+  /** produto ja visto deste fornecedor, mas nunca neste CFOP de saida */
+  operacaoNova?: { antes: string[] } | null;
   /** o item já tem CFOP de entrada definido? */
   cfopEntrada: string | null;
   /** confiança do preenchimento vindo do motor de regras */
@@ -104,6 +129,21 @@ export function detectarAlertas(item: ItemNFe, ctx: ContextoAlerta): Alerta[] {
         'Confira o valor e, se estiver certo, fixe o padrão para parar de perguntar.',
       bloqueia: false,
     });
+  }
+
+  // ---------------------------------------------------------- operacao nova
+  // Produto conhecido, primeira vez NESTA operacao do fornecedor (ex.: sempre veio
+  // 5102 e agora veio 5405, com ST). Avisa uma vez; da proxima ja ha historico.
+
+  if (ctx.operacaoNova) {
+    alertas.push({
+      codigo: 'cfop_origem_mudou',
+      severidade: 'atencao',
+      titulo: `Primeira vez em ${item.CFOP ?? '—'} (antes: ${ctx.operacaoNova.antes.join(', ')})`,
+      detalhe: 'O fornecedor mandou este produto numa operação em que ele nunca tinha vindo. Verifique se a entrada acompanha.',
+      bloqueia: false,
+    });
+    return alertas;
   }
 
   // ---------------------------------------------------------- item novo
@@ -169,7 +209,8 @@ export function detectarAlertas(item: ItemNFe, ctx: ContextoAlerta): Alerta[] {
     });
   }
 
-  if (h.cfopOrigem && h.cfopOrigem !== item.CFOP) {
+  // Historico de OUTRA operacao (so quando quem chamou nao separou por operacao).
+  if (h.cfopOrigem && item.CFOP && h.cfopOrigem !== item.CFOP) {
     alertas.push({
       codigo: 'cfop_origem_mudou',
       severidade: 'atencao',
@@ -307,7 +348,7 @@ export function resumirNota(
     // "Conferido" e a faixa dizendo "7 itens para conferir - 0 de 7 ja prontos".
     // E a mesma queixa do primeiro uso real, agora vinda do resumo em vez do banco:
     // a pessoa termina o trabalho e a tela diz que ela nao fez nada.
-    const conferido = it.revisado === true && pior !== 'critico';
+    const conferido = conferidoResolve(it.revisado, it.alertas);
     const precisaOlho = !conferido && it.confianca !== 'alta';
 
     if (it.alertas.some((a) => a.bloqueia)) bloqueia = true;
@@ -321,8 +362,8 @@ export function resumirNota(
     // dizer "2 itens para conferir - 0 de 5 ja prontos" numa nota com 3 itens
     // resolvidos. E a mesma contradicao entre o topo e as linhas que ja foi
     // corrigida uma vez hoje.
-    if (pior === 'critico') criticos += 1;
-    else if (conferido) tranquilos += 1;
+    if (conferido) tranquilos += 1;
+    else if (pior === 'critico') criticos += 1;
     else if (pior === 'atencao' || precisaOlho) atencao += 1;
     else tranquilos += 1;
   }
@@ -352,6 +393,11 @@ export function resumirNota(
     totalItens: total, criticos, atencao, info, tranquilos, ensinados,
     semDescricaoPadrao, bloqueiaExportacao: bloqueia, chamada, aprendizado,
   };
+}
+
+/** Conferir resolve a linha, menos quando falta a propria decisao (alerta que bloqueia). */
+export function conferidoResolve(revisado: boolean | undefined, alertas: Alerta[]): boolean {
+  return revisado === true && !alertas.some((a) => a.bloqueia);
 }
 
 export function severidadeMaxima(alertas: Alerta[]): Severidade | null {
@@ -409,12 +455,13 @@ export function estiloDaLinha(
 ): EstiloLinha {
   const pior = severidadeMaxima(alertas);
 
-  // Divergencia critica continua gritando mesmo depois de conferida: ela nao fala
-  // do preenchimento, fala de algo que mudou no mundo (NCM reclassificado, item
-  // que entrou em ST). Fora isso, quem conferiu manda - a pessoa e a autoridade,
-  // nao a origem do dado. Sem isto, a contadora confere a nota inteira e a tela
-  // continua dizendo "Conferir" em tudo, como se ela nao tivesse feito nada.
-  if (revisado && pior !== 'critico') {
+  // Quem conferiu manda - a pessoa e a autoridade, nao a origem do dado. Isso vale
+  // tambem para divergencia critica (NCM reclassificado, ST, preco): antes ela
+  // continuava "Resolver" depois de conferida e nao havia como responder - beco sem
+  // saida visto em 23/09 (maracuja da Italiana, detergente da OESA). O aviso fica
+  // escrito na linha como registro; o estado passa a ser dela. So o que BLOQUEIA
+  // (sem CFOP de entrada) continua: ai falta a decisao, nao a leitura.
+  if (conferidoResolve(revisado, alertas)) {
     return { estado: 'conferido', icone: '✓', rotulo: 'Conferido', destacar: false };
   }
 

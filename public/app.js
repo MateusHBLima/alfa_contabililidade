@@ -1306,8 +1306,11 @@ function composicaoContabil(i) {
 
 function linhaItem(i) {
   const est = i.estilo ?? { estado: 'pronto', icone: '✓', rotulo: 'Pronto' };
+  // Linha conferida: o aviso continua escrito (registro do que ela viu), mas apagado -
+  // a decisao ja foi tomada. So "sem CFOP" nunca chega aqui conferido.
+  const visto = est.estado === 'conferido';
   const alertas = (i.alertas ?? []).map((a) =>
-    `<div class="alerta ${a.severidade}" title="${esc(a.detalhe)}">
+    `<div class="alerta ${a.severidade}${visto ? ' visto' : ''}" title="${visto ? 'Visto e conferido. ' : ''}${esc(a.detalhe)}">
        <span class="marca">${a.severidade === 'critico' ? '▲' : a.severidade === 'atencao' ? '●' : 'ⓘ'}</span>
        <span>${esc(a.titulo)}</span>
      </div>`).join('');

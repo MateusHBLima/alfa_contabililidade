@@ -474,3 +474,6 @@ tr.rel-notas>td{background:#f6f9fd;padding:8px 10px 14px 26px}
    os cabeçalhos quebram em duas linhas em vez de empurrar o "Conferido" para fora. */
 #tbl-itens th{white-space:normal;line-height:1.25}
 #tbl-itens th:nth-child(2){min-width:180px}
+
+/* Aviso de uma linha ja conferida: continua escrito, sem cor de alarme. */
+.alerta.visto{opacity:.55;filter:grayscale(1)}
