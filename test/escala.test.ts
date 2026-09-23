@@ -178,3 +178,46 @@ describe('a nota no tamanho máximo que a NF-e admite', () => {
     expect(r.fixados).toBe(18);
   }, 60000);
 });
+
+describe('23/09 — o banco não lê tabela inteira nos caminhos de todo clique', () => {
+  /* A conta estourou o limite gratuito do D1 (5 milhões de LINHAS LIDAS por dia): o D1
+     cobra cada linha percorrida. O plano de execução do SQLite é o mesmo do D1, então
+     conferimos aqui, com as consultas reais, que nenhuma varre auditoria, itens, regras
+     ou notas inteiras. Se alguém reescrever uma consulta e ela voltar a varrer, quebra. */
+  it('trilha, regras candidatas, histórico do produto e importações usam índice', async () => {
+    const empresaId = await criarEmpresa();
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'g.xml', conteudo: notaGrande(30) }]);
+    const nota = db.consultar('SELECT * FROM notas')[0] as any;
+    const item = db.consultar('SELECT * FROM itens WHERE nota_id = ? AND n_item = 1', nota.id)[0] as any;
+
+    const capturadas: { sql: string; binds: unknown[] }[] = [];
+    const oPrepare = (db as any).prepare.bind(db);
+    (db as any).prepare = (sql: string) => {
+      const st = oPrepare(sql);
+      const oBind = st.bind.bind(st);
+      st.bind = (...a: unknown[]) => { capturadas.push({ sql, binds: a }); return oBind(...a); };
+      return st;
+    };
+    await repo.alterarItem(item.id, [{ campo: 'cfop', valor: '1556', origem: 'manual' }]);   // grava trilha
+    await repo.carregarRegrasCandidatas(empresaId, [{ nivel: 1, chave: 'x#5102' }, { nivel: 2, chave: 'y#5102' }]);
+    await repo.carregarHistoricoProdutos(empresaId, nota.emit_cnpj, nota.id);
+    await repo.listarImportacoes(empresaId);
+    (db as any).prepare = oPrepare;
+
+    const bruto = (db as any).db;
+    const ruins: string[] = [];
+    for (const c of capturadas) {
+      if (!/^\s*(WITH|SELECT)/i.test(c.sql) && !/SELECT/i.test(c.sql)) continue;
+      const plano = bruto.prepare('EXPLAIN QUERY PLAN ' + c.sql).all(...c.binds.map((b) => (b === undefined ? null : b)))
+        .map((r: any) => String(r.detail));
+      for (const linha of plano) {
+        if (/^SCAN (auditoria|itens|regras|notas)\b/.test(linha)) ruins.push(`${linha}  <=  ${c.sql.slice(0, 90)}`);
+        if (/idx_itens_historico \(tenant_id=\? AND c_prod>\?\)/.test(linha)) ruins.push(`itens do escritório inteiro <= ${c.sql.slice(0, 90)}`);
+        if (/SEARCH regras USING INDEX idx_regras_busca \(tenant_id=\? AND empresa_id=\?\)$/.test(linha)) ruins.push(`todas as regras da empresa <= ${c.sql.slice(0, 90)}`);
+        if (/SEARCH auditoria USING INDEX idx_auditoria_quando/.test(linha)) ruins.push(`trilha inteira ordenada <= ${c.sql.slice(0, 90)}`);
+      }
+    }
+    expect(ruins).toEqual([]);
+    expect(capturadas.length).toBeGreaterThan(4);
+  });
+});
