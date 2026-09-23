@@ -1724,6 +1724,7 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   const sufixo = `${empresa?.cnpj ?? 'empresa'}-${competencia ?? 'tudo'}`;
 
   if (qual !== 'produtos') await garantirValoresFiscais(c, empresaId, competencia);
+  const canceladas = await repo.contarCanceladas(empresaId, competencia);
 
   if (qual === 'analitico' || qual === 'notas') {
     const linhas = await repo.relatorioAnalitico(empresaId, competencia, cfopFiltro);
@@ -1741,7 +1742,7 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   if (csv) {
     return csvResposta(qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any), `relatorio-${qual}-${sufixo}.csv`);
   }
-  return c.json({ competencia: competencia ?? null, ...rel });
+  return c.json({ competencia: competencia ?? null, canceladas, ...rel });
 });
 
 /**
@@ -1859,6 +1860,8 @@ app.get('/api/notas/:id', async (c) => {
 
   // Rodape da tela: total por CFOP desta nota, produto e valor contabil (pedido de 22/09).
   const totaisCfop = totaisPorCfopDaNota(r.itens, r.nota.valor_total);
+  // Nota cancelada vale zero: o rodape diz isso em vez de somar.
+  if (r.nota.cancelada_em) Object.assign(totaisCfop, { cancelada: true });
 
   return c.json({ nota: r.nota, itens, resumo, totaisCfop });
 });
@@ -2019,6 +2022,72 @@ app.post('/api/notas/:id/fixar-padrao', async (c) => {
   const { fixados, semCfop } = await repo.fixarPadraoDeItens(r.nota.id, ids);
 
   return c.json({ ok: true, fixados, semCfop });
+});
+
+/**
+ * Marcar / desmarcar a nota como cancelada (23/09, NF 419887). Para o caso em que a
+ * nota chegou mas o evento de cancelamento nao (ela viu no SAT). Reversivel, na trilha.
+ */
+app.post('/api/notas/:id/cancelada', async (c) => {
+  const sessao = c.get('sessao');
+  exigir(sessao, 'notas.importar');
+  const corpo = z
+    .object({ cancelada: z.boolean(), motivo: z.string().max(200).optional() })
+    .parse(await c.req.json());
+  const motivo = corpo.motivo?.trim() || (corpo.cancelada ? 'marcada à mão (cancelada na SEFAZ)' : 'desmarcada à mão');
+  const mudou = await c.get('repo').marcarCancelada(c.req.param('id'), corpo.cancelada, motivo, 'manual');
+  return c.json({ ok: true, mudou });
+});
+
+/**
+ * Aplicar UM CFOP a varios itens da nota (botao "Aplicar na nota toda" e "Fixar para o
+ * fornecedor"). Uma requisicao so, com o aprendizado em lote. Antes a tela mandava uma
+ * requisicao por item, em fila: numa nota grande levava minutos, sem aviso, e uma falha
+ * no meio parava o resto calada (audio da Taís, 23/09: "demora um tempao").
+ */
+app.post('/api/notas/:id/aplicar-cfop', async (c) => {
+  const sessao = c.get('sessao');
+  exigir(sessao, 'notas.editar_cfop');
+  const corpo = z
+    .object({
+      cfop: z.string(),
+      // A tela manda em fatias de ate 200: nota de 990 itens nao cabe numa invocacao so.
+      itens: z.array(z.string()).min(1).max(200),
+      escopo: z.enum(['item', 'fornecedor']).default('item'),
+    })
+    .parse(await c.req.json());
+  if (corpo.escopo === 'fornecedor') exigir(sessao, 'regras.fixar');
+  const problema = validarValor('cfop', corpo.cfop);
+  if (problema) return c.json({ erro: `CFOP de entrada: ${problema}` }, 400);
+  const cfop = corpo.cfop.trim();
+
+  const repo = c.get('repo');
+  const r = await repo.obterNotaComItens(c.req.param('id'));
+  if (!r) return c.json({ erro: 'nota não encontrada' }, 404);
+  const alvo = new Set(corpo.itens);
+  const linhas = (r.itens as any[]).filter((i) => alvo.has(i.id));
+
+  const fixar = corpo.escopo === 'fornecedor';
+  const acoes: { acao: any; valor: string }[] = [];
+  for (const i of linhas) {
+    const item = {
+      nItem: i.n_item, cProd: i.c_prod, cEAN: i.c_ean, xProd: i.x_prod_original,
+      NCM: i.ncm, CEST: i.cest, CFOP: i.cfop_original, uCom: i.unidade,
+      qCom: i.quantidade, vUnCom: i.valor_unitario, vProd: i.valor_total,
+      cstIcms: null, temIbsCbs: false,
+    };
+    const origem = String(i.cfop_origem ?? '');
+    const sugestao = origem.startsWith('regra:')
+      ? ({ valor: String(i.cfop_novo ?? ''), campo: 'cfop', origem, regraId: origem.slice(6) } as any)
+      : null;
+    for (const acao of aprender({
+      item, emitCnpj: r.nota.emit_cnpj, campo: 'cfop', valorFinal: cfop, sugestao,
+      fixar, apenasNiveis: fixar ? [5] : undefined,
+    })) acoes.push({ acao, valor: String(i.cfop_novo ?? '') });
+  }
+  await repo.aprenderEmLote(r.nota.empresa_id, acoes);
+  const res = await repo.aplicarCfopEmLote(r.nota.id, linhas, cfop, fixar ? 'manual:fixada' : 'manual');
+  return c.json({ ok: true, ...res });
 });
 
 app.post('/api/notas/:id/conferir', async (c) => {
@@ -2289,6 +2358,7 @@ app.get('/api/empresas/:id/xml-corrigidos.zip', async (c) => {
 
   for (const n of notas) {
     const rotulo = `NF ${n.numero} · ${n.emit_nome ?? n.emit_cnpj}`;
+    if (n.cancelada_em) { fora.push(`${rotulo} — cancelada (não entra na escrituração)`); continue; }
     if (Number(n.itens_sem_cfop) > 0) { fora.push(`${rotulo} — ${n.itens_sem_cfop} item(ns) sem CFOP de entrada`); continue; }
     if (Number(n.itens_revisados) < Number(n.total_itens)) {
       fora.push(`${rotulo} — ${n.itens_revisados} de ${n.total_itens} itens conferidos`);
