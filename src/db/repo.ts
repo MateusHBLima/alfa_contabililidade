@@ -257,7 +257,10 @@ export class Repo {
 
     for (let i = 0; i < unicas.length; i += POR_CONSULTA) {
       const fatia = unicas.slice(i, i + POR_CONSULTA);
-      const placeholders = fatia.map(() => '(nivel = ? AND chave = ?)').join(' OR ');
+      // Pares (nivel, chave) como lista de VALUES: o SQLite usa o indice unico de
+      // regras e busca so esses pares. Com "(nivel = ? AND chave = ?) OR ..." ele lia
+      // todas as regras da empresa a cada consulta (medido em 23/09).
+      const placeholders = fatia.map(() => '(?, ?)').join(', ');
       const binds: unknown[] = [this.tenant, empresaId];
       for (const u of fatia) {
         const corte = u.indexOf(' ');
@@ -267,7 +270,7 @@ export class Repo {
       const { results } = await this.db
         .prepare(
           `SELECT * FROM regras
-           WHERE tenant_id = ? AND empresa_id = ? AND ativa = 1 AND (${placeholders})`,
+           WHERE tenant_id = ? AND empresa_id = ? AND ativa = 1 AND (nivel, chave) IN (VALUES ${placeholders})`,
         )
         .bind(...binds)
         .all<any>();
@@ -920,9 +923,12 @@ export class Repo {
                   ROW_NUMBER() OVER (PARTITION BY i.c_prod, TRIM(COALESCE(i.cfop_original, '')) ORDER BY n.dh_emi DESC) AS rn,
                   COUNT(*)   OVER (PARTITION BY i.c_prod, TRIM(COALESCE(i.cfop_original, ''))) AS vezes,
                   AVG(i.valor_unitario) OVER (PARTITION BY i.c_prod, TRIM(COALESCE(i.cfop_original, ''))) AS preco_medio
-           FROM itens i
-           JOIN notas n ON n.id = i.nota_id
-           WHERE i.tenant_id = ? AND n.empresa_id = ? AND n.emit_cnpj = ?
+           -- CROSS JOIN fixa a ordem: primeiro as notas DESTE fornecedor (indice
+           -- idx_notas_empresa_emit), depois os itens delas. Sem isso o SQLite
+           -- partia dos itens do escritorio inteiro - linha lida e linha paga no D1.
+           FROM notas n
+           CROSS JOIN itens i ON i.nota_id = n.id
+           WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.emit_cnpj = ?
              AND i.c_prod IS NOT NULL AND (? IS NULL OR n.id != ?)
          )
          SELECT * FROM hist WHERE rn = 1`,
