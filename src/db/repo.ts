@@ -1126,22 +1126,9 @@ export class Repo {
     const onde: string[] = [];
     const binds: unknown[] = [this.tenant, empresaId];
     if (filtro.texto) {
-      const bruto = filtro.texto.trim();
-      const esc = (v: string) => v.replace(/[\\%_]/g, (c) => '\\' + c);
-      const semAcento = bruto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-      const padrao = `%${esc(semAcento)}%`;
-      // SQLite nao tira acento: a descricao passa por REPLACE das letras acentuadas
-      // (maiusculas e minusculas) antes do UPPER, e a busca vai sem acento. Assim
-      // "energetico" acha "ENERGÉTICO" e "Energético".
-      const semAcentoSql = (col: string) =>
-        ACENTOS.reduce((expr, [de, para]) => `REPLACE(${expr}, '${de}', '${para}')`, `COALESCE(${col}, '')`);
-      const colunas = [
-        `UPPER(${semAcentoSql('i.x_prod_original')})`, `UPPER(${semAcentoSql('i.x_prod_novo')})`,
-        "UPPER(COALESCE(i.c_prod, ''))", "COALESCE(i.c_ean, '')", "COALESCE(i.ncm, '')", "COALESCE(n.numero, '')",
-      ];
-      const ou: string[] = [];
-      for (const c of colunas) { ou.push(`${c} LIKE ? ESCAPE '\\'`); binds.push(padrao); }
-      onde.push(`(${ou.join(' OR ')})`);
+      const f = filtroDeBusca(filtro.texto);
+      onde.push(f.sql);
+      binds.push(...f.binds);
     }
     if (filtro.produto !== undefined) {
       onde.push("UPPER(TRIM(COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original))) = UPPER(TRIM(?))");
@@ -1165,6 +1152,28 @@ export class Repo {
       .bind(...binds, ...r.binds)
       .all<any>();
     return results;
+  }
+
+  /**
+   * A mesma busca nas OUTRAS empresas que a pessoa pode ver, so contando. Quando a
+   * busca volta vazia, a tela diz "achei na empresa X" em vez de um silencio (24/09:
+   * "botei rescaroli e nao puxou").
+   */
+  async buscarEmOutrasEmpresas(empresaAtual: string, texto: string): Promise<{ empresaId: string; razaoSocial: string; itens: number }[]> {
+    const f = filtroDeBusca(texto);
+    const { results } = await this.db
+      .prepare(
+        `SELECT n.empresa_id AS empresa_id, e.razao_social AS razao_social, COUNT(*) AS itens
+           FROM itens i JOIN notas n ON n.id = i.nota_id JOIN empresas e ON e.id = n.empresa_id
+          WHERE n.tenant_id = ? AND n.empresa_id <> ? AND ${f.sql}
+          GROUP BY n.empresa_id, e.razao_social
+          ORDER BY itens DESC`,
+      )
+      .bind(this.tenant, empresaAtual, ...f.binds)
+      .all<any>();
+    return results
+      .filter((r: any) => podeVerEmpresa(this.ctx.sessao, r.empresa_id))
+      .map((r: any) => ({ empresaId: r.empresa_id, razaoSocial: r.razao_social, itens: Number(r.itens) }));
   }
 
   /**
@@ -1443,6 +1452,56 @@ export class Repo {
   get contexto(): ContextoRequisicao {
     return this.ctx;
   }
+}
+
+/**
+ * O WHERE da busca de itens (24/09). Cada palavra digitada tem que aparecer em algum
+ * lugar - "energ lata" acha "ENERGETICO LATA 473ML" -, e cada palavra e procurada em:
+ * descricao do fornecedor e padronizada (sem acento), codigo do produto, EAN, NCM,
+ * numero da nota, NOME e CNPJ do fornecedor, e - se parecer valor ("1.234,56",
+ * "289", "38.40") - no total da nota, no valor do item e no valor contabil.
+ * "%" e "_" digitados sao letra, nao curinga.
+ */
+function filtroDeBusca(texto: string): { sql: string; binds: unknown[] } {
+  const esc = (v: string) => v.replace(/[\\%_]/g, (c) => '\\' + c);
+  const semAcento = (v: string) => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  const semAcentoSql = (col: string) =>
+    ACENTOS.reduce((expr, [de, para]) => `REPLACE(${expr}, '${de}', '${para}')`, `COALESCE(${col}, '')`);
+  const colunas = [
+    `UPPER(${semAcentoSql('i.x_prod_original')})`, `UPPER(${semAcentoSql('i.x_prod_novo')})`,
+    "UPPER(COALESCE(i.c_prod, ''))", "COALESCE(i.c_ean, '')", "COALESCE(i.ncm, '')", "COALESCE(n.numero, '')",
+    `UPPER(${semAcentoSql('n.emit_nome')})`,
+  ];
+  const palavras = texto.trim().split(/\s+/).filter((p) => p && !/^R\$$/i.test(p)).slice(0, 6);
+  const e: string[] = [];
+  const binds: unknown[] = [];
+  for (const p of palavras) {
+    const ou: string[] = [];
+    const padrao = `%${esc(semAcento(p))}%`;
+    for (const c of colunas) { ou.push(`${c} LIKE ? ESCAPE '\\'`); binds.push(padrao); }
+    // CNPJ do fornecedor com ou sem pontuacao (um pedaco de 6+ digitos; valor com virgula nao).
+    const digitos = p.replace(/\D/g, '');
+    if (digitos.length >= 6 && !p.includes(',')) { ou.push("COALESCE(n.emit_cnpj, '') LIKE ?"); binds.push(`%${digitos}%`); }
+    const valor = comoValor(p);
+    if (valor !== null) {
+      ou.push('ROUND(n.valor_total, 2) = ?', 'ROUND(i.valor_total, 2) = ?', 'ROUND(COALESCE(i.valor_contabil, -1), 2) = ?');
+      binds.push(valor, valor, valor);
+    }
+    e.push(`(${ou.join(' OR ')})`);
+  }
+  return { sql: e.length ? `(${e.join(' AND ')})` : '1', binds };
+}
+
+/** "1.234,56" / "1234,56" / "1234.56" / "289" -> numero; o resto -> null. */
+export function comoValor(p: string): number | null {
+  const t = p.trim().replace(/^R\$/i, '');
+  if (!/^\d[\d.,]*$/.test(t)) return null;
+  let n: string;
+  if (t.includes(',')) n = t.replace(/\./g, '').replace(',', '.');
+  else if (/^\d{1,3}(\.\d{3})+$/.test(t)) n = t.replace(/\./g, '');
+  else n = t;
+  const v = Number(n);
+  return Number.isFinite(v) ? Math.round(v * 100) / 100 : null;
 }
 
 /** Letras acentuadas -> sem acento, para a busca de produto (o SQLite nao sabe fazer). */
