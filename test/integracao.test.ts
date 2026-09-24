@@ -2913,6 +2913,52 @@ describe('23/09: achar o que foi tratado errado, e XML de outra empresa é recus
     expect((await req(`/api/empresas/${empresaId}/busca-itens?q=e`)).status).toBe(400);
   });
 
+  it('24/09: acha pelo nome do fornecedor, pelo CNPJ, pelo valor e por pedaços soltos', async () => {
+    const n1 = (await subir(empresaId, outraNota(XML, '91'))).arquivos?.[0];
+    await subir(empresaId, outraNota(XML, '92', [['<nNF>504792</nNF>', '<nNF>504792</nNF>']]));
+    void n1;
+    const busca = async (q: string) => (await json(`/api/empresas/${empresaId}/busca-itens?q=${encodeURIComponent(q)}`)) as any;
+    // Nome do fornecedor, inteiro ou pedaço, com ou sem acento/maiúscula: todos os itens das duas notas.
+    for (const q of ['angeloni', 'ANGEL', 'Angeloni cia']) expect((await busca(q)).itens, q).toHaveLength(6);
+    // CNPJ do fornecedor com ou sem pontuação.
+    expect((await busca('83646984003044')).itens).toHaveLength(6);
+    expect((await busca('83.646.984/0030-44')).itens).toHaveLength(6);
+    // Valor da nota (289,00) em vários jeitos de digitar: os itens das duas notas.
+    for (const q of ['289', '289,00', 'R$ 289,00', 'R$289,00', '289.00']) expect((await busca(q)).itens, q).toHaveLength(6);
+    // Valor do item.
+    const v = await busca('38,40');
+    expect(v.itens).toHaveLength(2);
+    expect(v.itens.every((i: any) => i.n_item === 3)).toBe(true);
+    // Valor com milhar, só numa nota.
+    db.consultar(`UPDATE notas SET valor_total = 1234.56 WHERE chave LIKE '%92'`);
+    for (const q of ['1.234,56', '1234,56']) {
+      const r = await busca(q);
+      expect(r.itens, q).toHaveLength(3);
+      expect(r.itens.every((i: any) => i.numero === '504792'), q).toBe(true);
+    }
+    // Palavras soltas: todas precisam bater (em qualquer coluna).
+    expect((await busca('refrig angeloni')).itens).toHaveLength(2);
+    expect((await busca('refrig 504792')).itens).toHaveLength(1);
+    expect((await busca('refrig rescaroli')).itens).toHaveLength(0);
+    // Seis palavras não estouram o limite de parâmetros do D1.
+    expect((await req(`/api/empresas/${empresaId}/busca-itens?q=${encodeURIComponent('1.234,56 83646984 angeloni refrig 289 cia')}`)).status).toBe(200);
+  });
+
+  it('24/09: nada na empresa escolhida → diz em qual outra empresa tem', async () => {
+    const sailor = await criar('51714504000104', 'THE SAILOR LTDA');
+    const daSailor = outraNota(XML, '93', [['<dest><CNPJ>11222333000181</CNPJ>', '<dest><CNPJ>51714504000104</CNPJ>']]);
+    expect((await subir(sailor, daSailor)).importadas).toBe(1);
+    const r = await json(`/api/empresas/${empresaId}/busca-itens?q=refrig`);
+    expect(r.itens).toHaveLength(0);
+    expect(r.outras).toEqual([{ empresaId: sailor, razaoSocial: 'THE SAILOR LTDA', itens: 1 }]);
+    // Achou aqui: não procura nas outras.
+    const aqui = await json(`/api/empresas/${sailor}/busca-itens?q=refrig`);
+    expect(aqui.itens).toHaveLength(1);
+    expect(aqui.outras).toEqual([]);
+    // Nem aqui nem lá.
+    expect((await json(`/api/empresas/${empresaId}/busca-itens?q=rescaroli`)).outras).toEqual([]);
+  });
+
   it('relatório por produto: clicar no produto lista as notas dele', async () => {
     await subir(empresaId, outraNota(XML, '83'));
     await subir(empresaId, outraNota(XML, '84'));
