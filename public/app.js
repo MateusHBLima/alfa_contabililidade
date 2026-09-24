@@ -1865,7 +1865,17 @@ $('#form-busca-itens')?.addEventListener('submit', async (ev) => {
   try {
     const r = await api(`/api/empresas/${estado.empresaId}/busca-itens?q=${encodeURIComponent(q)}`);
     const mais = r.itens.length >= r.limite ? ` (mostrando os ${r.limite} mais recentes — refine a busca)` : '';
-    caixa.innerHTML = tabelaDeItensAchados(r.itens, `${r.itens.length} item(ns) com “${esc(q)}”${mais}`);
+    const empresa = estado.empresas.find((e) => e.id === estado.empresaId)?.razao_social ?? 'esta empresa';
+    if (r.itens.length === 0) {
+      // Vazio nao pode ser silencio: diz onde procurou e, se achou em outra empresa, onde.
+      caixa.innerHTML = `<div class="vazio"><b>Nada com “${esc(q)}” em ${esc(empresa)}.</b>
+        ${(r.outras ?? []).length
+          ? `<div style="margin-top:8px">Encontrei em: ${r.outras.map((o) =>
+              `<button class="btn sm" type="button" data-busca-empresa="${esc(o.empresaId)}">${esc(o.razaoSocial)} (${o.itens})</button>`).join(' ')}</div>`
+          : '<div class="tiny" style="margin-top:6px">Dica: digite só um pedaço (ex.: “energ”), o fornecedor ou o valor.</div>'}</div>`;
+      return;
+    }
+    caixa.innerHTML = tabelaDeItensAchados(r.itens, `${r.itens.length} item(ns) com “${esc(q)}” em ${esc(empresa)}${mais}`);
   } catch (e) {
     caixa.innerHTML = `<div class="vazio">Não consegui procurar: ${esc(e.message)}</div>`;
   }
@@ -1896,7 +1906,14 @@ $('#btn-ultimas')?.addEventListener('click', async () => {
   }
 });
 
-document.addEventListener('click', (ev) => {
+document.addEventListener('click', async (ev) => {
+  const outra = ev.target.closest('[data-busca-empresa]');
+  if (outra) {
+    // Troca a empresa lá em cima e refaz a mesma busca nela.
+    $('#sel-empresa').value = outra.dataset.buscaEmpresa;
+    await trocarEmpresa(outra.dataset.buscaEmpresa);
+    return $('#form-busca-itens').requestSubmit();
+  }
   const ab = ev.target.closest('[data-abrir-item]');
   if (ab) return abrirNota(ab.dataset.abrirItem, ab.dataset.item);
   if (ev.target.closest('[data-fechar-busca]')) {
