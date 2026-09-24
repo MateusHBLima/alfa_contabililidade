@@ -1711,10 +1711,13 @@ app.get('/api/empresas/:id/busca-itens', async (c) => {
   if (competencia && !/^\d{4}(-\d{2})?$/.test(competencia)) return c.json({ erro: 'competência inválida' }, 400);
   if (produto === undefined && texto.length < 2) return c.json({ erro: 'digite pelo menos 2 letras' }, 400);
   if (texto.length > 80) return c.json({ erro: 'busca longa demais' }, 400);
-  const itens = await c.get('repo').buscarItens(c.req.param('id'), {
+  const repo = c.get('repo');
+  const itens = await repo.buscarItens(c.req.param('id'), {
     texto: texto || undefined, produto, unidade: c.req.query('unidade') ?? '', competencia,
   });
-  return c.json({ itens, limite: 200 });
+  // Nada aqui: diz se existe em outra empresa (a busca e por empresa selecionada).
+  const outras = itens.length === 0 && texto ? await repo.buscarEmOutrasEmpresas(c.req.param('id'), texto) : [];
+  return c.json({ itens, limite: 200, outras });
 });
 
 /** O que mudou por último nos itens (trilha). Mesma permissão do "como estava". */
