@@ -70,6 +70,10 @@ export type ItemOriginal = {
   vICMS: number | null;
   vICMSST: number | null;
   vIPI: number | null;
+  /** Base, alíquota do ICMS e alíquota do IPI do item: para o DANFE (e, depois, a antecipação). */
+  vBC?: number | null;
+  pICMS?: number | null;
+  pIPI?: number | null;
   infAdProd: string | null;
 };
 
@@ -166,12 +170,15 @@ export function lerNotaOriginal(xml: string): NotaOriginal {
       vICMS: num(doGrupo(imp['ICMS'], 'vICMS')),
       vICMSST: num(doGrupo(imp['ICMS'], 'vICMSST')),
       vIPI: num(doGrupo(imp['IPI'], 'vIPI')),
+      vBC: num(doGrupo(imp['ICMS'], 'vBC')),
+      pICMS: num(doGrupo(imp['ICMS'], 'pICMS')),
+      pIPI: num(doGrupo(imp['IPI'], 'pIPI')),
       infAdProd: txt(det['infAdProd']),
     };
   });
 
   const totais: Record<string, number | null> = {};
-  for (const k of ['vProd', 'vDesc', 'vFrete', 'vSeg', 'vOutro', 'vBC', 'vICMS', 'vST', 'vFCPST', 'vIPI', 'vPIS', 'vCOFINS', 'vNF']) {
+  for (const k of ['vProd', 'vDesc', 'vFrete', 'vSeg', 'vOutro', 'vBC', 'vICMS', 'vBCST', 'vST', 'vFCPST', 'vIPI', 'vPIS', 'vCOFINS', 'vNF']) {
     totais[k] = num(tot[k]);
   }
 

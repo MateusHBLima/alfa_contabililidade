@@ -396,7 +396,7 @@ describe('tela: 23/09 — achar o que foi tratado errado', () => {
     expect(APP).toContain('/ultimas-alteracoes');
   });
   it('"Abrir" leva à linha do produto, sem filtro escondendo ela', () => {
-    expect(APP).toMatch(/async function abrirNota\(id, itemId = null\)/);
+    expect(APP).toMatch(/async function abrirNota\(id, itemId = null, voltar = null\)/);
     expect(APP).toContain('data-linha="${esc(i.id)}"');
     expect(APP).toContain("estado.filtro = 'todos'");
   });
@@ -405,3 +405,35 @@ describe('tela: 23/09 — achar o que foi tratado errado', () => {
     expect(APP).toMatch(/function abrirNotasDoProduto/);
   });
 });
+
+describe('tela: reunião 25/09', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('menu: Empresas primeiro, Relatórios dentro da Escrituração, Administração por último', () => {
+    const ordem = [...HTML.matchAll(/data-view="(\w+)"/g)].map((m) => m[1]);
+    expect(ordem.slice(0, 5)).toEqual(['vEmpresas', 'v1', 'v2', 'v3', 'vRelatorios']);
+    expect(ordem.slice(-2)).toEqual(['vUsuarios', 'vPapeis']);
+    expect(HTML.match(/class="nav-grupo/g)).toHaveLength(4);
+  });
+  it('trocar de empresa pede OK e a empresa aberta aparece grande', () => {
+    expect(HTML).toContain('id="btn-empresa-ok"');
+    expect(HTML).toContain('id="empresa-atual"');
+    expect(APP).not.toContain("$('#sel-empresa').addEventListener('change', (e) => trocarEmpresa(");
+    expect(APP).toContain("$('#sel-empresa').addEventListener('change', marcarTrocaPendente)");
+  });
+  it('nota aberta pelo relatório volta para o relatório', () => {
+    expect(APP).toMatch(/function voltarAoRelatorio/);
+    expect(APP).toContain("estado.voltar ? voltarAoRelatorio() : irPara('v1')");
+    expect(APP).toContain("if (view === 'vRelatorios') return abrirRelatorios();");
+  });
+  it('PDF da nota e CFOPs de fora do estado', () => {
+    expect(HTML).toContain('id="orig-pdf"');
+    expect(HTML).toContain('id="btn-pdf-nota"');
+    expect(APP).toContain('/danfe`');
+    for (const c of ['2407', '2202', '2551']) expect(APP).toContain(`['${c}',`);
+  });
+  it('empresa tem regime e responsáveis', () => {
+    expect(APP).toContain('id="e-regime"');
+    expect(APP).toContain('/responsaveis`');
+  });
+});
+

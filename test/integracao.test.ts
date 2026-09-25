@@ -3884,3 +3884,104 @@ describe('relatório no formato do livro de entradas: valor contábil, ICMS e an
     expect((await req(`/api/empresas/${empresaId}/relatorios/analitico?competencia=2026-08&cfop=x1'`)).status).toBe(400);
   });
 });
+
+describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  let ck = '';
+  const req = (c: string, o: RequestInit = {}) =>
+    app.fetch(new Request(`http://x${c}`, {
+      ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+    }), ambiente());
+  const json = async (c: string, o: RequestInit = {}) => (await req(c, o)).json() as Promise<any>;
+  const subir = async (empresaId: string, xml: string) => {
+    const fd = new FormData();
+    fd.append('arquivos', new File([xml], 'n.xml', { type: 'text/xml' }));
+    const r = await app.fetch(new Request(`http://x/api/empresas/${empresaId}/importar`, { method: 'POST', body: fd, headers: { Cookie: ck } }), ambiente());
+    return (await r.json()) as any;
+  };
+  let empresaId = '';
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    empresaId = (await json('/api/empresas', {
+      method: 'POST', body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'ITALIANA', uf: 'SC', perfil: 'revenda', regime: 'simples' }),
+    })).id;
+  });
+
+  it('PDF da nota: DANFE do XML original, com chave, código de barras e itens do fornecedor', async () => {
+    await subir(empresaId, XML);
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    // Trata um item: o DANFE continua mostrando o que o fornecedor emitiu.
+    const itens = (await json(`/api/notas/${nota}`)).itens;
+    await req(`/api/itens/${itens[0].id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1556' }, { campo: 'descricao', valor: 'NOME TRATADO' }] }) });
+    const r = await req(`/api/notas/${nota}/danfe`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toContain('text/html');
+    const html = await r.text();
+    expect(html).toContain('DANFE');
+    expect(html).toContain(CHAVE_ORIGINAL.replace(/(\d{4})(?=\d)/g, '$1 '));
+    expect(html).toContain('<svg');
+    expect(html).toContain('A. ANGELONI &amp; CIA LTDA');
+    expect(html).toContain('<title>NF-e 504767 - A. ANGELONI &amp; CIA LTDA</title>');
+    expect(html).toContain('289,00');
+    expect(html).not.toContain('NOME TRATADO');
+    expect(html).not.toContain('1556');
+    expect(html).not.toContain('NOTA CANCELADA');
+    // Cancelada no sistema: sai com o carimbo.
+    await req(`/api/notas/${nota}/cancelada`, { method: 'POST', body: JSON.stringify({ cancelada: true, motivo: 'teste' }) });
+    expect(await (await req(`/api/notas/${nota}/danfe`)).text()).toContain('NOTA CANCELADA');
+    // Sem login, não abre.
+    const semLogin = await app.fetch(new Request(`http://x/api/notas/${nota}/danfe`), ambiente());
+    expect(semLogin.status).toBe(401);
+  });
+
+  it('regime: grava no cadastro e na edição, e aparece na lista', async () => {
+    let e = (await json('/api/empresas')).find((x: any) => x.id === empresaId);
+    expect(e.regime).toBe('simples');
+    await req(`/api/empresas/${empresaId}`, { method: 'PATCH', body: JSON.stringify({ regime: 'presumido' }) });
+    e = (await json('/api/empresas')).find((x: any) => x.id === empresaId);
+    expect(e.regime).toBe('presumido');
+  });
+
+  it('responsáveis: mais de uma pessoa por empresa, quem vê tudo vem travado', async () => {
+    for (const [id, nome] of [['u2', 'Auxiliar'], ['u3', 'Analista']]) {
+      await db.prepare('INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, criado_em) VALUES (?,?,?,?,?,?)')
+        .bind(id, 'alfa', `${id}@alfacontabil.net`, nome, 'x', new Date().toISOString()).run();
+      await db.prepare('INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES (?,?)').bind(id, 'papel-operador').run();
+    }
+    await db.prepare('INSERT INTO sessoes (id, usuario_id, criada_em, expira_em, revogada) VALUES (?,?,?,?,0)')
+      .bind('s-u2', 'u2', new Date().toISOString(), new Date(Date.now() + 3600e3).toISOString()).run().catch(() => undefined);
+    let r = await json(`/api/empresas/${empresaId}/responsaveis`);
+    const por = (id: string) => r.usuarios.find((u: any) => u.id === id);
+    expect(por('u1')).toMatchObject({ todas: true });
+    expect(por('u2')).toMatchObject({ vinculado: false, todas: false });
+
+    expect((await json(`/api/empresas/${empresaId}/responsaveis`, { method: 'PUT', body: JSON.stringify({ usuarios: ['u2', 'u3'] }) })).mudou).toBe(2);
+    r = await json(`/api/empresas/${empresaId}/responsaveis`);
+    expect(por('u2').vinculado && por('u3').vinculado).toBe(true);
+    // O mesmo vínculo da tela de usuário.
+    expect((await json('/api/usuarios/u2')).empresas).toEqual([empresaId]);
+    // Tirar um não mexe no outro, e fica na trilha.
+    await req(`/api/empresas/${empresaId}/responsaveis`, { method: 'PUT', body: JSON.stringify({ usuarios: ['u3'] }) });
+    expect(db.consultar(`SELECT usuario_id FROM usuario_empresas WHERE empresa_id = '${empresaId}'`)).toEqual([{ usuario_id: 'u3' }]);
+    expect(db.consultar(`SELECT campo FROM auditoria WHERE entidade = 'empresa' AND campo = 'responsaveis'`)).toHaveLength(2);
+    // Usuário de fora do escritório não entra.
+    expect((await req(`/api/empresas/${empresaId}/responsaveis`, { method: 'PUT', body: JSON.stringify({ usuarios: ['zzz'] }) })).status).toBe(404);
+    // Sem permissão de editar usuários, não altera.
+    db.consultar(`DELETE FROM papel_permissoes WHERE papel_id = 'papel-admin' AND permissao = 'usuarios.editar'`);
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    expect((await req(`/api/empresas/${empresaId}/responsaveis`, { method: 'PUT', body: JSON.stringify({ usuarios: [] }) })).status).toBe(403);
+  });
+});
+

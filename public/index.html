@@ -143,28 +143,43 @@
       <small>NF-e de entrada</small>
     </div>
     <nav id="nav">
-      <div class="navlabel">Escrituração</div>
-      <button data-view="v1" class="active">
-        <span class="num">1</span>
-        <span>Notas recebidas<span class="sub">importar e acompanhar</span></span>
-      </button>
-      <button data-view="v2">
-        <span class="num">2</span>
-        <span>Tratamento<span class="sub">CFOP e descrição por item</span></span>
-      </button>
-      <button data-view="v3">
-        <span class="num">3</span>
-        <span>XML corrigido<span class="sub">conferir e exportar</span></span>
-      </button>
-      <div class="navlabel">Cadastro geral</div>
-      <button data-view="vEmpresas"><span class="num">E</span><span>Empresas<span class="sub">todos os clientes</span></span></button>
-      <div class="navlabel">Da empresa selecionada</div>
-      <button data-view="vFornecedores"><span class="num">F</span><span>Fornecedores<span class="sub">só desta empresa</span></span></button>
-      <button data-view="vRegras"><span class="num">R</span><span>Padrões aprendidos<span class="sub">só desta empresa</span></span></button>
-      <button data-view="vRelatorios"><span class="num">📊</span><span>Relatórios<span class="sub">por CFOP e por produto</span></span></button>
-      <div class="navlabel">Administração</div>
-      <button data-view="vUsuarios"><span class="num">U</span><span>Usuários<span class="sub">quem entra e o que pode</span></span></button>
-      <button data-view="vPapeis"><span class="num">P</span><span>Papéis<span class="sub">conjuntos de permissões</span></span></button>
+      <!-- Ordem de trabalho da Taís (25/09): primeiro escolhe/cadastra a empresa,
+           depois a escrituração inteira (com os relatórios dela), e a
+           administração, que só ela usa, lá embaixo. Blocos separados por
+           linha e em tons do mesmo azul, sem cor de alerta. -->
+      <div class="nav-grupo g-cadastro">
+        <div class="navlabel">Cadastro geral</div>
+        <button data-view="vEmpresas"><span class="num">E</span><span>Empresas<span class="sub">todos os clientes</span></span></button>
+      </div>
+      <div class="nav-grupo g-escrituracao">
+        <div class="navlabel">Escrituração</div>
+        <button data-view="v1" class="active">
+          <span class="num">1</span>
+          <span>Notas recebidas<span class="sub">importar e acompanhar</span></span>
+        </button>
+        <button data-view="v2">
+          <span class="num">2</span>
+          <span>Tratamento<span class="sub">CFOP e descrição por item</span></span>
+        </button>
+        <button data-view="v3">
+          <span class="num">3</span>
+          <span>XML corrigido<span class="sub">conferir e exportar</span></span>
+        </button>
+        <button data-view="vRelatorios">
+          <span class="num">4</span>
+          <span>Relatórios<span class="sub">por CFOP e por produto</span></span>
+        </button>
+      </div>
+      <div class="nav-grupo g-empresa">
+        <div class="navlabel">Da empresa selecionada</div>
+        <button data-view="vFornecedores"><span class="num">F</span><span>Fornecedores<span class="sub">só desta empresa</span></span></button>
+        <button data-view="vRegras"><span class="num">R</span><span>Padrões aprendidos<span class="sub">só desta empresa</span></span></button>
+      </div>
+      <div class="nav-grupo g-admin">
+        <div class="navlabel">Administração</div>
+        <button data-view="vUsuarios"><span class="num">U</span><span>Usuários<span class="sub">quem entra e o que pode</span></span></button>
+        <button data-view="vPapeis"><span class="num">P</span><span>Papéis<span class="sub">conjuntos de permissões</span></span></button>
+      </div>
     </nav>
     <div class="side-foot">
       <span id="rodape-ambiente">—</span><br>
@@ -180,7 +195,11 @@
     <div class="topbar">
       <div>
         <label class="fl" for="sel-empresa">Empresa</label>
-        <select id="sel-empresa" style="min-width:280px"></select>
+        <div class="troca-empresa">
+          <select id="sel-empresa" style="min-width:280px"></select>
+          <button type="button" id="btn-empresa-ok" class="btn primary hidden">OK</button>
+        </div>
+        <div id="troca-pendente" class="tiny hidden"></div>
       </div>
       <div>
         <label class="fl" for="sel-ano">Ano</label>
@@ -192,6 +211,10 @@
       </div>
       <div class="who"><b id="usuario-nome">—</b><span id="usuario-email"></span></div>
     </div>
+
+    <!-- Em qual empresa estou (25/09): grande, sempre visível. Trocar só vale
+         depois do OK, para ninguém trabalhar na empresa errada sem perceber. -->
+    <div id="empresa-atual" class="empresa-atual hidden"></div>
 
     <div class="content">
 
@@ -274,6 +297,7 @@
               <button class="btn sm" id="btn-voltar-notas">← Notas</button>
               <button class="btn sm sutil hidden" id="btn-cancelada" title="Nota cancelada na SEFAZ: fica na lista com a chave, mas vale zero">⊘ Marcar como cancelada</button>
               <button class="btn sm" id="btn-ver-original" title="A nota como o fornecedor emitiu, lado a lado com o que o sistema leu">📄 Nota original</button>
+              <button class="btn sm" id="btn-pdf-nota" title="A nota como o fornecedor emitiu (DANFE), para salvar em PDF e mandar ao cliente">⇩ PDF</button>
               <button class="btn sm primary" id="btn-ver-xml">Ver XML corrigido →</button>
             </div>
           </header>
@@ -399,6 +423,7 @@
             <button data-modo="xml">XML do fornecedor</button>
           </div>
           <button class="btn sm" id="orig-baixar">⇩ Baixar XML original</button>
+          <button class="btn sm" id="orig-pdf" title="A nota como o fornecedor emitiu (DANFE), para salvar em PDF e mandar ao cliente">⇩ Baixar PDF da nota</button>
         </div>
         <div id="orig-corpo"></div>
         <div id="orig-xml" class="card hidden"><header><h2>XML original</h2><span class="hint">exatamente o arquivo guardado · em destaque, os campos que o sistema lê</span></header>
@@ -415,7 +440,7 @@
           </header>
           <div class="body tight">
             <div class="scroll"><table id="tbl-empresas">
-              <thead><tr><th>CNPJ</th><th>Razão social</th><th>UF</th><th>Perfil</th><th>CNAE</th><th></th></tr></thead>
+              <thead><tr><th>CNPJ</th><th>Razão social</th><th>UF</th><th>Perfil</th><th>Regime</th><th>CNAE</th><th></th></tr></thead>
               <tbody></tbody>
             </table></div>
           </div>
@@ -452,6 +477,7 @@
             <div class="sep"></div>
             <button class="btn sm primary" id="rel-baixar" title="O relatório que está na tela">⇩ Baixar planilha</button>
             <button class="btn sm" id="rel-baixar-analitico" title="Um item por linha, com a nota, o CFOP e os impostos — para filtrar e bater no Excel">⇩ Planilha analítica (item a item)</button>
+            <button class="btn sm sutil" id="rel-limpar-vistas" title="Tira as marcas de nota já aberta desta competência">Limpar marcas “aberta”</button>
           </div>
           <div id="rel-aviso" class="placar sutil hidden" style="margin:0 14px 8px"></div>
           <div class="body tight">
