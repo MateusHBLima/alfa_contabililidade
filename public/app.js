@@ -460,6 +460,17 @@ function nomeEmpresaAtual() {
 
 function marcarEscopo() {
   const nome = nomeEmpresaAtual();
+  const faixa = $('#empresa-atual');
+  const emp = (estado.empresas || []).find((x) => x.id === estado.empresaId);
+  if (faixa) {
+    faixa.classList.toggle('hidden', !emp);
+    faixa.innerHTML = emp
+      ? `<span class="rotulo">Empresa aberta</span><span class="nome">${esc(emp.razao_social)}</span><span class="cnpj">CNPJ ${esc(String(emp.cnpj).replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5'))}</span>`
+      : '';
+  }
+  if ($('#sel-empresa') && estado.empresaId && $('#sel-empresa').value !== estado.empresaId && !$('#sel-empresa').classList.contains('pendente')) {
+    $('#sel-empresa').value = estado.empresaId;
+  }
   for (const id of ['#escopo-fornecedores', '#escopo-regras', '#escopo-relatorios', '#escopo-xml']) {
     const el = $(id);
     if (el) el.textContent = nome ? `de ${nome}` : 'nenhuma empresa selecionada';
@@ -509,12 +520,30 @@ function irPara(view) {
   if (view === 'vFornecedores') carregarFornecedores();
   if (view === 'vRegras') carregarRegras();
   if (view === 'v3') abrirXmlCorrigido();
-  if (view === 'vRelatorios') abrirRelatorios();
+  if (view === 'vRelatorios') return abrirRelatorios();
   if (view === 'vUsuarios') carregarUsuarios();
   if (view === 'vPapeis') carregarPapeis();
 }
 
-$('#sel-empresa').addEventListener('change', (e) => trocarEmpresa(e.target.value));
+/* Trocar de empresa pede OK (reunião 25/09). Escolher no seletor sozinho
+   não troca: o botão OK aparece e a faixa de cima continua dizendo em qual
+   empresa ela está até confirmar. */
+function marcarTrocaPendente() {
+  const sel = $('#sel-empresa');
+  const pendente = !!sel.value && sel.value !== estado.empresaId;
+  sel.classList.toggle('pendente', pendente);
+  $('#btn-empresa-ok').classList.toggle('hidden', !pendente);
+  const aviso = $('#troca-pendente');
+  aviso.classList.toggle('hidden', !pendente);
+  if (pendente) aviso.textContent = `Ainda em ${nomeEmpresaAtual() ?? '—'}. Clique OK para trocar.`;
+}
+
+$('#sel-empresa').addEventListener('change', marcarTrocaPendente);
+$('#btn-empresa-ok').addEventListener('click', async () => {
+  const id = $('#sel-empresa').value;
+  if (id && id !== estado.empresaId) await trocarEmpresa(id);
+  marcarTrocaPendente();
+});
 
 async function trocarEmpresa(empresaId) {
   estado.empresaId = empresaId;
@@ -535,6 +564,7 @@ async function trocarEmpresa(empresaId) {
   if (aberta === 'v3') await abrirXmlCorrigido();
   await carregarNotas();
   gravarEndereco();
+  marcarTrocaPendente();
 }
 
 /**
@@ -1017,7 +1047,7 @@ function apagarNota(id) {
 
 // ------------------------------------------------------------------ ambiente 2
 
-$('#btn-voltar-notas').addEventListener('click', () => irPara('v1'));
+$('#btn-voltar-notas').addEventListener('click', () => (estado.voltar ? voltarAoRelatorio() : irPara('v1')));
 $('#btn-ver-xml').addEventListener('click', () => irPara('v3'));
 
 // ------------------------------------------------------------------ nota original
@@ -1029,6 +1059,14 @@ $('#btn-ver-xml').addEventListener('click', () => irPara('v3'));
 
 $('#btn-ver-original').addEventListener('click', () => abrirOriginal());
 $('#orig-voltar').addEventListener('click', () => irPara('v2'));
+// PDF da nota para o cliente (25/09): abre o DANFE numa aba já pronta para
+// "Salvar como PDF". É a nota do fornecedor, sem nada do tratamento.
+function abrirPdfDaNota() {
+  if (!estado.notaAberta) return alerta('Abra uma nota primeiro.');
+  window.open(`/api/notas/${estado.notaAberta.nota.id}/danfe`, '_blank', 'noopener');
+}
+$('#orig-pdf').addEventListener('click', abrirPdfDaNota);
+$('#btn-pdf-nota').addEventListener('click', abrirPdfDaNota);
 $('#orig-baixar').addEventListener('click', () => {
   if (estado.notaAberta) baixar(`/api/notas/${estado.notaAberta.nota.id}/original?formato=xml`);
 });
@@ -1180,8 +1218,12 @@ $$('#filtros button').forEach((b) => b.addEventListener('click', () => {
   renderItens();
 }));
 
-async function abrirNota(id, itemId = null) {
+async function abrirNota(id, itemId = null, voltar = null) {
   estado.notaAberta = await api(`/api/notas/${id}`);
+  // De onde ela veio decide para onde o "voltar" leva (25/09: abria a nota pelo
+  // relatório, mexia, e o voltar caía na lista de notas - perdia onde estava).
+  estado.voltar = voltar;
+  $('#btn-voltar-notas').textContent = voltar ? '← Relatório' : '← Notas';
   if (itemId) {
     // Veio de uma busca: a linha procurada tem que estar visivel, entao sem filtro.
     estado.filtro = 'todos';
@@ -1214,6 +1256,9 @@ const CFOPS = [
   ['2101', 'Compra para industrialização — outro estado'],
   ['2556', 'Compra de uso e consumo — outro estado'],
   ['2403', 'Compra para revenda com ST — outro estado'],
+  ['2407', 'Compra de material de uso e consumo — ST — outro estado'],
+  ['2551', 'Compra de bem para o ativo imobilizado — outro estado'],
+  ['2202', 'Devolução de venda — outro estado'],
   ['2949', 'Outra entrada não especificada — outro estado'],
 ];
 
@@ -2171,6 +2216,7 @@ function renderEmpresas() {
     <td><button class="link-tabela" data-abrir-empresa="${esc(e.id)}">${esc(e.razao_social)}</button></td>
     <td>${esc(e.uf ?? '—')}</td>
     <td><span class="tag info">${esc(e.perfil)}</span></td>
+    <td class="tiny">${e.regime ? esc(nomeRegime(e.regime)) : '<span class="porque">não informado</span>'}</td>
     <td class="mono tiny">${esc(e.cnae_principal ?? '—')}</td>
     <td class="acoes">
       ${pode('empresas.editar')
@@ -2178,7 +2224,7 @@ function renderEmpresas() {
       ${pode('empresas.apagar')
         ? `<button class="btn sm perigo" data-apagar-empresa="${esc(e.id)}">Apagar</button>` : ''}
     </td>
-  </tr>`).join('') || '<tr><td colspan="6" class="vazio">Nenhuma empresa cadastrada.</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="7" class="vazio">Nenhuma empresa cadastrada.</td></tr>';
 
   $$('#tbl-empresas button[data-apagar-empresa]').forEach((b) =>
     b.addEventListener('click', () => apagarEmpresa(b.dataset.apagarEmpresa)));
@@ -2223,6 +2269,42 @@ $('#btn-nova-empresa').addEventListener('click', () => formularioEmpresa(null));
  * com notas e regras junto, para cadastrar de novo. E as permissões
  * `empresas.editar` e `empresas.desativar` existiam sem caminho na tela.
  */
+/* Regime tributário da empresa (reunião 25/09): as regras de zerar e a
+   antecipação dependem dele. */
+const REGIMES = [['', 'não informado'], ['simples', 'Simples Nacional'], ['presumido', 'Lucro Presumido'], ['real', 'Lucro Real']];
+const nomeRegime = (v) => (REGIMES.find(([k]) => k === (v ?? '')) ?? REGIMES[0])[1];
+
+// Responsáveis: na empresa nova, quem cadastra já vem marcado; nas outras, o que está gravado.
+let responsaveisOriginais = null;
+async function carregarResponsaveis(empresaId) {
+  const caixa = $('#e-responsaveis');
+  if (!caixa) return;
+  let r;
+  try {
+    r = empresaId
+      ? await api(`/api/empresas/${empresaId}/responsaveis`)
+      : { usuarios: (await api('/api/usuarios')).map((u) => ({ ...u, vinculado: false, todas: false })) };
+  } catch (e) {
+    caixa.innerHTML = `<span class="tiny">não consegui carregar: ${esc(e.message)}</span>`;
+    return;
+  }
+  const podeMexer = pode('usuarios.editar');
+  const lista = r.usuarios.filter((u) => u.ativo && !u.pendente);
+  responsaveisOriginais = new Set(lista.filter((u) => u.vinculado).map((u) => u.id));
+  caixa.innerHTML = lista.map((u) => `<label class="resp-item${u.todas ? ' todas' : ''}">
+      <input type="checkbox" data-resp="${esc(u.id)}" ${u.vinculado || u.todas ? 'checked' : ''} ${u.todas || !podeMexer ? 'disabled' : ''}>
+      <span>${esc(u.nome)} <span class="tiny">${esc(u.email)}${u.todas ? ' · vê todos os clientes' : ''}</span></span>
+    </label>`).join('') || '<span class="tiny">Nenhum usuário ativo.</span>';
+}
+
+async function salvarResponsaveis(empresaId) {
+  if (!empresaId || !$('#e-responsaveis') || !pode('usuarios.editar') || !responsaveisOriginais) return;
+  const marcados = $$('#e-responsaveis input[data-resp]:not(:disabled)').filter((i) => i.checked).map((i) => i.dataset.resp);
+  const iguais = marcados.length === responsaveisOriginais.size && marcados.every((id) => responsaveisOriginais.has(id));
+  if (iguais) return;
+  await api(`/api/empresas/${empresaId}/responsaveis`, { method: 'PUT', body: JSON.stringify({ usuarios: marcados }) });
+}
+
 function formularioEmpresa(empresa) {
   const novo = !empresa;
   abrirModal(novo ? 'Nova empresa' : `Cliente: ${empresa.razao_social}`, `
@@ -2249,6 +2331,13 @@ function formularioEmpresa(empresa) {
       </select></div>
     <p class="tiny" style="margin-top:10px">O perfil define o CFOP sugerido enquanto o produto
       não tem padrão próprio. A partir da primeira nota tratada, o aprendizado passa por cima disso.</p>
+    <div style="margin-top:11px"><label class="fl">Regime tributário</label>
+      <select id="e-regime" style="width:100%">
+        ${REGIMES.map(([v, r]) => `<option value="${v}" ${(empresa?.regime ?? '') === v ? 'selected' : ''}>${r}</option>`).join('')}
+      </select></div>
+    ${pode('usuarios.visualizar') ? `<div style="margin-top:13px"><label class="fl">Responsáveis por esta empresa</label>
+      <div id="e-responsaveis" class="resp-lista"><span class="tiny">carregando…</span></div>
+      <p class="tiny" style="margin-top:4px">Pode marcar mais de uma pessoa. Quem vê todos os clientes aparece marcado de qualquer jeito.</p></div>` : ''}
   `, async () => {
     const cnpj = $('#e-cnpj').value.replace(/\D/g, '');
     if (novo && cnpj.length !== 14) throw new Error('CNPJ precisa ter 14 dígitos');
@@ -2262,9 +2351,10 @@ function formularioEmpresa(empresa) {
           razaoSocial: $('#e-razao').value.trim(),
           uf: $('#e-uf').value.toUpperCase() || null,
           perfil: $('#e-perfil').value,
+          regime: $('#e-regime').value || null,
           cnaePrincipal: $('#e-cnae').value.trim() || null,
         }),
-      });
+      }).then(async (r) => { await salvarResponsaveis(r.id); });
     } else {
       // O CNPJ fica de fora de propósito: ele é a identidade do cliente e das
       // notas dele. Trocar o CNPJ é outro cliente, não uma correção.
@@ -2274,14 +2364,18 @@ function formularioEmpresa(empresa) {
           razao_social: $('#e-razao').value.trim(),
           uf: $('#e-uf').value.toUpperCase() || null,
           perfil: $('#e-perfil').value,
+          regime: $('#e-regime').value || null,
           cnae_principal: $('#e-cnae').value.trim() || null,
         }),
       });
+      await salvarResponsaveis(empresa.id);
       avisarSalvo('Cliente atualizado');
     }
     await carregarEmpresas();
     renderEmpresas();
   });
+
+  carregarResponsaveis(empresa?.id ?? null);
 
   // Pré-preenchimento pelo CNAE, como pedido: o cadastro já vem sugerido.
   $('#e-cnae').addEventListener('blur', async () => {
@@ -2906,7 +3000,12 @@ $('#rel-competencia').addEventListener('change', (e) => { rel.competencia = e.ta
 // Abre/fecha as notas de um CFOP logo abaixo da linha dele.
 $('#tbl-relatorio').addEventListener('click', async (ev) => {
   const abrir = ev.target.closest('button[data-abrir-nota-rel]');
-  if (abrir) return abrirNota(abrir.dataset.abrirNotaRel);
+  if (abrir) return abrirNotaDoRelatorio(abrir.dataset.abrirNotaRel, null, abrir);
+  const abrirItem = ev.target.closest('[data-abrir-item]');
+  if (abrirItem) {
+    ev.stopPropagation(); // o clique geral abriria sem lembrar do relatório
+    return abrirNotaDoRelatorio(abrirItem.dataset.abrirItem, abrirItem.dataset.item, abrirItem);
+  }
   const baixarCfop = ev.target.closest('button[data-baixar-cfop]');
   if (baixarCfop) {
     return baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&cfop=${encodeURIComponent(baixarCfop.dataset.baixarCfop)}&formato=csv`);
@@ -2941,9 +3040,92 @@ $('#tbl-relatorio').addEventListener('click', async (ev) => {
         <td><button class="btn sm" data-abrir-nota-rel="${esc(n.notaId)}">Abrir →</button></td></tr>`).join('')}</tbody>
       <tfoot><tr><th colspan="3">Total do CFOP ${esc(cfop)}</th><th class="num">${soma('itens')}</th><th class="num">${moeda(soma('valorContabil'))}</th><th class="num">${moeda(soma('baseIcms'))}</th><th class="num">${moeda(soma('icms'))}</th><th class="num">${moeda(soma('st'))}</th><th class="num">${moeda(soma('ipi'))}</th><th></th><th></th></tr></tfoot>
       </table></div></td>`;
+    pintarVistas(sub);
   } catch (e) {
     sub.innerHTML = `<td colspan="11" class="vazio">Não consegui listar as notas: ${esc(e.message)}</td>`;
   }
+});
+
+
+/* ---- Voltar para o relatório e marcas de "aberta" (reunião 25/09) ----
+   Ela confere o relatório nota por nota com a auxiliar, que usa o Questor.
+   Abria uma nota, arrumava, e ao voltar tinha que perguntar "em que nota a
+   gente tava?". Agora o voltar leva ao mesmo CFOP/produto aberto, com a nota
+   destacada, e as notas já abertas ficam marcadas (neste navegador, por
+   empresa e competência). */
+function chaveVistas() { return `alfa-vistas:${estado.empresaId}:${rel.competencia}`; }
+function lerVistas() {
+  try { return JSON.parse(localStorage.getItem(chaveVistas()) || '{"ids":[],"ultima":null}'); }
+  catch { return { ids: [], ultima: null }; }
+}
+function marcarVista(notaId) {
+  try {
+    const v = lerVistas();
+    if (!v.ids.includes(notaId)) v.ids.push(notaId);
+    v.ultima = notaId;
+    localStorage.setItem(chaveVistas(), JSON.stringify({ ids: v.ids.slice(-3000), ultima: v.ultima }));
+  } catch { /* navegador sem armazenamento: só não marca */ }
+}
+function pintarVistas(caixa) {
+  const v = lerVistas();
+  for (const b of caixa.querySelectorAll('[data-abrir-nota-rel], [data-abrir-item]')) {
+    const id = b.dataset.abrirNotaRel ?? b.dataset.abrirItem;
+    const tr = b.closest('tr');
+    tr.classList.toggle('vista', v.ids.includes(id));
+    tr.classList.toggle('parou-aqui', v.ultima === id);
+    if (v.ids.includes(id) && !b.dataset.marcado) {
+      b.dataset.marcado = '1';
+      b.insertAdjacentHTML('beforebegin', `<span class="tag-vista" title="Você já abriu esta nota">${v.ultima === id ? '◀ parou aqui' : '✓ aberta'}</span>`);
+    }
+  }
+}
+
+async function abrirNotaDoRelatorio(notaId, itemId, botao) {
+  const pai = botao.closest('tr.rel-notas')?.previousElementSibling;
+  marcarVista(notaId);
+  return abrirNota(notaId, itemId, {
+    qual: rel.qual, competencia: rel.competencia, notaId,
+    cfop: pai?.dataset.relCfop ?? null,
+    produto: pai?.dataset.relProduto ?? null,
+    unidade: pai?.dataset.relUnidade ?? null,
+    rolagem: window.scrollY,
+  });
+}
+
+async function voltarAoRelatorio() {
+  const v = estado.voltar;
+  estado.voltar = null;
+  $('#btn-voltar-notas').textContent = '← Notas';
+  rel.qual = v.qual;
+  rel.competencia = v.competencia;
+  $$('#rel-qual button').forEach((x) => x.classList.toggle('on', x.dataset.rel === v.qual));
+  await irPara('vRelatorios'); // monta de novo: os valores mudam quando ela arruma a nota
+  const linhas = [...document.querySelectorAll('#tbl-relatorio tbody > tr')];
+  const linha = v.cfop
+    ? linhas.find((t) => t.dataset.relCfop === v.cfop)
+    : linhas.find((t) => t.dataset.relProduto === v.produto && t.dataset.relUnidade === v.unidade);
+  if (!linha) return window.scrollTo(0, v.rolagem ?? 0);
+  linha.click();
+  // Espera a lista de notas daquele CFOP/produto chegar para destacar a nota.
+  for (let i = 0; i < 50; i++) {
+    const sub = linha.nextElementSibling;
+    if (sub?.classList.contains('rel-notas') && !sub.querySelector('td.vazio')) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const alvo = document.querySelector(`#tbl-relatorio [data-abrir-nota-rel="${CSS.escape(v.notaId)}"], #tbl-relatorio [data-abrir-item="${CSS.escape(v.notaId)}"]`);
+  const tr = alvo?.closest('tr') ?? linha;
+  tr.classList.add('linha-procurada');
+  tr.scrollIntoView({ block: 'center' });
+  setTimeout(() => tr.classList.remove('linha-procurada'), 4000);
+}
+
+$('#rel-limpar-vistas')?.addEventListener('click', () => {
+  try { localStorage.removeItem(chaveVistas()); } catch { /* nada */ }
+  $$('#tbl-relatorio tr.rel-notas').forEach((t) => {
+    t.querySelectorAll('.tag-vista').forEach((x) => x.remove());
+    t.querySelectorAll('[data-marcado]').forEach((x) => delete x.dataset.marcado);
+    pintarVistas(t);
+  });
 });
 
 /** Relatório por produto: clicar abre as notas em que ele aparece (23/09). */
@@ -2959,6 +3141,7 @@ async function abrirNotasDoProduto(linha) {
     const q = new URLSearchParams({ produto: linha.dataset.relProduto, unidade: linha.dataset.relUnidade, competencia: rel.competencia });
     const r = await api(`/api/empresas/${estado.empresaId}/busca-itens?${q}`);
     sub.innerHTML = `<td colspan="8">${tabelaDeItensAchados(r.itens, `${r.itens.length} item(ns) de ${esc(linha.dataset.relProduto)}`)}</td>`;
+    pintarVistas(sub);
   } catch (e) {
     sub.innerHTML = `<td colspan="8" class="vazio">Não consegui listar: ${esc(e.message)}</td>`;
   }
