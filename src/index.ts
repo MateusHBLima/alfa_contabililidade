@@ -16,6 +16,7 @@ import { analisarCnaes } from './empresas/cnae';
 import { gerarXmlCorrigido, verificarInvariantes } from './nfe/serializer';
 import { ErroParserNFe } from './nfe/tipos';
 import { lerNotaOriginal, compararComApp } from './nfe/visao';
+import { danfeHtml } from './nfe/danfe';
 import { montarZip } from './nfe/zip';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
 import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
@@ -1590,6 +1591,87 @@ app.patch('/api/empresas/:id', async (c) => {
   return c.json({ ok: true });
 });
 
+/**
+ * Quem cuida desta empresa (reunião 25/09): mais de uma pessoa por cliente — nos
+ * restaurantes uma faz e a outra confere. É o mesmo vínculo da tela de usuário
+ * (usuario_empresas), visto pelo lado da empresa. Quem tem "ver todos os
+ * clientes" aparece marcado e travado: o vínculo não muda nada para ela.
+ */
+app.get('/api/empresas/:id/responsaveis', async (c) => {
+  const s = c.get('sessao');
+  exigir(s, 'usuarios.visualizar');
+  const empresaId = c.req.param('id');
+  const emp = await c.env.DB.prepare('SELECT id FROM empresas WHERE id = ? AND tenant_id = ?')
+    .bind(empresaId, s.tenantId).first();
+  if (!emp) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const { results } = await c.env.DB
+    .prepare(
+      `SELECT u.id, u.nome, u.email, u.ativo, u.pendente,
+              EXISTS (SELECT 1 FROM usuario_empresas ue WHERE ue.usuario_id = u.id AND ue.empresa_id = ?) AS vinculado,
+              COALESCE(
+                (SELECT e.concedida FROM usuario_permissoes e WHERE e.usuario_id = u.id AND e.permissao = 'empresas.todas'),
+                EXISTS (SELECT 1 FROM usuario_papeis up JOIN papel_permissoes pp ON pp.papel_id = up.papel_id
+                         WHERE up.usuario_id = u.id AND pp.permissao = 'empresas.todas')
+              ) AS todas
+         FROM usuarios u WHERE u.tenant_id = ? ORDER BY u.nome`,
+    )
+    .bind(empresaId, s.tenantId)
+    .all<any>();
+  return c.json({
+    usuarios: results.map((u: any) => ({
+      id: u.id, nome: u.nome, email: u.email, ativo: u.ativo === 1, pendente: u.pendente === 1,
+      vinculado: u.vinculado === 1, todas: u.todas === 1,
+    })),
+  });
+});
+
+app.put('/api/empresas/:id/responsaveis', async (c) => {
+  const s = c.get('sessao');
+  exigir(s, 'usuarios.editar');
+  const empresaId = c.req.param('id');
+  const { usuarios } = z.object({ usuarios: z.array(z.string()).max(500) }).parse(await c.req.json());
+  const emp = await c.env.DB.prepare('SELECT id FROM empresas WHERE id = ? AND tenant_id = ?')
+    .bind(empresaId, s.tenantId).first();
+  if (!emp) return c.json({ erro: 'empresa não encontrada' }, 404);
+
+  const { results: doEscritorio } = await c.env.DB
+    .prepare('SELECT id FROM usuarios WHERE tenant_id = ?').bind(s.tenantId).all<any>();
+  const validos = new Set(doEscritorio.map((u: any) => u.id));
+  const pedidos = [...new Set(usuarios)];
+  const estranhos = pedidos.filter((id) => !validos.has(id));
+  if (estranhos.length) return c.json({ erro: 'usuário não encontrado' }, 404);
+
+  const { results: antes } = await c.env.DB
+    .prepare(`SELECT ue.usuario_id FROM usuario_empresas ue JOIN usuarios u ON u.id = ue.usuario_id
+               WHERE ue.empresa_id = ? AND u.tenant_id = ?`)
+    .bind(empresaId, s.tenantId).all<any>();
+  const eram = new Set(antes.map((r: any) => r.usuario_id as string));
+  const ficam = new Set(pedidos);
+  const entram = pedidos.filter((id) => !eram.has(id));
+  const saem = [...eram].filter((id) => !ficam.has(id));
+  if (!entram.length && !saem.length) return c.json({ ok: true, mudou: 0 });
+
+  await c.env.DB.batch([
+    ...entram.map((id) => c.env.DB
+      .prepare('INSERT OR IGNORE INTO usuario_empresas (usuario_id, empresa_id) VALUES (?,?)').bind(id, empresaId)),
+    ...saem.map((id) => c.env.DB
+      .prepare('DELETE FROM usuario_empresas WHERE usuario_id = ? AND empresa_id = ?').bind(id, empresaId)),
+    // Mesmo princípio da tela de usuário: acesso que muda vale agora. A própria
+    // pessoa que está mexendo não é derrubada no meio do trabalho.
+    ...[...entram, ...saem].filter((id) => id !== s.usuarioId).map((id) => c.env.DB
+      .prepare('UPDATE sessoes SET revogada = 1 WHERE usuario_id = ?').bind(id)),
+  ]);
+
+  await new Auditoria(c.env.DB, c.env.AUDIT_SEED).registrar({
+    tenantId: s.tenantId, usuarioId: s.usuarioId, usuarioEmail: s.email,
+    acao: 'alterar', entidade: 'empresa', entidadeId: empresaId,
+    campo: 'responsaveis', valorAntes: [...eram].join(',') || null, valorDepois: pedidos.join(',') || null,
+    origem: 'manual', ip: c.req.header('CF-Connecting-IP') ?? null,
+    requestId: c.req.header('CF-Ray') ?? null,
+  });
+  return c.json({ ok: true, mudou: entram.length + saem.length });
+});
+
 app.get('/api/empresas/:id/fornecedores', async (c) =>
   c.json(await c.get('repo').listarFornecedores(c.req.param('id'))),
 );
@@ -2307,6 +2389,22 @@ app.get('/api/notas/:id/original', async (c) => {
     soNoApp: comparacao.soNoApp,
     divergenciasCabecalho: cabecalho,
     divergencias: comparacao.divergencias + cabecalho.length,
+  });
+});
+
+/**
+ * O DANFE da nota para salvar em PDF e mandar ao cliente (reunião 25/09). Página
+ * de impressão montada do XML original guardado — nada do que foi tratado entra.
+ */
+app.get('/api/notas/:id/danfe', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const r = await c.get('repo').obterNotaComItens(c.req.param('id'));
+  if (!r) return c.text('Nota não encontrada.', 404);
+  const obj = r.nota.r2_original ? await c.env.XML_ORIGINAL.get(r.nota.r2_original) : null;
+  if (!obj) return c.text('XML original não encontrado no arquivo.', 404);
+  const html = danfeHtml(lerNotaOriginal(await obj.text()), { cancelada: !!r.nota.cancelada_em });
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
   });
 });
 
