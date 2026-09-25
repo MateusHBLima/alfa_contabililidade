@@ -76,35 +76,38 @@ async function lerSessao(
   if (!sessaoId || !assinatura) return null;
   if ((await assinar(sessaoId, segredo)) !== assinatura) return null;
 
-  const linha = await db
-    .prepare(
+  // Uma ida ao banco só (25/09). Eram quatro consultas uma atrás da outra em
+  // TODA requisição, ~130 ms cada entre o Worker e o D1: meio segundo de espera
+  // antes de qualquer tela começar. As três últimas partem do id da sessão, então
+  // vão no mesmo lote; se a sessão não vale, o resultado delas é descartado.
+  const [rSessao, rPerms, rEmps, rExc] = await db.batch([
+    db.prepare(
       `SELECT s.id, s.expira_em, s.revogada, u.id AS uid, u.tenant_id, u.email, u.nome, u.ativo
        , u.deve_trocar_senha
        FROM sessoes s JOIN usuarios u ON u.id = s.usuario_id WHERE s.id = ?`,
-    )
-    .bind(sessaoId)
-    .first<any>();
+    ).bind(sessaoId),
+    db.prepare(
+      `SELECT DISTINCT pp.permissao FROM sessoes s
+       JOIN usuario_papeis up ON up.usuario_id = s.usuario_id
+       JOIN papel_permissoes pp ON pp.papel_id = up.papel_id WHERE s.id = ?`,
+    ).bind(sessaoId),
+    db.prepare(
+      `SELECT ue.empresa_id FROM sessoes s JOIN usuario_empresas ue ON ue.usuario_id = s.usuario_id
+        WHERE s.id = ?`,
+    ).bind(sessaoId),
+    db.prepare(
+      `SELECT e.permissao, e.concedida FROM sessoes s JOIN usuario_permissoes e ON e.usuario_id = s.usuario_id
+        WHERE s.id = ?`,
+    ).bind(sessaoId),
+  ]);
+  const linha = (rSessao!.results as any[])[0];
 
   if (!linha || linha.revogada === 1 || linha.ativo !== 1) return null;
   if (new Date(linha.expira_em) < new Date()) return null;
 
-  const { results: perms } = await db
-    .prepare(
-      `SELECT DISTINCT pp.permissao FROM usuario_papeis up
-       JOIN papel_permissoes pp ON pp.papel_id = up.papel_id WHERE up.usuario_id = ?`,
-    )
-    .bind(linha.uid)
-    .all<{ permissao: string }>();
-
-  const { results: emps } = await db
-    .prepare('SELECT empresa_id FROM usuario_empresas WHERE usuario_id = ?')
-    .bind(linha.uid)
-    .all<{ empresa_id: string }>();
-
-  const { results: exc } = await db
-    .prepare('SELECT permissao, concedida FROM usuario_permissoes WHERE usuario_id = ?')
-    .bind(linha.uid)
-    .all<{ permissao: string; concedida: number }>();
+  const perms = rPerms!.results as { permissao: string }[];
+  const emps = rEmps!.results as { empresa_id: string }[];
+  const exc = rExc!.results as { permissao: string; concedida: number }[];
 
   return {
     usuarioId: linha.uid,
