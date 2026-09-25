@@ -65,8 +65,14 @@ class Stmt {
     };
   }
 
-  executar(): void {
-    this.db.prepare(this.sql).run(...this.args);
+  /** No lote, como o D1 de verdade: SELECT devolve as linhas; o resto, a contagem. */
+  executar(): { success: true; results: unknown[]; meta: { changes: number } } {
+    const st = this.db.prepare(this.sql);
+    if (/^\s*(SELECT|WITH)\b/i.test(this.sql)) {
+      return { success: true, results: st.all(...this.args) as unknown[], meta: { changes: 0 } };
+    }
+    const r = st.run(...this.args);
+    return { success: true, results: [], meta: { changes: Number(r?.changes ?? 0) } };
   }
 }
 
@@ -96,16 +102,17 @@ export class D1Local {
     return new Stmt(this.db, sql);
   }
 
-  async batch(stmts: Stmt[]): Promise<{ success: true }[]> {
+  async batch(stmts: Stmt[]): Promise<{ success: true; results: unknown[]; meta: { changes: number } }[]> {
     this.db.exec('BEGIN');
+    const saida = [];
     try {
-      for (const s of stmts) s.executar();
+      for (const s of stmts) saida.push(s.executar());
       this.db.exec('COMMIT');
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
     }
-    return stmts.map(() => ({ success: true as const }));
+    return saida;
   }
 
   /** Atalho para asserções nos testes. */

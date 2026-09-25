@@ -553,16 +553,29 @@ async function trocarEmpresa(empresaId) {
   // empresa que so tem notas de 2025 devolveria lista vazia sem explicacao.
   estado.competencia = '';
   estado.importacaoId = '';
-  await carregarCompetencias();
-  await carregarImportacoes();
-  // Trocar de empresa nao pode deixar na tela a lista da empresa anterior.
-  const aberta = ['vFornecedores', 'vRegras', 'vRelatorios', 'v3']
-    .find((v) => !$('#' + v).classList.contains('hidden'));
-  if (aberta === 'vFornecedores') await carregarFornecedores();
-  if (aberta === 'vRegras') await carregarRegras();
-  if (aberta === 'vRelatorios') await abrirRelatorios();
-  if (aberta === 'v3') await abrirXmlCorrigido();
-  await carregarNotas();
+  // 25/09: depois do OK a tela ficava 2-3 s mostrando a empresa anterior. Eram
+  // três buscas uma depois da outra, sem nenhum sinal. Agora vão juntas, e a
+  // tela avisa que está abrindo a empresa (o aviso só aparece se demorar).
+  const aviso = setTimeout(() => mostrarEspera(`Abrindo ${nomeEmpresaAtual() ?? 'a empresa'}…`), 150);
+  try {
+    const [, , notas] = await Promise.all([
+      carregarCompetencias(),
+      carregarImportacoes(),
+      api(`/api/empresas/${empresaId}/notas`),
+    ]);
+    estado.notas = notas;
+    renderNotas();
+    // Trocar de empresa nao pode deixar na tela a lista da empresa anterior.
+    const aberta = ['vFornecedores', 'vRegras', 'vRelatorios', 'v3']
+      .find((v) => !$('#' + v).classList.contains('hidden'));
+    if (aberta === 'vFornecedores') await carregarFornecedores();
+    if (aberta === 'vRegras') await carregarRegras();
+    if (aberta === 'vRelatorios') await abrirRelatorios();
+    if (aberta === 'v3') await abrirXmlCorrigido();
+  } finally {
+    clearTimeout(aviso);
+    esconderEspera();
+  }
   gravarEndereco();
   marcarTrocaPendente();
 }

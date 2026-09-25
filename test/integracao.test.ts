@@ -3942,6 +3942,32 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     expect(semLogin.status).toBe(401);
   });
 
+  it('ler a sessão é UMA ida ao banco (antes eram 4, ~0,5 s em toda tela)', async () => {
+    let idas = 0;
+    const oPrepare = (db as any).prepare.bind(db);
+    const oBatch = (db as any).batch.bind(db);
+    (db as any).prepare = (sql: string) => {
+      const st = oPrepare(sql);
+      for (const m of ['all', 'run', 'first'] as const) {
+        const o = st[m]?.bind(st);
+        if (o) st[m] = (...a: any[]) => { idas += 1; return o(...a); };
+      }
+      return st;
+    };
+    (db as any).batch = (cs: any[]) => { idas += 1; return oBatch(cs); };
+    try {
+      const r = await req('/api/eu');
+      expect(r.status).toBe(200);
+      expect(idas).toBe(1);
+    } finally {
+      (db as any).prepare = oPrepare;
+      (db as any).batch = oBatch;
+    }
+    // E continua recusando sessão revogada.
+    db.consultar('UPDATE sessoes SET revogada = 1');
+    expect((await req('/api/eu')).status).toBe(401);
+  });
+
   it('regime: grava no cadastro e na edição, e aparece na lista', async () => {
     let e = (await json('/api/empresas')).find((x: any) => x.id === empresaId);
     expect(e.regime).toBe('simples');
