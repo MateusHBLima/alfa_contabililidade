@@ -2925,7 +2925,7 @@ $('#btn-novo-usuario').addEventListener('click', () => editarUsuario(null).catch
 // medicao do projeto. A conta e do servidor; a tela so desenha, e a planilha
 // baixada sai da MESMA rota (formato=csv), para tela e arquivo nunca discordarem.
 
-const rel = { qual: 'cfop', competencia: '' };
+const rel = { qual: 'cfop', competencia: '', filtro: '', ultimo: null };
 
 async function abrirRelatorios() {
   if (!estado.empresaId) return;
@@ -2954,15 +2954,65 @@ async function carregarRelatorio() {
     return;
   }
   corpo.innerHTML = '<tr><td class="vazio">calculando…</td></tr>';
+  const pedido = rel.qual;
   let r;
   try {
-    r = await api(`/api/empresas/${estado.empresaId}/relatorios/${rel.qual}?competencia=${rel.competencia}`);
+    r = await api(`/api/empresas/${estado.empresaId}/relatorios/${pedido}?competencia=${rel.competencia}`);
   } catch (e) {
     cab.innerHTML = pe.innerHTML = '';
     corpo.innerHTML = `<tr><td class="vazio">Não consegui montar o relatório: ${esc(e.message)}</td></tr>`;
     return;
   }
 
+  rel.ultimo = { ...r, qual: pedido };
+  if (pedido !== rel.qual) return; // chegou depois de trocar de relatório
+  desenharRelatorio();
+}
+
+/* Busca dentro do relatório (27/09, pedido da Taís): filtra as linhas que já
+   estão na tela - produto, código, CFOP ou valor - e o total passa a ser só do
+   que sobrou. Não vai ao banco. */
+function semAcentoMaiusc(v) {
+  return String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+}
+function comoValorTela(p) {
+  const t = String(p).trim().replace(/^R\$/i, '');
+  if (!/^\d[\d.,]*$/.test(t)) return null;
+  let n;
+  if (t.includes(',')) n = t.replace(/\./g, '').replace(',', '.');
+  else if (/^\d{1,3}(\.\d{3})+$/.test(t)) n = t.replace(/\./g, '');
+  else n = t;
+  const v = Number(n);
+  return Number.isFinite(v) ? Math.round(v * 100) / 100 : null;
+}
+function linhaPassaNoFiltro(l, filtro, qual) {
+  const palavras = filtro.trim().split(/\s+/).filter((w) => w && !/^R\$$/i.test(w));
+  if (!palavras.length) return true;
+  const texto = semAcentoMaiusc(qual === 'cfop'
+    ? [l.cfop, l.natureza, l.origem].join(' ')
+    : [l.descricao, l.descricaoOriginal, l.unidade, l.cfops, l.codigos].join(' '));
+  const valores = (qual === 'cfop'
+    ? [l.valorContabil, l.baseIcms, l.icms, l.st, l.ipi]
+    : [l.valor, l.valorUnitarioMedio, l.quantidade]
+  ).filter((v) => v !== null && v !== undefined).map((v) => Math.round(Number(v) * 100) / 100);
+  return palavras.every((w) => {
+    if (texto.includes(semAcentoMaiusc(w))) return true;
+    const v = comoValorTela(w);
+    return v !== null && valores.includes(v);
+  });
+}
+
+function desenharRelatorio() {
+  const r = rel.ultimo;
+  if (!r) return;
+  const qual = r.qual;
+  const tabela = $('#tbl-relatorio');
+  const aviso = $('#rel-aviso');
+  const [cab, corpo, pe] = [tabela.querySelector('thead'), tabela.querySelector('tbody'), tabela.querySelector('tfoot')];
+  const filtro = rel.filtro.trim();
+  const linhas = filtro ? r.linhas.filter((l) => linhaPassaNoFiltro(l, filtro, qual)) : r.linhas;
+  const soma = (k) => linhas.reduce((s, l) => s + Number(l[k] ?? 0), 0);
+  const rotuloFiltro = `${linhas.length} de ${r.linhas.length} ${qual === 'cfop' ? 'CFOPs' : 'produtos'} com “${esc(filtro)}”`;
   // O relatorio inclui o que ainda nao foi conferido - e diz isso, para o total
   // bater com o do outro sistema sem fazer palpite passar por decisao.
   const pendentes = r.totais.itens - r.totais.conferidos;
@@ -2974,21 +3024,24 @@ async function carregarRelatorio() {
   ].filter(Boolean).join(' ');
 
   const qtd = (v) => Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 4 });
-  if (rel.qual === 'cfop') {
+  if (qual === 'cfop') {
     // Sintetico no formato do livro de entradas; clicar na linha abre as notas
     // daquele CFOP (analitico). Pedido da Tais, 22/09: "so um CFOP fechou (...)
     // eu nao consigo procurar a minha diferenca".
     cab.innerHTML = '<tr><th>CFOP de entrada</th><th>Natureza</th><th class="num">Notas</th><th class="num">Itens</th><th class="num">Conferidos</th><th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th class="num">ICMS ST</th><th class="num">IPI</th><th>CFOP original (itens)</th></tr>';
-    corpo.innerHTML = r.linhas.map((l) => `<tr class="rel-cfop" data-rel-cfop="${esc(l.cfop)}" title="Clique para ver as notas deste CFOP">
+    corpo.innerHTML = linhas.map((l) => `<tr class="rel-cfop" data-rel-cfop="${esc(l.cfop)}" title="Clique para ver as notas deste CFOP">
       <td class="mono"><span class="seta">▸</span> <b>${esc(l.cfop)}</b></td><td>${esc(l.natureza)}</td>
       <td class="num">${l.notas}</td><td class="num">${l.itens}</td><td class="num">${l.conferidos}</td>
       <td class="num"><b>${moeda(l.valorContabil)}</b></td><td class="num">${moeda(l.baseIcms)}</td><td class="num">${moeda(l.icms)}</td>
       <td class="num">${moeda(l.st)}</td><td class="num">${moeda(l.ipi)}</td><td class="tiny">${esc(l.origem)}</td></tr>`).join('');
-    const t = r.totais;
-    pe.innerHTML = `<tr><th>Total</th><th></th><th class="num">${t.notas}</th><th class="num">${t.itens}</th><th class="num">${t.conferidos}</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.baseIcms)}</th><th class="num">${moeda(t.icms)}</th><th class="num">${moeda(t.st)}</th><th class="num">${moeda(t.ipi)}</th><th></th></tr>`;
+    const t = filtro
+      ? { notas: '—', itens: soma('itens'), conferidos: soma('conferidos'), valorContabil: soma('valorContabil'),
+          baseIcms: soma('baseIcms'), icms: soma('icms'), st: soma('st'), ipi: soma('ipi') }
+      : r.totais;
+    pe.innerHTML = `<tr><th>${filtro ? rotuloFiltro : 'Total'}</th><th></th><th class="num">${t.notas}</th><th class="num">${t.itens}</th><th class="num">${t.conferidos}</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.baseIcms)}</th><th class="num">${moeda(t.icms)}</th><th class="num">${moeda(t.st)}</th><th class="num">${moeda(t.ipi)}</th><th></th></tr>`;
   } else {
     cab.innerHTML = '<tr><th>Produto</th><th>Un.</th><th class="num">Quantidade</th><th class="num">Unitário médio</th><th class="num">Valor total</th><th>CFOP</th><th>Cód. fornecedor</th><th class="num">Notas</th></tr>';
-    corpo.innerHTML = r.linhas.map((l) => `<tr class="rel-cfop" data-rel-produto="${esc(l.descricao)}" data-rel-unidade="${esc(l.unidade)}" title="Clique para ver as notas deste produto">
+    corpo.innerHTML = linhas.map((l) => `<tr class="rel-cfop" data-rel-produto="${esc(l.descricao)}" data-rel-unidade="${esc(l.unidade)}" title="Clique para ver as notas deste produto">
       <td><span class="seta">▸</span> ${esc(l.descricao)}${l.descricaoOriginal && l.descricaoOriginal !== l.descricao
         ? `<span class="porque">na nota: ${esc(l.descricaoOriginal)}</span>` : ''}</td>
       <td class="tiny">${esc(l.unidade)}</td>
@@ -2997,10 +3050,12 @@ async function carregarRelatorio() {
       <td class="num">${moeda(l.valor)}</td>
       <td class="mono tiny">${esc(l.cfops)}</td><td class="mono tiny">${esc(l.codigos)}</td>
       <td class="num">${l.notas}</td></tr>`).join('');
-    pe.innerHTML = `<tr><th>Total · ${r.linhas.length} produtos</th><th></th><th></th><th></th><th class="num">${moeda(r.totais.valor)}</th><th></th><th></th><th></th></tr>`;
+    pe.innerHTML = `<tr><th>${filtro ? rotuloFiltro : `Total · ${r.linhas.length} produtos`}</th><th></th><th></th><th></th><th class="num">${moeda(filtro ? soma('valor') : r.totais.valor)}</th><th></th><th></th><th></th></tr>`;
   }
   if (r.linhas.length === 0) {
     corpo.innerHTML = '<tr><td class="vazio" colspan="8">Nenhum item nesta competência.</td></tr>';
+  } else if (linhas.length === 0) {
+    corpo.innerHTML = `<tr><td class="vazio" colspan="11">Nada com “${esc(filtro)}” neste relatório. Tente só um pedaço do nome, o código ou o valor.</td></tr>`;
   }
 }
 
@@ -3010,6 +3065,11 @@ $$('#rel-qual button').forEach((b) => b.addEventListener('click', () => {
   carregarRelatorio();
 }));
 $('#rel-competencia').addEventListener('change', (e) => { rel.competencia = e.target.value; carregarRelatorio(); });
+let esperaFiltroRel = null;
+$('#rel-busca').addEventListener('input', (e) => {
+  clearTimeout(esperaFiltroRel);
+  esperaFiltroRel = setTimeout(() => { rel.filtro = e.target.value; desenharRelatorio(); }, 150);
+});
 // Abre/fecha as notas de um CFOP logo abaixo da linha dele.
 $('#tbl-relatorio').addEventListener('click', async (ev) => {
   const abrir = ev.target.closest('button[data-abrir-nota-rel]');
