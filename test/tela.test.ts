@@ -437,3 +437,16 @@ describe('tela: reunião 25/09', () => {
   });
 });
 
+
+describe('tela: busca dentro do relatório (27/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('tem o campo e filtra sem ir ao banco', () => {
+    expect(HTML).toContain('id="rel-busca"');
+    expect(APP).toMatch(/function desenharRelatorio\(\)/);
+    expect(APP).toMatch(/function linhaPassaNoFiltro\(l, filtro, qual\)/);
+    // Filtrar redesenha o que já veio; não chama o relatório de novo.
+    const handler = APP.slice(APP.indexOf("$('#rel-busca').addEventListener"), APP.indexOf("$('#rel-busca').addEventListener") + 300);
+    expect(handler).toContain('desenharRelatorio()');
+    expect(handler).not.toContain('carregarRelatorio');
+  });
+});
