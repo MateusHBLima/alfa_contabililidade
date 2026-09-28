@@ -4034,6 +4034,12 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     const notas = await json(`/api/empresas/${empresaId}/relatorios/notas?competencia=2026-08&cfop=1949`);
     expect(notas.regra).toBe('outras');
     expect(notas.notas[0]).toMatchObject({ baseIcms: 0, icms: 0, outras: notas.notas[0].valorContabil });
+    // O relatório "Por nota" (analítico em JSON) traz as regras para a tela aplicar item a item.
+    const analitico = await json(`/api/empresas/${empresaId}/relatorios/analitico?competencia=2026-08`);
+    expect(analitico.regras['1949']).toBe('outras');
+    expect(analitico.regras['1102']).toBe('manter');
+    expect(analitico.canceladas).toBe(0);
+    expect(analitico.linhas.map((l: any) => l.n_item)).toEqual([1, 2, 3]);
     // Trocar a regra muda o relatório na hora; nada é gravado no item.
     expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'outras' }) })).status).toBe(200);
     rel = await json(base);
