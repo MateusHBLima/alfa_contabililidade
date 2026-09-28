@@ -167,7 +167,7 @@
         </button>
         <button data-view="vRelatorios">
           <span class="num">4</span>
-          <span>Relatórios<span class="sub">por CFOP e por produto</span></span>
+          <span>Relatórios<span class="sub">por CFOP, produto e nota</span></span>
         </button>
       </div>
       <div class="nav-grupo g-impostos">
@@ -471,12 +471,13 @@
       <!-- ------------------------------------------------- RELATÓRIOS -->
       <section id="vRelatorios" class="hidden">
         <h1>Relatórios <span class="escopo-empresa" id="escopo-relatorios"></span></h1>
-        <p class="page-desc">Como as notas ficaram depois do tratamento, para bater com o outro sistema. No relatório por CFOP, clique numa linha para ver as notas daquele CFOP.</p>
+        <p class="page-desc">Como as notas ficaram depois do tratamento, para bater com o outro sistema. No relatório por CFOP, clique numa linha para ver as notas daquele CFOP. O relatório por nota mostra cada nota com os itens, do jeito da capa e do detalhamento do Questor.</p>
         <div class="card">
           <div class="toolbar">
             <div class="filters" id="rel-qual">
               <button data-rel="cfop" class="on">Por CFOP</button>
               <button data-rel="produtos">Por produto</button>
+              <button data-rel="nota" title="Cada nota com a capa, os itens e o total por CFOP — para conferir com o Questor nota a nota">Por nota</button>
             </div>
             <select id="rel-competencia" style="font-size:12px;width:210px"></select>
             <input type="search" id="rel-busca" placeholder="Procurar no relatório: produto, código, CFOP ou valor" style="font-size:12px;width:300px" autocomplete="off">
@@ -484,6 +485,7 @@
             <div class="sep"></div>
             <button class="btn sm primary" id="rel-baixar" title="O relatório que está na tela">⇩ Baixar planilha</button>
             <button class="btn sm" id="rel-baixar-analitico" title="Um item por linha, com a nota, o CFOP e os impostos — para filtrar e bater no Excel">⇩ Planilha analítica (item a item)</button>
+            <button class="btn sm" id="rel-imprimir" title="Imprime o relatório que está na tela, já com a busca aplicada. Para PDF, escolha “Salvar como PDF”.">🖨 Imprimir</button>
             <button class="btn sm sutil" id="rel-limpar-vistas" title="Tira as marcas de nota já aberta desta competência">Limpar marcas “aberta”</button>
           </div>
           <div id="rel-aviso" class="placar sutil hidden" style="margin:0 14px 8px"></div>

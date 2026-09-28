@@ -551,4 +551,19 @@ button.aviso-regime:hover{background:#ffeccc}
   #impressao-nota h3{font-size:11px;margin:8px 0 2px}
   #impressao-nota tr{break-inside:avoid}
   #impressao-nota thead{display:table-header-group}
+  #impressao-nota tbody.nota-grupo{break-inside:avoid}
+  #impressao-nota tr.nota-capa td{background:#eee;border-top:2px solid #000}
+  #impressao-nota tr.nota-subtotal td{font-weight:bold;background:#f6f6f6}
+  #impressao-nota tfoot{display:table-row-group} /* total do mês só no fim, não em toda página */
+  #impressao-nota tfoot th{background:#ddd;color:#000;font-size:10px;text-transform:none}
 }
+
+/* Relatório por nota (28/09) */
+tr.nota-capa>td{background:#eaf1fa;border-top:2px solid #b9cde6;padding:7px 10px}
+.nota-capa-linha{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.nota-capa-linha .btn{margin-left:auto}
+tr.nota-capa.vista>td{background:#dfe9f6}
+tr.nota-capa.parou-aqui>td{background:#cfe0f5}
+tr.nota-item td{font-size:12px}
+tr.nota-subtotal td{font-size:12px;background:#f7f9fc;font-weight:600}
+tr.nota-subtotal td b{font-weight:700}
