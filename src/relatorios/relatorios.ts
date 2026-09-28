@@ -232,7 +232,10 @@ export function totaisPorCfopDaNota(itens: any[], valorNota: number) {
   const vNF = centavos(Number(valorNota ?? 0));
   return {
     linhas: rel.linhas.map(({ notas: _n, ...l }) => l),
-    totais: { itens: rel.totais.itens, valor: rel.totais.valor, valorContabil: rel.totais.valorContabil },
+    totais: {
+      itens: rel.totais.itens, valor: rel.totais.valor, valorContabil: rel.totais.valorContabil,
+      baseIcms: rel.totais.baseIcms, icms: rel.totais.icms, st: rel.totais.st, ipi: rel.totais.ipi,
+    },
     valorNota: vNF,
     /** false quando algum item nao tem os valores do XML (sem original guardado): o contabil vira o do produto */
     valoresLidos: itens.every((i) => Number(i.valores_lidos) === 1),
