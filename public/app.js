@@ -694,6 +694,7 @@ async function iniciar() {
   $('#btn-ultimas')?.classList.toggle('hidden', !pode('auditoria.visualizar'));
   await carregarEmpresas();
   montarSeletorCfop();
+  carregarRegrasIcmsCache();
   await restaurarEndereco();
 }
 
@@ -1085,6 +1086,7 @@ $('#btn-ver-xml').addEventListener('click', () => irPara('v3'));
 // so desenha: o que confere fica calmo; divergencia de leitura grita.
 
 $('#btn-ver-original').addEventListener('click', () => abrirOriginal());
+$('#btn-imprimir-nota').addEventListener('click', imprimirNota);
 $('#orig-voltar').addEventListener('click', () => irPara('v2'));
 // PDF da nota para o cliente (25/09): abre o DANFE numa aba já pronta para
 // "Salvar como PDF". É a nota do fornecedor, sem nada do tratamento.
@@ -1447,20 +1449,90 @@ function renderTotaisCfop(n) {
            ? `<span class="tag ok">fecha com o total da nota · R$ ${moeda(t.valorNota)}</span>`
            : `<span class="tag dan" title="Total da nota (vNF) menos a soma do valor contábil dos itens">difere do total da nota em R$ ${moeda(t.diferenca)}</span>`}
      </div>
-     <table><thead><tr>
+     ${tabelaTotaisCfop(t)}`;
+}
+
+/* Total por CFOP da nota com base e ICMS (28/09, pedido da Taís). Os valores são
+   os do XML; ST e IPI só aparecem quando a nota tem. Usado na tela e na impressão. */
+function tabelaTotaisCfop(t) {
+  const temSt = t.linhas.some((l) => Number(l.st) > 0);
+  const temIpi = t.linhas.some((l) => Number(l.ipi) > 0);
+  const regraOutras = (c) => regrasIcmsCache?.get(c) === 'outras';
+  return `<table><thead><tr>
        <th>CFOP de entrada</th><th class="num">Itens</th>
        <th class="num">Valor dos produtos</th><th class="num">Valor contábil</th>
+       <th class="num">Base ICMS</th><th class="num">ICMS</th>
+       ${temSt ? '<th class="num">ICMS ST</th>' : ''}${temIpi ? '<th class="num">IPI</th>' : ''}
      </tr></thead><tbody>` +
     t.linhas.map((l) => `<tr>
-       <td><b class="mono">${esc(l.cfop)}</b>${l.natureza ? ` <span class="porque">${esc(l.natureza)}</span>` : ''}</td>
+       <td><b class="mono">${esc(l.cfop)}</b>${l.natureza ? ` <span class="porque">${esc(l.natureza)}</span>` : ''}${regraOutras(l.cfop)
+         ? ' <span class="tag mut" title="Nas Regras de ICMS este CFOP está em Outras: no relatório por CFOP, base e ICMS saem zerados. Aqui estão como vieram no XML.">no relatório: Outras</span>' : ''}</td>
        <td class="num">${l.itens}</td>
        <td class="num">${moeda(l.valor)}</td>
        <td class="num"><b>${moeda(l.valorContabil)}</b></td>
+       <td class="num">${moeda(l.baseIcms)}</td>
+       <td class="num">${moeda(l.icms)}</td>
+       ${temSt ? `<td class="num">${moeda(l.st)}</td>` : ''}${temIpi ? `<td class="num">${moeda(l.ipi)}</td>` : ''}
      </tr>`).join('') +
     `</tbody><tfoot><tr>
        <td>Total</td><td class="num">${t.totais.itens}</td>
        <td class="num">${moeda(t.totais.valor)}</td><td class="num">${moeda(t.totais.valorContabil)}</td>
+       <td class="num">${moeda(t.totais.baseIcms ?? 0)}</td><td class="num">${moeda(t.totais.icms ?? 0)}</td>
+       ${temSt ? `<td class="num">${moeda(t.totais.st ?? 0)}</td>` : ''}${temIpi ? `<td class="num">${moeda(t.totais.ipi ?? 0)}</td>` : ''}
      </tr></tfoot></table>`;
+}
+
+// Regras de ICMS em memória, só para o selo "no relatório: Outras" na nota.
+let regrasIcmsCache = null;
+async function carregarRegrasIcmsCache() {
+  try {
+    const r = await api('/api/regras-icms');
+    regrasIcmsCache = new Map(r.regras.map((g) => [g.cfop, g.regra]));
+  } catch { regrasIcmsCache = null; }
+}
+
+/* Imprimir a nota como ficou no sistema (28/09): para conferir com o Questor no
+   papel, item por item. Monta uma folha limpa (sem botões) e chama a impressão. */
+function imprimirNota() {
+  const a = estado.notaAberta;
+  if (!a) return alerta('Abra uma nota primeiro.');
+  const n = a.nota;
+  const emp = (estado.empresas || []).find((x) => x.id === estado.empresaId);
+  const cnpj = (d) => String(d ?? '').replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+  const itens = a.itens.map((i) => {
+    const desc = i.x_prod_novo || i.x_prod_original;
+    return `<tr>
+      <td class="num">${i.n_item}</td>
+      <td>${esc(desc)}${i.x_prod_novo && i.x_prod_novo !== i.x_prod_original ? `<div class="obs">na nota: ${esc(i.x_prod_original)}</div>` : ''}
+        <div class="obs">cód. ${esc(i.c_prod ?? '—')} · NCM ${esc(i.ncm ?? '—')}</div></td>
+      <td class="mono">${esc(i.cfop_original ?? '—')} → <b>${esc(i.cfop_novo || '—')}</b></td>
+      <td class="num">${moeda(i.valor_total)}</td>
+      <td class="num"><b>${moeda(i.valor_contabil ?? i.valor_total)}</b></td>
+      <td class="num">${moeda(i.v_bc_icms ?? 0)}</td>
+      <td class="num">${moeda(i.v_icms ?? 0)}</td>
+      <td class="tiny">${i.revisado ? `✓ ${esc(i.revisado_por_nome ?? '')}` : '—'}</td>
+    </tr>`;
+  }).join('');
+  const folha = $('#impressao-nota');
+  folha.innerHTML = `
+    <div class="imp-topo">
+      <div><b>Nota nº ${esc(n.numero)}</b>${n.serie ? ` · série ${esc(n.serie)}` : ''} · emissão ${esc(dataCurta(n.dh_emi))}
+        ${n.cancelada_em ? ' · <b>NOTA CANCELADA</b>' : ''}</div>
+      <div>Fornecedor: <b>${esc(n.emit_nome ?? '')}</b> · CNPJ ${esc(cnpj(n.emit_cnpj))}</div>
+      <div>Empresa: <b>${esc(emp?.razao_social ?? '')}</b> · CNPJ ${esc(cnpj(emp?.cnpj))}</div>
+      <div class="obs">Chave ${esc(String(n.chave ?? '').replace(/(\d{4})(?=\d)/g, '$1 '))} · impresso em ${new Date().toLocaleString('pt-BR')} por ${esc(estado.eu?.nome ?? '')}</div>
+    </div>
+    <table class="imp-itens"><thead><tr><th>#</th><th>Produto</th><th>CFOP saída → entrada</th><th class="num">Valor produto</th>
+      <th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th>Conferido</th></tr></thead>
+      <tbody>${itens}</tbody></table>
+    <h3>Total por CFOP desta nota</h3>
+    ${n.cancelada_em || !a.totaisCfop?.linhas?.length ? '<p>Nota cancelada: vale R$ 0,00.</p>' : tabelaTotaisCfop(a.totaisCfop)}
+    <p class="obs">Base e ICMS como vieram no XML. Total da nota: R$ ${moeda(n.valor_total)}.</p>`;
+  document.body.classList.add('imprimindo-nota');
+  const fim = () => { document.body.classList.remove('imprimindo-nota'); window.removeEventListener('afterprint', fim); };
+  window.addEventListener('afterprint', fim);
+  window.print();
+  setTimeout(fim, 1000);
 }
 
 /** "produto 174,96 + frete 15,60 + outras 2,99" — o que compõe o valor contábil do item. */
@@ -3338,6 +3410,7 @@ $('#tbl-regras-icms')?.addEventListener('change', async (ev) => {
     alerta(`Não consegui salvar: ${e.message}`);
   }
   carregarRegrasIcms();
+  carregarRegrasIcmsCache();
 });
 
 $('#form-regra-nova')?.addEventListener('submit', async (ev) => {
