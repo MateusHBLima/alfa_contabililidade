@@ -89,7 +89,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(24); // + produtos_nao_fecharam (0017)
+    expect(tabelas.length).toBe(25); // + produtos_nao_fecharam (0017), regras_icms (0018)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(3);
   });
@@ -3244,7 +3244,7 @@ describe('relatórios por CFOP e por produto — o instrumento da comparação d
     const tela: any = await (await req(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`)).json();
     const br = (v: number) => v.toFixed(2).replace('.', ',');
     const t = tela.totais;
-    expect(linhas.at(-1)).toBe(`TOTAL;;${t.notas};6;2;${br(t.valorContabil)};${br(t.baseIcms)};${br(t.icms)};${br(t.st)};${br(t.ipi)};${br(t.valor)};`);
+    expect(linhas.at(-1)).toBe(`TOTAL;;${t.notas};6;2;${br(t.valorContabil)};${br(t.baseIcms)};${br(t.icms)};${br(t.outras)};${br(t.st)};${br(t.ipi)};${br(t.valor)};`);
   });
 
   it('descrição de fornecedor que começa com "=" não vira fórmula na planilha', async () => {
@@ -4008,6 +4008,46 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     const cnpj = (await json('/api/empresas')).find((e: any) => e.id === empresaId).cnpj;
     await req(`/api/empresas/${empresaId}?confirmar=${cnpj}`, { method: 'DELETE' });
     expect(db.consultar('SELECT * FROM produtos_nao_fecharam')).toHaveLength(0);
+  });
+
+  it('28/09: regras de ICMS — CFOP em "outras" sai com base e ICMS zerados e o valor em Outras', async () => {
+    await subir(empresaId, outraNota(XML, '62'));
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    const itens = (await json(`/api/notas/${nota}`)).itens;
+    // Dá base e ICMS aos itens para a regra ter o que zerar.
+    db.consultar(`UPDATE itens SET v_bc_icms = valor_total, v_icms = ROUND(valor_total * 0.17, 2) WHERE nota_id = '${nota}'`);
+    const aplicar = (cfop: string, ids: string[]) => req(`/api/notas/${nota}/aplicar-cfop`, { method: 'POST', body: JSON.stringify({ cfop, itens: ids }) });
+    await aplicar('1949', [itens[0].id]);
+    await aplicar('1102', [itens[1].id, itens[2].id]);
+    const base = `/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`;
+    let rel = await json(base);
+    const l1949 = rel.linhas.find((l: any) => l.cfop === '1949');
+    const l1102 = rel.linhas.find((l: any) => l.cfop === '1102');
+    expect(l1949).toMatchObject({ regra: 'outras', baseIcms: 0, icms: 0 });
+    expect(l1949.outras).toBe(l1949.valorContabil);
+    expect(l1949.baseIcmsXml).toBeGreaterThan(0);
+    expect(l1102).toMatchObject({ regra: 'manter', outras: 0 });
+    expect(l1102.baseIcms).toBeGreaterThan(0);
+    expect(rel.totais.outras).toBe(l1949.valorContabil);
+    expect(rel.totais.baseIcms).toBe(l1102.baseIcms);
+    // As notas do CFOP seguem a mesma regra.
+    const notas = await json(`/api/empresas/${empresaId}/relatorios/notas?competencia=2026-08&cfop=1949`);
+    expect(notas.regra).toBe('outras');
+    expect(notas.notas[0]).toMatchObject({ baseIcms: 0, icms: 0, outras: notas.notas[0].valorContabil });
+    // Trocar a regra muda o relatório na hora; nada é gravado no item.
+    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'outras' }) })).status).toBe(200);
+    rel = await json(base);
+    expect(rel.linhas.find((l: any) => l.cfop === '1102')).toMatchObject({ regra: 'outras', baseIcms: 0, icms: 0 });
+    expect(db.consultar(`SELECT COUNT(*) AS n FROM itens WHERE v_bc_icms > 0`)[0].n).toBe(3);
+    expect(db.consultar(`SELECT * FROM auditoria WHERE entidade = 'regra_icms'`)).toHaveLength(1);
+    // A lista vem da planilha dela (30 CFOPs).
+    const lista = (await json('/api/regras-icms')).regras;
+    expect(lista).toHaveLength(30);
+    expect(lista.find((r: any) => r.cfop === '1556').regra).toBe('manter');
+    expect(lista.find((r: any) => r.cfop === '1403').regra).toBe('outras');
+    // CFOP de saída não entra; regra desconhecida é recusada.
+    expect((await req('/api/regras-icms/5102', { method: 'PUT', body: JSON.stringify({ regra: 'outras' }) })).status).toBe(400);
+    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'zerar' }) })).status).toBe(400);
   });
 
   it('regime: grava no cadastro e na edição, e aparece na lista', async () => {
