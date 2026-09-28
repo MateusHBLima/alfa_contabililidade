@@ -89,7 +89,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(23);
+    expect(tabelas.length).toBe(24); // + produtos_nao_fecharam (0017)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(3);
   });
@@ -3966,6 +3966,48 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     // E continua recusando sessão revogada.
     db.consultar('UPDATE sessoes SET revogada = 1');
     expect((await req('/api/eu')).status).toBe(401);
+  });
+
+  it('28/09: marcar produto "não fechou", filtrar só eles e baixar a planilha só deles', async () => {
+    await subir(empresaId, outraNota(XML, '61'));
+    const comp = '2026-08';
+    const base = `/api/empresas/${empresaId}/relatorios/produtos?competencia=${comp}`;
+    let rel = await json(base);
+    expect(rel.naoFecharam).toBe(0);
+    const refri = rel.linhas.find((l: any) => /REFRIG/.test(l.descricao));
+    const marca = (descricao: string, unidade: string, naoFechou: boolean, competencia = comp) =>
+      req(`/api/empresas/${empresaId}/relatorios/produtos/marca`, {
+        method: 'PUT', body: JSON.stringify({ competencia, descricao, unidade, naoFechou }),
+      });
+    // Maiúscula/espaço diferentes caem na mesma linha.
+    expect(((await (await marca(` ${refri.descricao.toLowerCase()} `, refri.unidade, true)).json()) as any).mudou).toBe(true);
+    expect(((await (await marca(refri.descricao, refri.unidade, true)).json()) as any).mudou).toBe(false);
+    rel = await json(base);
+    expect(rel.naoFecharam).toBe(1);
+    const marcada = rel.linhas.find((l: any) => l.descricao === refri.descricao);
+    expect(marcada).toMatchObject({ naoFechou: true, naoFechouPor: 'Contadora' });
+    expect(rel.linhas.filter((l: any) => l.naoFechou)).toHaveLength(1);
+    // Só os que não fecharam: tela e planilha.
+    const so = await json(`${base}&soNaoFechou=1`);
+    expect(so.linhas).toHaveLength(1);
+    expect(so.totais.valor).toBe(refri.valor);
+    const csv = await (await req(`${base}&soNaoFechou=1&formato=csv`)).text();
+    expect(csv).toContain(refri.descricao);
+    expect(csv).not.toMatch(/CHOC/);
+    // Outro mês não herda a marca.
+    expect((await json(`/api/empresas/${empresaId}/relatorios/produtos?competencia=2026-07`)).naoFecharam).toBe(0);
+    // Fica na trilha, e desmarcar volta.
+    expect(db.consultar(`SELECT * FROM auditoria WHERE campo = 'produto_nao_fechou'`)).toHaveLength(1);
+    await marca(refri.descricao, refri.unidade, false);
+    expect((await json(base)).naoFecharam).toBe(0);
+    expect(db.consultar(`SELECT * FROM auditoria WHERE campo = 'produto_nao_fechou'`)).toHaveLength(2);
+    // Competência precisa ser um mês.
+    expect((await marca(refri.descricao, refri.unidade, true, '2026')).status).toBe(400);
+    // Apagar a empresa leva as marcas junto.
+    await marca(refri.descricao, refri.unidade, true);
+    const cnpj = (await json('/api/empresas')).find((e: any) => e.id === empresaId).cnpj;
+    await req(`/api/empresas/${empresaId}?confirmar=${cnpj}`, { method: 'DELETE' });
+    expect(db.consultar('SELECT * FROM produtos_nao_fecharam')).toHaveLength(0);
   });
 
   it('regime: grava no cadastro e na edição, e aparece na lista', async () => {

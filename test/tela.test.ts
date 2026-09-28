@@ -450,3 +450,18 @@ describe('tela: busca dentro do relatório (27/09)', () => {
     expect(handler).not.toContain('carregarRelatorio');
   });
 });
+
+describe('tela: produto que não fechou (28/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('marca na linha, filtra só eles e a planilha acompanha', () => {
+    expect(HTML).toContain('id="rel-so-nf"');
+    expect(APP).toContain('data-marcar-produto');
+    expect(APP).toMatch(/async function alternarNaoFechou/);
+    expect(APP).toContain("'&soNaoFechou=1'");
+    // O clique no ✗ vem antes do clique que abre as notas do produto.
+    const i = APP.indexOf("closest('[data-marcar-produto]')");
+    const j = APP.indexOf("const linhaProduto = ev.target.closest('tr[data-rel-produto]')");
+    expect(i).toBeGreaterThan(0);
+    expect(i).toBeLessThan(j);
+  });
+});
