@@ -494,3 +494,14 @@ describe('tela: aviso de regime não informado (28/09)', () => {
     expect(APP).toContain('if (!estado.empresas.some((e) => e.id === estado.empresaId)) estado.empresaId = estado.empresas[0].id;');
   });
 });
+
+describe('tela: nota com ICMS no total por CFOP e impressão (28/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('total por CFOP da nota mostra base e ICMS, e a nota imprime limpa', () => {
+    expect(APP).toMatch(/function tabelaTotaisCfop\(t\)/);
+    expect(APP).toContain('<th class="num">Base ICMS</th><th class="num">ICMS</th>');
+    expect(HTML).toContain('id="btn-imprimir-nota"');
+    expect(HTML).toContain('id="impressao-nota"');
+    expect(APP).toMatch(/function imprimirNota\(\)/);
+  });
+});
