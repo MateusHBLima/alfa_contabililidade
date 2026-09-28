@@ -477,7 +477,7 @@ function marcarEscopo() {
   }
 }
 
-const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vUsuarios', 'vPapeis'];
+const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vRegrasIcms', 'vUsuarios', 'vPapeis'];
 
 function telaAtual() {
   return TELAS.find((v) => !$('#' + v).classList.contains('hidden')) ?? 'v1';
@@ -521,6 +521,7 @@ function irPara(view) {
   if (view === 'vRegras') carregarRegras();
   if (view === 'v3') abrirXmlCorrigido();
   if (view === 'vRelatorios') return abrirRelatorios();
+  if (view === 'vRegrasIcms') carregarRegrasIcms();
   if (view === 'vUsuarios') carregarUsuarios();
   if (view === 'vPapeis') carregarPapeis();
 }
@@ -1257,22 +1258,37 @@ async function abrirNota(id, itemId = null, voltar = null) {
 }
 
 const CFOPS = [
+  // Lista e ordem da planilha da Taís (28/09). Descrições resumidas da tabela CFOP.
   ['1102', 'Compra para revenda'],
-  ['1101', 'Compra para industrialização'],
-  ['1556', 'Compra de material para uso e consumo'],
-  ['1403', 'Compra para revenda — ST'],
-  ['1407', 'Compra de material de uso e consumo — ST'],
-  ['1551', 'Compra de bem para o ativo imobilizado'],
-  ['1202', 'Devolução de venda'],
-  ['1949', 'Outra entrada não especificada'],
   ['2102', 'Compra para revenda — outro estado'],
+  ['1101', 'Compra para industrialização'],
   ['2101', 'Compra para industrialização — outro estado'],
+  ['1556', 'Compra de material para uso e consumo'],
   ['2556', 'Compra de uso e consumo — outro estado'],
+  ['1403', 'Compra para revenda — ST'],
   ['2403', 'Compra para revenda com ST — outro estado'],
+  ['1407', 'Compra de material de uso e consumo — ST'],
   ['2407', 'Compra de material de uso e consumo — ST — outro estado'],
+  ['1551', 'Compra de bem para o ativo imobilizado'],
   ['2551', 'Compra de bem para o ativo imobilizado — outro estado'],
+  ['1202', 'Devolução de venda'],
   ['2202', 'Devolução de venda — outro estado'],
+  ['1949', 'Outra entrada não especificada'],
   ['2949', 'Outra entrada não especificada — outro estado'],
+  ['1411', 'Devolução de venda com ST'],
+  ['2411', 'Devolução de venda com ST — outro estado'],
+  ['1653', 'Compra de combustível ou lubrificante por consumidor final'],
+  ['1652', 'Compra de combustível ou lubrificante para comercialização'],
+  ['1910', 'Entrada de bonificação, doação ou brinde'],
+  ['2910', 'Entrada de bonificação, doação ou brinde — outro estado'],
+  ['1117', 'Compra para comercialização — entrega futura'],
+  ['2117', 'Compra para comercialização — entrega futura — outro estado'],
+  ['1922', 'Simples faturamento de compra para entrega futura'],
+  ['2922', 'Simples faturamento de compra para entrega futura — outro estado'],
+  ['1916', 'Retorno de conserto ou reparo'],
+  ['2916', 'Retorno de conserto ou reparo — outro estado'],
+  ['1912', 'Entrada para demonstração ou mostruário'],
+  ['2912', 'Entrada para demonstração ou mostruário — outro estado'],
 ];
 
 function montarSeletorCfop() {
@@ -2992,7 +3008,7 @@ function linhaPassaNoFiltro(l, filtro, qual) {
     ? [l.cfop, l.natureza, l.origem].join(' ')
     : [l.descricao, l.descricaoOriginal, l.unidade, l.cfops, l.codigos].join(' '));
   const valores = (qual === 'cfop'
-    ? [l.valorContabil, l.baseIcms, l.icms, l.st, l.ipi]
+    ? [l.valorContabil, l.baseIcms, l.icms, l.outras, l.st, l.ipi]
     : [l.valor, l.valorUnitarioMedio, l.quantidade]
   ).filter((v) => v !== null && v !== undefined).map((v) => Math.round(Number(v) * 100) / 100);
   return palavras.every((w) => {
@@ -3033,17 +3049,18 @@ function desenharRelatorio() {
     // Sintetico no formato do livro de entradas; clicar na linha abre as notas
     // daquele CFOP (analitico). Pedido da Tais, 22/09: "so um CFOP fechou (...)
     // eu nao consigo procurar a minha diferenca".
-    cab.innerHTML = '<tr><th>CFOP de entrada</th><th>Natureza</th><th class="num">Notas</th><th class="num">Itens</th><th class="num">Conferidos</th><th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th class="num">ICMS ST</th><th class="num">IPI</th><th>CFOP original (itens)</th></tr>';
+    cab.innerHTML = '<tr><th>CFOP de entrada</th><th>Natureza</th><th class="num">Notas</th><th class="num">Itens</th><th class="num">Conferidos</th><th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th class="num">Outras</th><th class="num">ICMS ST</th><th class="num">IPI</th><th>CFOP original (itens)</th></tr>';
     corpo.innerHTML = linhas.map((l) => `<tr class="rel-cfop" data-rel-cfop="${esc(l.cfop)}" title="Clique para ver as notas deste CFOP">
-      <td class="mono"><span class="seta">▸</span> <b>${esc(l.cfop)}</b></td><td>${esc(l.natureza)}</td>
+      <td class="mono"><span class="seta">▸</span> <b>${esc(l.cfop)}</b></td><td>${esc(l.natureza)}${seloRegra(l)}</td>
       <td class="num">${l.notas}</td><td class="num">${l.itens}</td><td class="num">${l.conferidos}</td>
       <td class="num"><b>${moeda(l.valorContabil)}</b></td><td class="num">${moeda(l.baseIcms)}</td><td class="num">${moeda(l.icms)}</td>
+      <td class="num">${l.regra === 'outras' ? moeda(l.outras) : ''}</td>
       <td class="num">${moeda(l.st)}</td><td class="num">${moeda(l.ipi)}</td><td class="tiny">${esc(l.origem)}</td></tr>`).join('');
     const t = filtro
       ? { notas: '—', itens: soma('itens'), conferidos: soma('conferidos'), valorContabil: soma('valorContabil'),
-          baseIcms: soma('baseIcms'), icms: soma('icms'), st: soma('st'), ipi: soma('ipi') }
+          baseIcms: soma('baseIcms'), icms: soma('icms'), outras: soma('outras'), st: soma('st'), ipi: soma('ipi') }
       : r.totais;
-    pe.innerHTML = `<tr><th>${filtro ? rotuloFiltro : 'Total'}</th><th></th><th class="num">${t.notas}</th><th class="num">${t.itens}</th><th class="num">${t.conferidos}</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.baseIcms)}</th><th class="num">${moeda(t.icms)}</th><th class="num">${moeda(t.st)}</th><th class="num">${moeda(t.ipi)}</th><th></th></tr>`;
+    pe.innerHTML = `<tr><th>${filtro ? rotuloFiltro : 'Total'}</th><th></th><th class="num">${t.notas}</th><th class="num">${t.itens}</th><th class="num">${t.conferidos}</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.baseIcms)}</th><th class="num">${moeda(t.icms)}</th><th class="num">${moeda(t.outras ?? 0)}</th><th class="num">${moeda(t.st)}</th><th class="num">${moeda(t.ipi)}</th><th></th></tr>`;
   } else {
     cab.innerHTML = '<tr><th>Produto</th><th>Un.</th><th class="num">Quantidade</th><th class="num">Unitário médio</th><th class="num">Valor total</th><th>CFOP</th><th>Cód. fornecedor</th><th class="num">Notas</th></tr>';
     corpo.innerHTML = linhas.map((l) => `<tr class="rel-cfop${l.naoFechou ? ' nao-fechou' : ''}" data-rel-produto="${esc(l.descricao)}" data-rel-unidade="${esc(l.unidade)}" title="Clique para ver as notas deste produto">
@@ -3062,8 +3079,8 @@ function desenharRelatorio() {
     corpo.innerHTML = '<tr><td class="vazio" colspan="8">Nenhum item nesta competência.</td></tr>';
   } else if (linhas.length === 0) {
     corpo.innerHTML = soNf && !filtro
-      ? '<tr><td class="vazio" colspan="11">Nenhum produto marcado como “não fechou” neste mês. Marque no ✗ de cada linha.</td></tr>'
-      : `<tr><td class="vazio" colspan="11">Nada com “${esc(filtro)}”${soNf ? ' entre os que não fecharam' : ''} neste relatório. Tente só um pedaço do nome, o código ou o valor.</td></tr>`;
+      ? '<tr><td class="vazio" colspan="12">Nenhum produto marcado como “não fechou” neste mês. Marque no ✗ de cada linha.</td></tr>'
+      : `<tr><td class="vazio" colspan="12">Nada com “${esc(filtro)}”${soNf ? ' entre os que não fecharam' : ''} neste relatório. Tente só um pedaço do nome, o código ou o valor.</td></tr>`;
   }
 }
 
@@ -3103,29 +3120,30 @@ $('#tbl-relatorio').addEventListener('click', async (ev) => {
   linha.querySelector('.seta').textContent = '▾';
   const sub = document.createElement('tr');
   sub.className = 'rel-notas';
-  sub.innerHTML = '<td colspan="11" class="vazio">carregando as notas…</td>';
+  sub.innerHTML = '<td colspan="12" class="vazio">carregando as notas…</td>';
   linha.after(sub);
   try {
     const r = await api(`/api/empresas/${estado.empresaId}/relatorios/notas?competencia=${rel.competencia}&cfop=${encodeURIComponent(cfop)}`);
     const soma = (k) => r.notas.reduce((s, n) => s + n[k], 0);
-    sub.innerHTML = `<td colspan="11"><div class="rel-notas-caixa">
+    sub.innerHTML = `<td colspan="12"><div class="rel-notas-caixa">
       <div class="rel-notas-topo"><b>${r.notas.length} nota(s) no CFOP ${esc(cfop)}</b>
         <span class="tiny">os valores somam só os itens deste CFOP; "Total da nota" é a nota inteira</span>
         <button class="btn sm" data-baixar-cfop="${esc(cfop)}">⇩ Analítico deste CFOP (item a item)</button></div>
-      <table><thead><tr><th>Emissão</th><th>Número</th><th>Fornecedor</th><th class="num">Itens</th><th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th class="num">ICMS ST</th><th class="num">IPI</th><th class="num">Total da nota</th><th></th></tr></thead>
+      <table><thead><tr><th>Emissão</th><th>Número</th><th>Fornecedor</th><th class="num">Itens</th><th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th class="num">Outras</th><th class="num">ICMS ST</th><th class="num">IPI</th><th class="num">Total da nota</th><th></th></tr></thead>
       <tbody>${r.notas.map((n) => `<tr>
         <td class="tiny">${esc(dataCurta(n.data))}</td><td class="mono">${esc(n.numero)}</td>
         <td>${esc(n.fornecedor)}<span class="porque">${esc(n.cnpj)}</span></td>
         <td class="num">${n.itens}${n.conferidos < n.itens ? `<span class="porque">${n.conferidos} conf.</span>` : ''}</td>
         <td class="num"><b>${moeda(n.valorContabil)}</b></td><td class="num">${moeda(n.baseIcms)}</td><td class="num">${moeda(n.icms)}</td>
+        <td class="num">${r.regra === 'outras' ? moeda(n.outras) : ''}</td>
         <td class="num">${moeda(n.st)}</td><td class="num">${moeda(n.ipi)}</td>
         <td class="num tiny">${moeda(n.valorNota)}${Math.abs(n.valorNota - n.valorContabil) > 0.009 ? '<span class="porque">tem itens em outro CFOP</span>' : ''}</td>
         <td><button class="btn sm" data-abrir-nota-rel="${esc(n.notaId)}">Abrir →</button></td></tr>`).join('')}</tbody>
-      <tfoot><tr><th colspan="3">Total do CFOP ${esc(cfop)}</th><th class="num">${soma('itens')}</th><th class="num">${moeda(soma('valorContabil'))}</th><th class="num">${moeda(soma('baseIcms'))}</th><th class="num">${moeda(soma('icms'))}</th><th class="num">${moeda(soma('st'))}</th><th class="num">${moeda(soma('ipi'))}</th><th></th><th></th></tr></tfoot>
+      <tfoot><tr><th colspan="3">Total do CFOP ${esc(cfop)}</th><th class="num">${soma('itens')}</th><th class="num">${moeda(soma('valorContabil'))}</th><th class="num">${moeda(soma('baseIcms'))}</th><th class="num">${moeda(soma('icms'))}</th><th class="num">${r.regra === 'outras' ? moeda(soma('outras')) : ''}</th><th class="num">${moeda(soma('st'))}</th><th class="num">${moeda(soma('ipi'))}</th><th></th><th></th></tr></tfoot>
       </table></div></td>`;
     pintarVistas(sub);
   } catch (e) {
-    sub.innerHTML = `<td colspan="11" class="vazio">Não consegui listar as notas: ${esc(e.message)}</td>`;
+    sub.innerHTML = `<td colspan="12" class="vazio">Não consegui listar as notas: ${esc(e.message)}</td>`;
   }
 });
 
@@ -3259,6 +3277,67 @@ async function alternarNaoFechou(tr) {
 $('#rel-so-nf')?.addEventListener('click', () => {
   rel.soNaoFechou = !rel.soNaoFechou;
   desenharRelatorio();
+});
+
+
+/* ---- Regras de ICMS por CFOP (28/09, planilha da Taís) ----
+   "Outras": no relatório, base e ICMS saem zerados e o valor contábil vai para a
+   coluna Outras. Não muda item nem XML: trocar a regra muda o relatório na hora. */
+function seloRegra(l) {
+  if (l.regra !== 'outras') return '';
+  const xml = (l.baseIcmsXml || l.icmsXml)
+    ? ` No XML: base ${moeda(l.baseIcmsXml)}, ICMS ${moeda(l.icmsXml)}.` : '';
+  return ` <span class="tag mut" title="Regra de ICMS deste CFOP: base e ICMS zerados, valor em Outras.${esc(xml)}">Outras</span>`;
+}
+
+const descricaoCfop = (c) => (CFOPS.find(([x]) => x === c) ?? [c, ''])[1];
+
+async function carregarRegrasIcms() {
+  const corpo = $('#tbl-regras-icms tbody');
+  corpo.innerHTML = '<tr><td colspan="4" class="vazio">carregando…</td></tr>';
+  let r;
+  try { r = await api('/api/regras-icms'); } catch (e) {
+    corpo.innerHTML = `<tr><td colspan="4" class="vazio">Não consegui carregar: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+  const podeMudar = pode('empresas.editar');
+  // Na ordem da lista de CFOPs dela; os que não estão na lista vão no fim.
+  const ordem = (c) => { const i = CFOPS.findIndex(([x]) => x === c); return i < 0 ? 999 : i; };
+  const regras = [...r.regras].sort((a, b) => ordem(a.cfop) - ordem(b.cfop) || a.cfop.localeCompare(b.cfop));
+  corpo.innerHTML = regras.map((g) => `<tr class="${g.regra === 'outras' ? 'regra-outras' : ''}">
+      <td class="mono"><b>${esc(g.cfop)}</b></td>
+      <td>${esc(descricaoCfop(g.cfop))}</td>
+      <td><select data-regra-cfop="${esc(g.cfop)}" ${podeMudar ? '' : 'disabled'}>
+        <option value="manter" ${g.regra === 'manter' ? 'selected' : ''}>Manter alíquota</option>
+        <option value="outras" ${g.regra === 'outras' ? 'selected' : ''}>Outras (zera base e ICMS)</option>
+      </select></td>
+      <td class="tiny">${g.atualizado_por ? `${esc(g.atualizado_por)} · ${esc(dataCurta(g.atualizado_em))}` : 'da planilha'}</td>
+    </tr>`).join('');
+}
+
+$('#tbl-regras-icms')?.addEventListener('change', async (ev) => {
+  const sel = ev.target.closest('select[data-regra-cfop]');
+  if (!sel) return;
+  try {
+    await api(`/api/regras-icms/${sel.dataset.regraCfop}`, { method: 'PUT', body: JSON.stringify({ regra: sel.value }) });
+    avisarSalvo(`CFOP ${sel.dataset.regraCfop}: ${sel.value === 'outras' ? 'Outras' : 'manter alíquota'}`);
+  } catch (e) {
+    alerta(`Não consegui salvar: ${e.message}`);
+  }
+  carregarRegrasIcms();
+});
+
+$('#form-regra-nova')?.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const cfop = $('#regra-nova-cfop').value.trim();
+  if (!/^[123]\d{3}$/.test(cfop)) return alerta('CFOP de entrada com 4 dígitos (começa com 1, 2 ou 3).');
+  try {
+    await api(`/api/regras-icms/${cfop}`, { method: 'PUT', body: JSON.stringify({ regra: $('#regra-nova-regra').value }) });
+    $('#regra-nova-cfop').value = '';
+    carregarRegrasIcms();
+  } catch (e) {
+    alerta(`Não consegui salvar: ${e.message}`);
+  }
 });
 
 /** Relatório por produto: clicar abre as notas em que ele aparece (23/09). */

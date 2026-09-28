@@ -42,6 +42,7 @@ body{background:var(--bg);color:var(--txt);font-family:"Segoe UI",Roboto,-apple-
 .side .nav-grupo.g-cadastro{background:rgba(255,255,255,.03)}
 .side .nav-grupo.g-escrituracao{background:rgba(255,255,255,.07)}
 .side .nav-grupo.g-empresa{background:rgba(255,255,255,.035)}
+.side .nav-grupo.g-impostos{background:rgba(255,255,255,.05)}
 .side .nav-grupo.g-admin{margin-top:auto;background:rgba(0,0,0,.10)}
 .side .navlabel{font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;color:#7f9dc4;padding:10px 8px 6px}
 .side nav button{display:flex;gap:10px;align-items:flex-start;text-align:left;width:100%;background:transparent;
@@ -522,3 +523,6 @@ tr.parou-aqui td{background:#e3edf9}
 tr.nao-fechou > td{background:#fdecea}
 #rel-so-nf.on{background:#c0392b;border-color:#c0392b;color:#fff}
 tr.nao-fechou:hover > td{background:#f9d6d1}
+
+/* Regras de ICMS (28/09) */
+#tbl-regras-icms tr.regra-outras td{background:#f4f6fa}
