@@ -55,9 +55,46 @@ export type LinhaCfop = {
   ipi: number;
   /** de quais CFOPs de saida vieram: "5102 (63), 5949 (6)" */
   origem: string;
+  /** Regra de ICMS do CFOP (tela Regras de ICMS). Em "outras", base e ICMS saem zerados. */
+  regra?: RegraIcms | null;
+  outras?: number;
+  /** base e ICMS como vieram no XML, quando a regra zerou */
+  baseIcmsXml?: number;
+  icmsXml?: number;
 };
 
-export type TotaisCfop = Totais & { notas: number; valorContabil: number; baseIcms: number; icms: number; st: number; ipi: number };
+export type TotaisCfop = Totais & { notas: number; valorContabil: number; baseIcms: number; icms: number; st: number; ipi: number; outras?: number };
+
+export type RegraIcms = 'manter' | 'outras';
+
+/**
+ * Aplica as regras de ICMS por CFOP (planilha da Taís, 25/09) ao relatório já
+ * montado: CFOP em "outras" sai com base e ICMS zerados e o valor contábil
+ * inteiro na coluna Outras. Não mexe no item nem no XML — é só como o livro
+ * mostra, e acompanha sozinho se o CFOP do item mudar.
+ * IPI e ICMS ST continuam como vieram (pergunta em aberto com a Taís).
+ */
+export function aplicarRegrasIcms(
+  rel: { linhas: LinhaCfop[]; totais: TotaisCfop },
+  regras: Map<string, RegraIcms>,
+): { linhas: LinhaCfop[]; totais: TotaisCfop } {
+  const linhas = rel.linhas.map((l) => {
+    const regra = regras.get(l.cfop) ?? null;
+    if (regra !== 'outras') return { ...l, regra, outras: 0 };
+    return { ...l, regra, outras: l.valorContabil, baseIcmsXml: l.baseIcms, icmsXml: l.icms, baseIcms: 0, icms: 0 };
+  });
+  const soma = (k: 'baseIcms' | 'icms' | 'outras') => centavos(linhas.reduce((t, l) => t + Number(l[k] ?? 0), 0));
+  return { linhas, totais: { ...rel.totais, baseIcms: soma('baseIcms'), icms: soma('icms'), outras: soma('outras') } };
+}
+
+/** O mesmo, para as notas de um CFOP (a lista que abre ao clicar no CFOP). */
+export function aplicarRegraNasNotas<T extends { valorContabil: number; baseIcms: number; icms: number }>(
+  notas: T[], regra: RegraIcms | null,
+): (T & { outras: number; regra: RegraIcms | null })[] {
+  return notas.map((n) => (regra === 'outras'
+    ? { ...n, regra, outras: n.valorContabil, baseIcms: 0, icms: 0 }
+    : { ...n, regra, outras: 0 }));
+}
 
 export type LinhaProduto = {
   descricao: string;
@@ -147,7 +184,7 @@ export function montarRelatorioCfop(brutas: LinhaCfopBruta[]): { linhas: LinhaCf
       ipi: centavos(g.ipi),
       origem: [...g.origem.entries()].sort((a, b) => b[1] - a[1]).map(([o, n]) => `${o} (${n})`).join(', '),
     }));
-  const soma = (k: keyof LinhaCfop) => centavos(linhas.reduce((s, l) => s + Number(l[k]), 0));
+  const soma = (k: 'valorContabil' | 'baseIcms' | 'icms' | 'st' | 'ipi') => centavos(linhas.reduce((s, l) => s + Number(l[k]), 0));
   return {
     linhas,
     totais: {
@@ -321,12 +358,12 @@ function csv(cabecalho: string[], linhas: (string | number)[][]): string {
 export function csvCfop(r: { linhas: LinhaCfop[]; totais: TotaisCfop }): string {
   return csv(
     ['CFOP de entrada', 'Natureza', 'Notas', 'Itens', 'Itens conferidos', 'Valor contábil', 'Base de cálculo ICMS',
-      'ICMS', 'ICMS ST', 'IPI', 'Valor dos produtos', 'CFOP original (itens)'],
+      'ICMS', 'Outras', 'ICMS ST', 'IPI', 'Valor dos produtos', 'CFOP original (itens)'],
     [
       ...r.linhas.map((l) => [l.cfop, l.natureza, l.notas, l.itens, l.conferidos, num(l.valorContabil), num(l.baseIcms),
-        num(l.icms), num(l.st), num(l.ipi), num(l.valor), l.origem]),
+        num(l.icms), num(l.outras ?? 0), num(l.st), num(l.ipi), num(l.valor), l.origem]),
       ['TOTAL', '', r.totais.notas, r.totais.itens, r.totais.conferidos, num(r.totais.valorContabil), num(r.totais.baseIcms),
-        num(r.totais.icms), num(r.totais.st), num(r.totais.ipi), num(r.totais.valor), ''],
+        num(r.totais.icms), num(r.totais.outras ?? 0), num(r.totais.st), num(r.totais.ipi), num(r.totais.valor), ''],
     ],
   );
 }

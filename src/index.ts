@@ -23,7 +23,7 @@ import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, type C
 import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
-import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
+import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 
 type Env = {
@@ -1840,13 +1840,16 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
     const linhas = await repo.relatorioAnalitico(empresaId, competencia, cfopFiltro);
     const doCfop = cfopFiltro ? `-cfop-${cfopFiltro.replace(/\D/g, '') || 'sem'}` : '';
     if (csv) return csvResposta(csvAnalitico(linhas), `relatorio-analitico-${sufixo}${doCfop}.csv`);
-    if (qual === 'notas') return c.json({ competencia: competencia ?? null, cfop: cfopFiltro, notas: notasDoAnalitico(linhas) });
+    if (qual === 'notas') {
+      const regra = (await repo.regrasIcms()).get(cfopFiltro!) ?? null;
+      return c.json({ competencia: competencia ?? null, cfop: cfopFiltro, regra, notas: aplicarRegraNasNotas(notasDoAnalitico(linhas), regra) });
+    }
     return c.json({ competencia: competencia ?? null, cfop: cfopFiltro ?? null, linhas });
   }
 
   let rel: any =
     qual === 'cfop'
-      ? montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia))
+      ? aplicarRegrasIcms(montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia)), await repo.regrasIcms())
       : montarRelatorioProdutos(await repo.relatorioProdutos(empresaId, competencia));
 
   // Produtos marcados "não fechou" no mês (28/09). Com soNaoFechou=1, o relatório
@@ -1872,6 +1875,22 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
     return csvResposta(qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any), `relatorio-${qual}-${sufixo}.csv`);
   }
   return c.json({ competencia: competencia ?? null, canceladas, naoFecharam, ...rel });
+});
+
+/** Regras de ICMS por CFOP (28/09, planilha da Taís): valem para o escritório inteiro. */
+app.get('/api/regras-icms', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  return c.json({ regras: await c.get('repo').listarRegrasIcms() });
+});
+
+app.put('/api/regras-icms/:cfop', async (c) => {
+  // Muda como o relatório de todas as empresas mostra base e ICMS: é decisão de quem administra.
+  exigir(c.get('sessao'), 'empresas.editar');
+  const cfop = c.req.param('cfop');
+  if (!/^[123]\d{3}$/.test(cfop)) return c.json({ erro: 'CFOP de entrada inválido (1xxx, 2xxx ou 3xxx)' }, 400);
+  const { regra } = z.object({ regra: z.enum(['manter', 'outras']) }).parse(await c.req.json());
+  const mudou = await c.get('repo').definirRegraIcms(cfop, regra);
+  return c.json({ ok: true, mudou });
 });
 
 /** Marca/desmarca um produto do relatório como "não fechou" (28/09). */

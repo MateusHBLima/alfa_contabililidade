@@ -412,7 +412,7 @@ describe('tela: reunião 25/09', () => {
     const ordem = [...HTML.matchAll(/data-view="(\w+)"/g)].map((m) => m[1]);
     expect(ordem.slice(0, 5)).toEqual(['vEmpresas', 'v1', 'v2', 'v3', 'vRelatorios']);
     expect(ordem.slice(-2)).toEqual(['vUsuarios', 'vPapeis']);
-    expect(HTML.match(/class="nav-grupo/g)).toHaveLength(4);
+    expect(HTML.match(/class="nav-grupo/g)).toHaveLength(5); // + Regras de impostos (28/09)
   });
   it('trocar de empresa pede OK e a empresa aberta aparece grande', () => {
     expect(HTML).toContain('id="btn-empresa-ok"');
@@ -465,3 +465,23 @@ describe('tela: produto que não fechou (28/09)', () => {
     expect(i).toBeLessThan(j);
   });
 });
+
+describe('tela: regras de ICMS e os CFOPs da planilha (28/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('os 30 CFOPs da planilha estão na lista', () => {
+    const lista = APP.slice(APP.indexOf('const CFOPS = ['), APP.indexOf('];', APP.indexOf('const CFOPS = [')));
+    const cfops = [...lista.matchAll(/\['(\d{4})',/g)].map((m) => m[1]);
+    expect(cfops).toHaveLength(30);
+    for (const c of ['1411', '2411', '1652', '1653', '1910', '2910', '1117', '2117', '1922', '2922', '1916', '2916', '1912', '2912']) {
+      expect(cfops).toContain(c);
+    }
+  });
+  it('tela de regras e coluna Outras no relatório por CFOP', () => {
+    expect(HTML).toContain('id="vRegrasIcms"');
+    expect(HTML).toContain('data-view="vRegrasIcms"');
+    expect(APP).toContain("'vRegrasIcms'");
+    expect(APP).toContain('<th class="num">Outras</th>');
+    expect(APP).toMatch(/function seloRegra/);
+  });
+});
+
