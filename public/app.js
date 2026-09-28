@@ -466,6 +466,11 @@ function marcarEscopo() {
     faixa.classList.toggle('hidden', !emp);
     faixa.innerHTML = emp
       ? `<span class="rotulo">Empresa aberta</span><span class="nome">${esc(emp.razao_social)}</span><span class="cnpj">CNPJ ${esc(String(emp.cnpj).replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5'))}</span>`
+        // Sem regime, as regras do Simples e a antecipação não têm como valer (28/09).
+        + (emp.regime ? `<span class="regime-ok">${esc(nomeRegime(emp.regime))}</span>`
+          : pode('empresas.editar')
+            ? '<button type="button" class="aviso-regime" data-informar-regime title="Abrir o cadastro para informar">⚠ Regime tributário não informado — informar</button>'
+            : '<span class="aviso-regime">⚠ Regime tributário não informado</span>')
       : '';
   }
   if ($('#sel-empresa') && estado.empresaId && $('#sel-empresa').value !== estado.empresaId && !$('#sel-empresa').classList.contains('pendente')) {
@@ -540,6 +545,11 @@ function marcarTrocaPendente() {
 }
 
 $('#sel-empresa').addEventListener('change', marcarTrocaPendente);
+$('#empresa-atual').addEventListener('click', (ev) => {
+  if (!ev.target.closest('[data-informar-regime]')) return;
+  const emp = (estado.empresas || []).find((x) => x.id === estado.empresaId);
+  if (emp) formularioEmpresa(emp);
+});
 $('#btn-empresa-ok').addEventListener('click', async () => {
   const id = $('#sel-empresa').value;
   if (id && id !== estado.empresaId) await trocarEmpresa(id);
@@ -698,7 +708,10 @@ async function carregarEmpresas() {
   sel.innerHTML = estado.empresas
     .map((e) => `<option value="${e.id}">${esc(e.razao_social)} — ${esc(e.cnpj)}</option>`)
     .join('');
-  estado.empresaId = estado.empresas[0].id;
+  // Recarregar a lista (depois de salvar um cadastro, por exemplo) não pode trocar
+  // a empresa aberta: antes voltava sempre para a primeira da lista, sem aviso.
+  if (!estado.empresas.some((e) => e.id === estado.empresaId)) estado.empresaId = estado.empresas[0].id;
+  sel.value = estado.empresaId;
   marcarEscopo();
   await carregarImportacoes();
   await carregarNotas();
@@ -2245,7 +2258,7 @@ function renderEmpresas() {
     <td><button class="link-tabela" data-abrir-empresa="${esc(e.id)}">${esc(e.razao_social)}</button></td>
     <td>${esc(e.uf ?? '—')}</td>
     <td><span class="tag info">${esc(e.perfil)}</span></td>
-    <td class="tiny">${e.regime ? esc(nomeRegime(e.regime)) : '<span class="porque">não informado</span>'}</td>
+    <td class="tiny">${e.regime ? esc(nomeRegime(e.regime)) : '<span class="tag-aviso-regime">⚠ não informado</span>'}</td>
     <td class="mono tiny">${esc(e.cnae_principal ?? '—')}</td>
     <td class="acoes">
       ${pode('empresas.editar')

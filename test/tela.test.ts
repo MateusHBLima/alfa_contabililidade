@@ -485,3 +485,12 @@ describe('tela: regras de ICMS e os CFOPs da planilha (28/09)', () => {
   });
 });
 
+
+describe('tela: aviso de regime não informado (28/09)', () => {
+  it('a faixa avisa e abre o cadastro; recarregar a lista não troca a empresa aberta', () => {
+    expect(APP).toContain('Regime tributário não informado');
+    expect(APP).toContain('data-informar-regime');
+    expect(APP).not.toContain('estado.empresaId = estado.empresas[0].id;\n  marcarEscopo();');
+    expect(APP).toContain('if (!estado.empresas.some((e) => e.id === estado.empresaId)) estado.empresaId = estado.empresas[0].id;');
+  });
+});
