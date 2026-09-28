@@ -1181,6 +1181,51 @@ export class Repo {
    * O que foi alterado por ultimo nos itens desta empresa, pela trilha (so mudanca de
    * valor - conferir nao entra). Para "nao sei qual foi a ultima que eu fiz" (23/09).
    */
+  /** Regras de ICMS por CFOP do escritório (planilha da Taís, 25/09). */
+  async regrasIcms(): Promise<Map<string, 'manter' | 'outras'>> {
+    const { results } = await this.db
+      .prepare('SELECT cfop, regra FROM regras_icms WHERE tenant_id = ?')
+      .bind(this.tenant)
+      .all<any>();
+    return new Map(results.map((r: any) => [r.cfop as string, r.regra as 'manter' | 'outras']));
+  }
+
+  async listarRegrasIcms(): Promise<any[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT r.cfop, r.regra, r.atualizado_em, u.nome AS atualizado_por
+           FROM regras_icms r LEFT JOIN usuarios u ON u.id = r.atualizado_por
+          WHERE r.tenant_id = ? ORDER BY r.cfop`,
+      )
+      .bind(this.tenant)
+      .all<any>();
+    return results;
+  }
+
+  /** Cria ou troca a regra de um CFOP. Devolve se mudou. */
+  async definirRegraIcms(cfop: string, regra: 'manter' | 'outras'): Promise<boolean> {
+    const atual = await this.db
+      .prepare('SELECT regra FROM regras_icms WHERE tenant_id = ? AND cfop = ?')
+      .bind(this.tenant, cfop)
+      .first<{ regra: string }>();
+    if (atual?.regra === regra) return false;
+    await this.db
+      .prepare(
+        `INSERT INTO regras_icms (tenant_id, cfop, regra, atualizado_em, atualizado_por) VALUES (?,?,?,?,?)
+         ON CONFLICT (tenant_id, cfop) DO UPDATE SET regra = excluded.regra,
+           atualizado_em = excluded.atualizado_em, atualizado_por = excluded.atualizado_por`,
+      )
+      .bind(this.tenant, cfop, regra, agora(), this.ctx.sessao.usuarioId)
+      .run();
+    await this.aud.registrarLote([
+      this.evento({
+        acao: atual ? 'alterar' : 'criar', entidade: 'regra_icms', entidadeId: cfop, campo: 'regra',
+        valorAntes: atual?.regra ?? null, valorDepois: regra, origem: 'manual',
+      }),
+    ]);
+    return true;
+  }
+
   /** Produtos marcados "não fechou" no relatório do mês (28/09). */
   async produtosQueNaoFecharam(empresaId: string, competencia: string): Promise<Map<string, { por: string | null; em: string }>> {
     this.exigirEmpresa(empresaId);
