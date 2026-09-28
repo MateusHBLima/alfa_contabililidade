@@ -533,3 +533,22 @@ tr.nao-fechou:hover > td{background:#f9d6d1}
 button.aviso-regime{cursor:pointer}
 button.aviso-regime:hover{background:#ffeccc}
 .tag-aviso-regime{color:#8a5a00;background:#fff4e0;border:1px solid #f0c36d;border-radius:8px;padding:0 6px;font-weight:600}
+
+/* Impressão da nota como ficou (28/09) */
+.impressao-nota{display:none}
+@media print{
+  @page{size:A4 landscape;margin:10mm}
+  body.imprimindo-nota > *{display:none !important}
+  body.imprimindo-nota > #impressao-nota{display:block !important;font:10px/1.35 Arial,sans-serif;color:#000}
+  #impressao-nota .imp-topo{margin-bottom:8px}
+  #impressao-nota .imp-topo div{margin:1px 0}
+  #impressao-nota table{width:100%;border-collapse:collapse;margin:4px 0 10px}
+  #impressao-nota th,#impressao-nota td{border:1px solid #999;padding:2px 4px;vertical-align:top;text-align:left}
+  #impressao-nota th{background:#eee;font-size:9px;text-transform:uppercase}
+  #impressao-nota .num{text-align:right;white-space:nowrap}
+  #impressao-nota .obs,#impressao-nota .porque{display:block;font-size:8.5px;color:#444}
+  #impressao-nota .tag{font-size:8.5px;border:1px solid #999;padding:0 3px}
+  #impressao-nota h3{font-size:11px;margin:8px 0 2px}
+  #impressao-nota tr{break-inside:avoid}
+  #impressao-nota thead{display:table-header-group}
+}

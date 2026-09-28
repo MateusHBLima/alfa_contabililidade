@@ -302,6 +302,7 @@
               <button class="btn sm sutil hidden" id="btn-cancelada" title="Nota cancelada na SEFAZ: fica na lista com a chave, mas vale zero">⊘ Marcar como cancelada</button>
               <button class="btn sm" id="btn-ver-original" title="A nota como o fornecedor emitiu, lado a lado com o que o sistema leu">📄 Nota original</button>
               <button class="btn sm" id="btn-pdf-nota" title="A nota como o fornecedor emitiu (DANFE), para salvar em PDF e mandar ao cliente">⇩ PDF</button>
+              <button class="btn sm" id="btn-imprimir-nota" title="Imprime a nota como ficou no sistema: itens, CFOP de entrada, valores e o total por CFOP">🖨 Imprimir</button>
               <button class="btn sm primary" id="btn-ver-xml">Ver XML corrigido →</button>
             </div>
           </header>
@@ -612,5 +613,6 @@
 </div>
 
 <script src="/app.js"></script>
+<div id="impressao-nota" class="impressao-nota"></div>
 </body>
 </html>

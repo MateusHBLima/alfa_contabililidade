@@ -4050,6 +4050,18 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'zerar' }) })).status).toBe(400);
   });
 
+  it('28/09: total por CFOP da nota traz base e ICMS (somando os itens)', async () => {
+    await subir(empresaId, outraNota(XML, '63'));
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    db.consultar(`UPDATE itens SET v_bc_icms = valor_total, v_icms = ROUND(valor_total * 0.12, 2), valores_lidos = 1 WHERE nota_id = '${nota}'`);
+    const t = (await json(`/api/notas/${nota}`)).totaisCfop;
+    const itens = db.consultar(`SELECT v_bc_icms, v_icms FROM itens WHERE nota_id = '${nota}'`) as any[];
+    const soma = (k: string) => Math.round(itens.reduce((a, i) => a + Number(i[k]), 0) * 100) / 100;
+    expect(t.totais.baseIcms).toBe(soma('v_bc_icms'));
+    expect(t.totais.icms).toBe(soma('v_icms'));
+    expect(t.linhas.reduce((a: number, l: any) => a + l.icms, 0)).toBeCloseTo(soma('v_icms'), 2);
+  });
+
   it('regime: grava no cadastro e na edição, e aparece na lista', async () => {
     let e = (await json('/api/empresas')).find((x: any) => x.id === empresaId);
     expect(e.regime).toBe('simples');
