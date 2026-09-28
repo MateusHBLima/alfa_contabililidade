@@ -258,6 +258,11 @@ export type LinhaProdutoBruta = {
   descricoes_originais: number;
 };
 
+/** A linha do relatório por produto: descrição + unidade, sem diferença de maiúscula e espaço. */
+export function chaveProduto(descricao: string, unidade: string): string {
+  return `${String(descricao ?? '').trim().toUpperCase()}|${String(unidade ?? '').trim().toUpperCase()}`;
+}
+
 export function montarRelatorioProdutos(brutas: LinhaProdutoBruta[]): { linhas: LinhaProduto[]; totais: Totais } {
   const lista = (s: string | null) =>
     [...new Set(String(s ?? '').split(',').map((x) => x.trim()).filter(Boolean))].sort().join(', ');

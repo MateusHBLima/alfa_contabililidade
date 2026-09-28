@@ -1,4 +1,5 @@
 import { Auditoria, type EventoAuditoria, type Origem } from './auditoria';
+import { chaveProduto } from '../relatorios/relatorios';
 import type { Sessao } from '../auth/permissoes';
 import { podeVerEmpresa } from '../auth/permissoes';
 import type { Campo } from '../rules/campos';
@@ -1180,6 +1181,52 @@ export class Repo {
    * O que foi alterado por ultimo nos itens desta empresa, pela trilha (so mudanca de
    * valor - conferir nao entra). Para "nao sei qual foi a ultima que eu fiz" (23/09).
    */
+  /** Produtos marcados "não fechou" no relatório do mês (28/09). */
+  async produtosQueNaoFecharam(empresaId: string, competencia: string): Promise<Map<string, { por: string | null; em: string }>> {
+    this.exigirEmpresa(empresaId);
+    const { results } = await this.db
+      .prepare(
+        `SELECT m.chave, m.marcado_em, u.nome AS por
+           FROM produtos_nao_fecharam m LEFT JOIN usuarios u ON u.id = m.marcado_por
+          WHERE m.tenant_id = ? AND m.empresa_id = ? AND m.competencia = ?`,
+      )
+      .bind(this.tenant, empresaId, competencia)
+      .all<any>();
+    return new Map(results.map((r: any) => [r.chave as string, { por: r.por ?? null, em: r.marcado_em as string }]));
+  }
+
+  /** Marca ou desmarca um produto do relatório como "não fechou". Devolve se mudou. */
+  async marcarProdutoNaoFechou(
+    empresaId: string, competencia: string, descricao: string, unidade: string, naoFechou: boolean,
+  ): Promise<boolean> {
+    this.exigirEmpresa(empresaId);
+    const chave = chaveProduto(descricao, unidade);
+    const r = naoFechou
+      ? await this.db
+        .prepare(
+          `INSERT OR IGNORE INTO produtos_nao_fecharam
+             (tenant_id, empresa_id, competencia, chave, descricao, unidade, marcado_por, marcado_em)
+           VALUES (?,?,?,?,?,?,?,?)`,
+        )
+        .bind(this.tenant, empresaId, competencia, chave, descricao.trim(), unidade.trim(), this.ctx.sessao.usuarioId, agora())
+        .run()
+      : await this.db
+        .prepare('DELETE FROM produtos_nao_fecharam WHERE tenant_id = ? AND empresa_id = ? AND competencia = ? AND chave = ?')
+        .bind(this.tenant, empresaId, competencia, chave)
+        .run();
+    const mudou = Number(r.meta?.changes ?? 0) > 0;
+    if (mudou) {
+      await this.aud.registrarLote([
+        this.evento({
+          acao: 'alterar', entidade: 'empresa', entidadeId: empresaId, campo: 'produto_nao_fechou',
+          valorAntes: naoFechou ? null : `${competencia} ${descricao} (${unidade})`,
+          valorDepois: naoFechou ? `${competencia} ${descricao} (${unidade})` : null, origem: 'manual',
+        }),
+      ]);
+    }
+    return mudou;
+  }
+
   async ultimasAlteracoes(empresaId: string, limite = 50): Promise<any[]> {
     this.exigirEmpresa(empresaId);
     const { results } = await this.db

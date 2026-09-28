@@ -2925,7 +2925,7 @@ $('#btn-novo-usuario').addEventListener('click', () => editarUsuario(null).catch
 // medicao do projeto. A conta e do servidor; a tela so desenha, e a planilha
 // baixada sai da MESMA rota (formato=csv), para tela e arquivo nunca discordarem.
 
-const rel = { qual: 'cfop', competencia: '', filtro: '', ultimo: null };
+const rel = { qual: 'cfop', competencia: '', filtro: '', ultimo: null, soNaoFechou: false };
 
 async function abrirRelatorios() {
   if (!estado.empresaId) return;
@@ -3010,9 +3010,14 @@ function desenharRelatorio() {
   const aviso = $('#rel-aviso');
   const [cab, corpo, pe] = [tabela.querySelector('thead'), tabela.querySelector('tbody'), tabela.querySelector('tfoot')];
   const filtro = rel.filtro.trim();
-  const linhas = filtro ? r.linhas.filter((l) => linhaPassaNoFiltro(l, filtro, qual)) : r.linhas;
+  const soNf = qual === 'produtos' && rel.soNaoFechou;
+  const linhas = r.linhas
+    .filter((l) => !soNf || l.naoFechou)
+    .filter((l) => !filtro || linhaPassaNoFiltro(l, filtro, qual));
+  atualizarBotaoNaoFechou();
   const soma = (k) => linhas.reduce((s, l) => s + Number(l[k] ?? 0), 0);
-  const rotuloFiltro = `${linhas.length} de ${r.linhas.length} ${qual === 'cfop' ? 'CFOPs' : 'produtos'} com “${esc(filtro)}”`;
+  const rotuloFiltro = `${linhas.length} de ${r.linhas.length} ${qual === 'cfop' ? 'CFOPs' : 'produtos'}`
+    + (soNf ? ' que não fecharam' : '') + (filtro ? ` com “${esc(filtro)}”` : '');
   // O relatorio inclui o que ainda nao foi conferido - e diz isso, para o total
   // bater com o do outro sistema sem fazer palpite passar por decisao.
   const pendentes = r.totais.itens - r.totais.conferidos;
@@ -3041,8 +3046,8 @@ function desenharRelatorio() {
     pe.innerHTML = `<tr><th>${filtro ? rotuloFiltro : 'Total'}</th><th></th><th class="num">${t.notas}</th><th class="num">${t.itens}</th><th class="num">${t.conferidos}</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.baseIcms)}</th><th class="num">${moeda(t.icms)}</th><th class="num">${moeda(t.st)}</th><th class="num">${moeda(t.ipi)}</th><th></th></tr>`;
   } else {
     cab.innerHTML = '<tr><th>Produto</th><th>Un.</th><th class="num">Quantidade</th><th class="num">Unitário médio</th><th class="num">Valor total</th><th>CFOP</th><th>Cód. fornecedor</th><th class="num">Notas</th></tr>';
-    corpo.innerHTML = linhas.map((l) => `<tr class="rel-cfop" data-rel-produto="${esc(l.descricao)}" data-rel-unidade="${esc(l.unidade)}" title="Clique para ver as notas deste produto">
-      <td><span class="seta">▸</span> ${esc(l.descricao)}${l.descricaoOriginal && l.descricaoOriginal !== l.descricao
+    corpo.innerHTML = linhas.map((l) => `<tr class="rel-cfop${l.naoFechou ? ' nao-fechou' : ''}" data-rel-produto="${esc(l.descricao)}" data-rel-unidade="${esc(l.unidade)}" title="Clique para ver as notas deste produto">
+      <td>${botaoNaoFechou(l)}<span class="seta">▸</span> ${esc(l.descricao)}${l.descricaoOriginal && l.descricaoOriginal !== l.descricao
         ? `<span class="porque">na nota: ${esc(l.descricaoOriginal)}</span>` : ''}</td>
       <td class="tiny">${esc(l.unidade)}</td>
       <td class="num">${qtd(l.quantidade)}</td>
@@ -3050,12 +3055,15 @@ function desenharRelatorio() {
       <td class="num">${moeda(l.valor)}</td>
       <td class="mono tiny">${esc(l.cfops)}</td><td class="mono tiny">${esc(l.codigos)}</td>
       <td class="num">${l.notas}</td></tr>`).join('');
-    pe.innerHTML = `<tr><th>${filtro ? rotuloFiltro : `Total · ${r.linhas.length} produtos`}</th><th></th><th></th><th></th><th class="num">${moeda(filtro ? soma('valor') : r.totais.valor)}</th><th></th><th></th><th></th></tr>`;
+    const filtrado = !!filtro || soNf;
+    pe.innerHTML = `<tr><th>${filtrado ? rotuloFiltro : `Total · ${r.linhas.length} produtos`}</th><th></th><th></th><th></th><th class="num">${moeda(filtrado ? soma('valor') : r.totais.valor)}</th><th></th><th></th><th></th></tr>`;
   }
   if (r.linhas.length === 0) {
     corpo.innerHTML = '<tr><td class="vazio" colspan="8">Nenhum item nesta competência.</td></tr>';
   } else if (linhas.length === 0) {
-    corpo.innerHTML = `<tr><td class="vazio" colspan="11">Nada com “${esc(filtro)}” neste relatório. Tente só um pedaço do nome, o código ou o valor.</td></tr>`;
+    corpo.innerHTML = soNf && !filtro
+      ? '<tr><td class="vazio" colspan="11">Nenhum produto marcado como “não fechou” neste mês. Marque no ✗ de cada linha.</td></tr>'
+      : `<tr><td class="vazio" colspan="11">Nada com “${esc(filtro)}”${soNf ? ' entre os que não fecharam' : ''} neste relatório. Tente só um pedaço do nome, o código ou o valor.</td></tr>`;
   }
 }
 
@@ -3083,6 +3091,8 @@ $('#tbl-relatorio').addEventListener('click', async (ev) => {
   if (baixarCfop) {
     return baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&cfop=${encodeURIComponent(baixarCfop.dataset.baixarCfop)}&formato=csv`);
   }
+  const marcar = ev.target.closest('[data-marcar-produto]');
+  if (marcar) return alternarNaoFechou(marcar.closest('tr[data-rel-produto]'));
   const linhaProduto = ev.target.closest('tr[data-rel-produto]');
   if (linhaProduto) return abrirNotasDoProduto(linhaProduto);
   const linha = ev.target.closest('tr[data-rel-cfop]');
@@ -3201,6 +3211,56 @@ $('#rel-limpar-vistas')?.addEventListener('click', () => {
   });
 });
 
+
+/* ---- "Não fechou" no relatório por produto (28/09, pedido da Taís) ----
+   Ela confere com a auxiliar do Questor e vai marcando de vermelho o que não
+   bate, sem parar para abrir; depois filtra só esses e baixa a planilha deles.
+   A marca fica no banco, por empresa e mês. */
+function botaoNaoFechou(l) {
+  const dica = l.naoFechou
+    ? `Não fechou${l.naoFechouPor ? ` — marcado por ${l.naoFechouPor}` : ''}. Clique para desmarcar.`
+    : 'Marcar: não fechou com o outro sistema';
+  return `<button type="button" class="marca-nf${l.naoFechou ? ' on' : ''}" data-marcar-produto title="${esc(dica)}">✗</button>`;
+}
+
+function atualizarBotaoNaoFechou() {
+  const b = $('#rel-so-nf');
+  if (!b) return;
+  const produtos = rel.qual === 'produtos' && rel.ultimo?.qual === 'produtos';
+  b.classList.toggle('hidden', !produtos);
+  const n = produtos ? rel.ultimo.linhas.filter((l) => l.naoFechou).length : 0;
+  b.textContent = `✗ Só os que não fecharam (${n})`;
+  b.classList.toggle('on', rel.soNaoFechou);
+}
+
+async function alternarNaoFechou(tr) {
+  if (!tr || !rel.ultimo || !/^\d{4}-\d{2}$/.test(rel.competencia)) return;
+  const l = rel.ultimo.linhas.find((x) => x.descricao === tr.dataset.relProduto && x.unidade === tr.dataset.relUnidade);
+  if (!l) return;
+  const marcar = !l.naoFechou;
+  try {
+    await api(`/api/empresas/${estado.empresaId}/relatorios/produtos/marca`, {
+      method: 'PUT',
+      body: JSON.stringify({ competencia: rel.competencia, descricao: l.descricao, unidade: l.unidade, naoFechou: marcar }),
+    });
+  } catch (e) {
+    return alerta(`Não consegui marcar: ${e.message}`);
+  }
+  l.naoFechou = marcar;
+  l.naoFechouPor = marcar ? (estado.eu?.nome ?? null) : null;
+  // Com o filtro "só os que não fecharam" ligado, desmarcar tira a linha da lista.
+  if (rel.soNaoFechou && !marcar) return desenharRelatorio();
+  tr.classList.toggle('nao-fechou', marcar);
+  const b = tr.querySelector('[data-marcar-produto]');
+  b.outerHTML = botaoNaoFechou(l);
+  atualizarBotaoNaoFechou();
+}
+
+$('#rel-so-nf')?.addEventListener('click', () => {
+  rel.soNaoFechou = !rel.soNaoFechou;
+  desenharRelatorio();
+});
+
 /** Relatório por produto: clicar abre as notas em que ele aparece (23/09). */
 async function abrirNotasDoProduto(linha) {
   const aberto = linha.nextElementSibling?.classList.contains('rel-notas');
@@ -3227,7 +3287,8 @@ $('#rel-baixar-analitico').addEventListener('click', () => {
 
 $('#rel-baixar').addEventListener('click', () => {
   if (!estado.empresaId || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
-  baixar(`/api/empresas/${estado.empresaId}/relatorios/${rel.qual}?competencia=${rel.competencia}&formato=csv`);
+  const so = rel.qual === 'produtos' && rel.soNaoFechou ? '&soNaoFechou=1' : '';
+  baixar(`/api/empresas/${estado.empresaId}/relatorios/${rel.qual}?competencia=${rel.competencia}&formato=csv${so}`);
 });
 
 async function carregarFornecedores() {

@@ -23,7 +23,7 @@ import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, type C
 import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
-import { montarRelatorioCfop, montarRelatorioProdutos, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
+import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 
 type Env = {
@@ -1844,15 +1844,50 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
     return c.json({ competencia: competencia ?? null, cfop: cfopFiltro ?? null, linhas });
   }
 
-  const rel =
+  let rel: any =
     qual === 'cfop'
       ? montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia))
       : montarRelatorioProdutos(await repo.relatorioProdutos(empresaId, competencia));
 
+  // Produtos marcados "não fechou" no mês (28/09). Com soNaoFechou=1, o relatório
+  // (e a planilha) vem só com eles - o "relatório do que não fechou".
+  let naoFecharam = 0;
+  if (qual === 'produtos' && competencia && /^\d{4}-\d{2}$/.test(competencia)) {
+    const marcas = await repo.produtosQueNaoFecharam(empresaId, competencia);
+    const linhas = rel.linhas.map((l: any) => {
+      const m = marcas.get(chaveProduto(l.descricao, l.unidade));
+      return m ? { ...l, naoFechou: true, naoFechouPor: m.por, naoFechouEm: m.em } : { ...l, naoFechou: false };
+    });
+    naoFecharam = linhas.filter((l: any) => l.naoFechou).length;
+    if (c.req.query('soNaoFechou') === '1') {
+      const so = linhas.filter((l: any) => l.naoFechou);
+      const soma = (k: string) => so.reduce((t: number, l: any) => t + Number(l[k] ?? 0), 0);
+      rel = { linhas: so, totais: { itens: soma('itens'), conferidos: soma('conferidos'), valor: Math.round(soma('valor') * 100) / 100 } };
+    } else {
+      rel = { ...rel, linhas };
+    }
+  }
+
   if (csv) {
     return csvResposta(qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any), `relatorio-${qual}-${sufixo}.csv`);
   }
-  return c.json({ competencia: competencia ?? null, canceladas, ...rel });
+  return c.json({ competencia: competencia ?? null, canceladas, naoFecharam, ...rel });
+});
+
+/** Marca/desmarca um produto do relatório como "não fechou" (28/09). */
+app.put('/api/empresas/:id/relatorios/produtos/marca', async (c) => {
+  // Anotação de conferência, não dado fiscal: quem vê o relatório pode marcar.
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const corpo = z.object({
+    competencia: z.string().regex(/^\d{4}-\d{2}$/),
+    descricao: z.string().min(1).max(300),
+    unidade: z.string().max(20),
+    naoFechou: z.boolean(),
+  }).parse(await c.req.json());
+  const mudou = await c.get('repo').marcarProdutoNaoFechou(
+    c.req.param('id'), corpo.competencia, corpo.descricao, corpo.unidade, corpo.naoFechou,
+  );
+  return c.json({ ok: true, mudou, naoFechou: corpo.naoFechou });
 });
 
 /**
@@ -2334,6 +2369,7 @@ app.delete('/api/empresas/:id', async (c) => {
     c.env.DB.prepare('DELETE FROM regras WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM fornecedores WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM lotes_importacao WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM produtos_nao_fecharam WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM usuario_empresas WHERE empresa_id = ?').bind(id),
     c.env.DB.prepare('DELETE FROM empresas WHERE tenant_id = ? AND id = ?').bind(s.tenantId, id),
   ]);
