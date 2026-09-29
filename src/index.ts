@@ -1787,6 +1787,19 @@ const csvResposta = (corpo: string, nome: string) =>
  *   notas     — as notas de UM CFOP (`?cfop=`), somando só os itens daquele CFOP
  * JSON para a tela; `?formato=csv` para a planilha. Regra e formato em src/relatorios.
  */
+/**
+ * Período de emissão dos relatórios (29/09, pedido da Taís): `?de=AAAA-MM-DD&ate=AAAA-MM-DD`,
+ * as duas pontas inclusive, cada uma opcional. Vale junto com a competência.
+ */
+function lerPeriodo(c: any): { periodo?: { de?: string; ate?: string }; erro?: string } {
+  const de = c.req.query('de') || undefined;
+  const ate = c.req.query('ate') || undefined;
+  const ok = (d?: string) => d === undefined || /^\d{4}-\d{2}-\d{2}$/.test(d);
+  if (!ok(de) || !ok(ate)) return { erro: 'data inválida (use AAAA-MM-DD)' };
+  if (de && ate && de > ate) return { erro: 'a data inicial está depois da final' };
+  return { periodo: de || ate ? { de, ate } : undefined };
+}
+
 /** Procurar produto em todas as notas da empresa (texto) ou os itens de um produto do relatório. */
 app.get('/api/empresas/:id/busca-itens', async (c) => {
   exigir(c.get('sessao'), 'notas.visualizar');
@@ -1796,9 +1809,11 @@ app.get('/api/empresas/:id/busca-itens', async (c) => {
   if (competencia && !/^\d{4}(-\d{2})?$/.test(competencia)) return c.json({ erro: 'competência inválida' }, 400);
   if (produto === undefined && texto.length < 2) return c.json({ erro: 'digite pelo menos 2 letras' }, 400);
   if (texto.length > 80) return c.json({ erro: 'busca longa demais' }, 400);
+  const { periodo, erro } = lerPeriodo(c);
+  if (erro) return c.json({ erro }, 400);
   const repo = c.get('repo');
   const itens = await repo.buscarItens(c.req.param('id'), {
-    texto: texto || undefined, produto, unidade: c.req.query('unidade') ?? '', competencia,
+    texto: texto || undefined, produto, unidade: c.req.query('unidade') ?? '', competencia, periodo,
   });
   // Nada aqui: diz se existe em outra empresa (a busca e por empresa selecionada).
   const outras = itens.length === 0 && texto ? await repo.buscarEmOutrasEmpresas(c.req.param('id'), texto) : [];
@@ -1826,34 +1841,37 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
     return c.json({ erro: 'CFOP inválido' }, 400);
   }
   if (qual === 'notas' && cfopFiltro === undefined) return c.json({ erro: 'informe o CFOP' }, 400);
+  const { periodo, erro: erroPeriodo } = lerPeriodo(c);
+  if (erroPeriodo) return c.json({ erro: erroPeriodo }, 400);
 
   const repo = c.get('repo');
   const empresaId = c.req.param('id');
   const csv = c.req.query('formato') === 'csv';
   const empresa = await repo.obterEmpresa(empresaId);
-  const sufixo = `${empresa?.cnpj ?? 'empresa'}-${competencia ?? 'tudo'}`;
+  const sufixo = `${empresa?.cnpj ?? 'empresa'}-${competencia ?? 'tudo'}`
+    + (periodo ? `-emissao-${periodo.de ?? 'inicio'}-a-${periodo.ate ?? 'fim'}` : '');
 
   if (qual !== 'produtos') await garantirValoresFiscais(c, empresaId, competencia);
-  const canceladas = await repo.contarCanceladas(empresaId, competencia);
+  const canceladas = await repo.contarCanceladas(empresaId, competencia, periodo);
 
   if (qual === 'analitico' || qual === 'notas') {
-    const linhas = await repo.relatorioAnalitico(empresaId, competencia, cfopFiltro);
+    const linhas = await repo.relatorioAnalitico(empresaId, competencia, cfopFiltro, periodo);
     const doCfop = cfopFiltro ? `-cfop-${cfopFiltro.replace(/\D/g, '') || 'sem'}` : '';
     if (csv) return csvResposta(csvAnalitico(linhas), `relatorio-analitico-${sufixo}${doCfop}.csv`);
     if (qual === 'notas') {
       const regra = (await repo.regrasIcms()).get(cfopFiltro!) ?? null;
-      return c.json({ competencia: competencia ?? null, cfop: cfopFiltro, regra, notas: aplicarRegraNasNotas(notasDoAnalitico(linhas), regra) });
+      return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, cfop: cfopFiltro, regra, notas: aplicarRegraNasNotas(notasDoAnalitico(linhas), regra) });
     }
     // Relatório "Por nota" (28/09): a tela aplica a regra de ICMS de cada CFOP
     // item a item, igual ao relatório por CFOP, para os dois baterem.
     const regras = Object.fromEntries(await repo.regrasIcms());
-    return c.json({ competencia: competencia ?? null, cfop: cfopFiltro ?? null, canceladas, regras, linhas });
+    return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, cfop: cfopFiltro ?? null, canceladas, regras, linhas });
   }
 
   let rel: any =
     qual === 'cfop'
-      ? aplicarRegrasIcms(montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia)), await repo.regrasIcms())
-      : montarRelatorioProdutos(await repo.relatorioProdutos(empresaId, competencia));
+      ? aplicarRegrasIcms(montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia, periodo)), await repo.regrasIcms())
+      : montarRelatorioProdutos(await repo.relatorioProdutos(empresaId, competencia, periodo));
 
   // Produtos marcados "não fechou" no mês (28/09). Com soNaoFechou=1, o relatório
   // (e a planilha) vem só com eles - o "relatório do que não fechou".
@@ -1877,7 +1895,7 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   if (csv) {
     return csvResposta(qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any), `relatorio-${qual}-${sufixo}.csv`);
   }
-  return c.json({ competencia: competencia ?? null, canceladas, naoFecharam, ...rel });
+  return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, canceladas, naoFecharam, ...rel });
 });
 
 /** Regras de ICMS por CFOP (28/09, planilha da Taís): valem para o escritório inteiro. */
