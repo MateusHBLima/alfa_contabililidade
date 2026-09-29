@@ -411,7 +411,7 @@ describe('tela: reunião 25/09', () => {
   it('menu: Empresas primeiro, Relatórios dentro da Escrituração, Administração por último', () => {
     const ordem = [...HTML.matchAll(/data-view="(\w+)"/g)].map((m) => m[1]);
     expect(ordem.slice(0, 5)).toEqual(['vEmpresas', 'v1', 'v2', 'v3', 'vRelatorios']);
-    expect(ordem.slice(-2)).toEqual(['vUsuarios', 'vPapeis']);
+    expect(ordem.slice(-3)).toEqual(['vUsuarios', 'vPapeis', 'vCertificados']);
     expect(HTML.match(/class="nav-grupo/g)).toHaveLength(5); // + Regras de impostos (28/09)
   });
   it('trocar de empresa pede OK e a empresa aberta aparece grande', () => {
@@ -578,5 +578,16 @@ describe('tela: estorno em destaque e relatório que só aceita a última respos
     expect(APP).toContain('if (meu !== seqRelatorio || pedido !== rel.qual) return;');
     expect(APP).toContain('id="rel-tentar"');
     expect(APP).toContain('esperaDatasRel = setTimeout(carregarRelatorio, 400);');
+  });
+});
+
+describe('tela: certificados A1 (29/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('tela própria em Administração, só para quem pode, com senha de quem age e sem guardar nada na tela', () => {
+    expect(HTML).toContain('<section id="vCertificados"');
+    expect(HTML).toContain('id="cert-minha-senha"');
+    expect(APP).toContain("['vCertificados', 'certificados.gerenciar']");
+    expect(APP).toMatch(/async function carregarCertificados\(\)/);
+    expect(APP).toContain("$('#cert-senha').value = '';");
   });
 });

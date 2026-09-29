@@ -183,6 +183,7 @@
         <div class="navlabel">Administração</div>
         <button data-view="vUsuarios"><span class="num">U</span><span>Usuários<span class="sub">quem entra e o que pode</span></span></button>
         <button data-view="vPapeis"><span class="num">P</span><span>Papéis<span class="sub">conjuntos de permissões</span></span></button>
+        <button data-view="vCertificados"><span class="num">C</span><span>Certificados<span class="sub">A1 para buscar notas no SAT</span></span></button>
       </div>
     </nav>
     <div class="side-foot">
@@ -586,6 +587,41 @@
             <div class="scroll"><table id="tbl-papeis">
               <thead><tr><th>Papel</th><th>Descrição</th><th class="num">Permissões</th>
                 <th class="num">Pessoas</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------- CERTIFICADOS A1 -->
+      <section id="vCertificados" class="hidden">
+        <h1>Certificados digitais</h1>
+        <p class="page-desc">O certificado A1 (arquivo .pfx) do escritório ou da contadora responsável, para o sistema
+          buscar sozinho as notas das empresas no SAT. O arquivo é lido uma vez e a chave vai direto para o cofre de
+          certificados da Cloudflare: ninguém consegue baixar de volta, nem daqui, nem a Planee.</p>
+        <div id="cert-aviso" class="aviso hidden" style="margin-bottom:12px"></div>
+        <div class="card">
+          <header><h2>Enviar certificado</h2><span class="hint">A1 (.pfx ou .p12) · e-CNPJ ou e-CPF ICP-Brasil</span></header>
+          <div class="body">
+            <form id="form-certificado" class="cert-form" autocomplete="off">
+              <div class="campo"><label class="fl" for="cert-nome">Nome</label>
+                <input type="text" id="cert-nome" maxlength="60" placeholder="ex.: Escritório ALFA, Isa"></div>
+              <div class="campo"><label class="fl" for="cert-arquivo">Arquivo do certificado</label>
+                <input type="file" id="cert-arquivo" accept=".pfx,.p12,application/x-pkcs12"></div>
+              <div class="campo"><label class="fl" for="cert-senha">Senha do certificado</label>
+                <input type="password" id="cert-senha" autocomplete="off"></div>
+              <div class="campo"><label class="fl" for="cert-minha-senha">Sua senha do sistema</label>
+                <input type="password" id="cert-minha-senha" autocomplete="current-password"></div>
+              <div class="campo"><button class="btn primary" type="submit" id="cert-enviar">Enviar para o cofre</button></div>
+            </form>
+            <p class="tiny" style="margin-top:8px">Nunca mande o certificado ou a senha por WhatsApp ou e-mail: é só por aqui.</p>
+          </div>
+        </div>
+        <div class="card">
+          <header><h2>Guardados</h2></header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-certificados">
+              <thead><tr><th>Nome</th><th>Titular</th><th>Tipo</th><th>CNPJ/CPF</th><th>Válido até</th><th>Enviado</th><th>Código no cofre</th><th></th></tr></thead>
               <tbody></tbody>
             </table></div>
           </div>

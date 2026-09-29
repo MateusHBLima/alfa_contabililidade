@@ -23,6 +23,7 @@ import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, type C
 import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
+import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
 import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 
@@ -44,6 +45,13 @@ type Env = {
    */
   LOGIN_DEMO?: string;
   AMBIENTE: string;
+  /**
+   * Captura no SAT (29/09): id da conta e token da API da Cloudflare com permissão
+   * "SSL and Certificates: Edit", para guardar o A1 no cofre de certificados mTLS.
+   * Segredos (wrangler secret put / painel). Sem eles, a tela diz o que falta.
+   */
+  CF_ACCOUNT_ID?: string;
+  CF_API_TOKEN?: string;
 };
 
 type Vars = { repo: Repo; sessao: Sessao };
@@ -1913,6 +1921,99 @@ app.put('/api/regras-icms/:cfop', async (c) => {
   const { regra } = z.object({ regra: z.enum(['manter', 'outras']) }).parse(await c.req.json());
   const mudou = await c.get('repo').definirRegraIcms(cfop, regra);
   return c.json({ ok: true, mudou });
+});
+
+// ------------------------------------------------------------------ certificados A1
+
+/**
+ * Certificados A1 da captura no SAT (29/09). O .pfx é lido na memória desta
+ * requisição, a chave vai direto para o cofre mTLS da Cloudflare e nada dela é
+ * gravado aqui. Pede a senha de quem age, como as outras ações de administrador.
+ */
+app.get('/api/certificados', async (c) => {
+  exigir(c.get('sessao'), 'certificados.gerenciar');
+  return c.json({
+    configurado: !!(c.env.CF_ACCOUNT_ID && c.env.CF_API_TOKEN),
+    certificados: await c.get('repo').listarCertificados(),
+  });
+});
+
+app.post('/api/certificados', async (c) => {
+  const s = c.get('sessao');
+  exigir(s, 'certificados.gerenciar');
+  if (!c.env.CF_ACCOUNT_ID || !c.env.CF_API_TOKEN) {
+    return c.json({ erro: 'O cofre de certificados ainda não foi ligado (falta a chave da API da Cloudflare). Fale com a Planee.' }, 503);
+  }
+  const form = await c.req.formData();
+  const arquivo = form.get('arquivo') as unknown;
+  const senha = String(form.get('senha') ?? '');
+  const minhaSenha = String(form.get('minhaSenha') ?? '');
+  const nome = String(form.get('nome') ?? '').trim().slice(0, 60);
+  if (!arquivo || typeof arquivo === 'string' || typeof (arquivo as Blob).arrayBuffer !== 'function') {
+    return c.json({ erro: 'escolha o arquivo do certificado (.pfx)' }, 400);
+  }
+  if (!senha) return c.json({ erro: 'informe a senha do certificado' }, 400);
+  if (!(await reautenticar(c.env.DB, s.usuarioId, minhaSenha))) {
+    return c.json({ erro: 'confirme a SUA senha do sistema para enviar o certificado' }, 400);
+  }
+  const repo = c.get('repo');
+  let cert;
+  try {
+    cert = lerPfx(new Uint8Array(await (arquivo as Blob).arrayBuffer()), senha);
+  } catch (e) {
+    if (e instanceof ErroCertificado) return c.json({ erro: e.message }, 400);
+    throw e;
+  }
+  if (!cert.icpBrasil) return c.json({ erro: 'Este certificado não é ICP-Brasil. A SEF só aceita e-CNPJ ou e-CPF ICP-Brasil.' }, 400);
+  if (cert.tipo === 'outro') return c.json({ erro: 'Não reconheci o CNPJ/CPF do titular. Envie o e-CNPJ do escritório ou o e-CPF da contadora.' }, 400);
+  if (new Date(cert.validoAte).getTime() < Date.now()) {
+    return c.json({ erro: `Este certificado venceu em ${cert.validoAte.slice(0, 10).split('-').reverse().join('/')}.` }, 400);
+  }
+  if (await repo.certificadoPorSerial(cert.serial)) return c.json({ erro: 'Este certificado já foi enviado.' }, 409);
+
+  const rotulo = nome || cert.titular;
+  let cloudflareId: string;
+  try {
+    cloudflareId = await enviarParaCloudflare(
+      { contaId: c.env.CF_ACCOUNT_ID, token: c.env.CF_API_TOKEN },
+      `alfa-fiscal ${rotulo}`.slice(0, 100),
+      cert,
+    );
+  } catch (e) {
+    if (e instanceof ErroCertificado) return c.json({ erro: e.message }, 502);
+    throw e;
+  }
+  const id = await repo.gravarCertificado({
+    nome: rotulo, titular: cert.titular, documento: cert.documento, tipo: cert.tipo, emissor: cert.emissor,
+    serial: cert.serial, validoDe: cert.validoDe, validoAte: cert.validoAte, cloudflareId,
+  });
+  // A chave privada não sai desta função: nem na resposta, nem em log.
+  return c.json({
+    ok: true, id, nome: rotulo, titular: cert.titular, documento: cert.documento, tipo: cert.tipo,
+    validoAte: cert.validoAte, cloudflareId,
+  });
+});
+
+app.delete('/api/certificados/:id', async (c) => {
+  const s = c.get('sessao');
+  exigir(s, 'certificados.gerenciar');
+  const { minhaSenha } = z.object({ minhaSenha: z.string().min(1) }).parse(await c.req.json());
+  if (!(await reautenticar(c.env.DB, s.usuarioId, minhaSenha))) {
+    return c.json({ erro: 'confirme a SUA senha do sistema para remover o certificado' }, 400);
+  }
+  const repo = c.get('repo');
+  const cert = await repo.obterCertificado(c.req.param('id'));
+  if (!cert) return c.json({ erro: 'certificado não encontrado' }, 404);
+  if (c.env.CF_ACCOUNT_ID && c.env.CF_API_TOKEN) {
+    try {
+      await removerDaCloudflare({ contaId: c.env.CF_ACCOUNT_ID, token: c.env.CF_API_TOKEN }, cert.cloudflare_id);
+    } catch (e) {
+      if (e instanceof ErroCertificado) return c.json({ erro: e.message }, 502);
+      throw e;
+    }
+  }
+  await repo.removerCertificado(cert.id);
+  return c.json({ ok: true });
 });
 
 /** Marca/desmarca um produto do relatório como "não fechou" (28/09). */
