@@ -4071,6 +4071,8 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
   it('regime: grava no cadastro e na edição, e aparece na lista', async () => {
     let e = (await json('/api/empresas')).find((x: any) => x.id === empresaId);
     expect(e.regime).toBe('simples');
+    await req(`/api/empresas/${empresaId}`, { method: 'PATCH', body: JSON.stringify({ regime: 'simples_hibrido' }) });
+    expect((await json('/api/empresas')).find((x: any) => x.id === empresaId).regime).toBe('simples_hibrido');
     await req(`/api/empresas/${empresaId}`, { method: 'PATCH', body: JSON.stringify({ regime: 'presumido' }) });
     e = (await json('/api/empresas')).find((x: any) => x.id === empresaId);
     expect(e.regime).toBe('presumido');
