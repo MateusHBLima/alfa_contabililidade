@@ -533,3 +533,15 @@ describe('tela: Simples dividido em integral, híbrido e por fora (29/09)', () =
     expect(APP).toContain('${opcoesRegime(empresa?.regime)}');
   });
 });
+
+describe('tela: período de emissão nas notas carregadas (29/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('tem "Emissão de ... até" e o placar soma só o período', () => {
+    expect(HTML).toContain('id="notas-de"');
+    expect(HTML).toContain('id="notas-ate"');
+    expect(HTML).toContain('id="periodo-notas"');
+    expect(APP).toContain('const noPeriodo = estado.notas.filter(');
+    expect(APP).toContain('const valor = noPeriodo.reduce((s, n) => s + valorQueConta(n), 0);');
+    expect(APP).toContain('const visiveis = noPeriodo.filter(');
+  });
+});
