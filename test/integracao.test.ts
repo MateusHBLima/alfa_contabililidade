@@ -4010,6 +4010,42 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     expect(db.consultar('SELECT * FROM produtos_nao_fecharam')).toHaveLength(0);
   });
 
+  it('29/09: nota de ESTORNO (entrada emitida por terceiro) fica fora das entradas e aparece em destaque', async () => {
+    await subir(empresaId, outraNota(XML, '74'));
+    const r = await subir(empresaId, outraNota(XML, '75', [['<tpNF>1</tpNF>', '<tpNF>0</tpNF>']]));
+    expect(r.importadas).toBe(1);
+    expect(r.arquivos[0].estorno).toBe(true);
+    expect(r.arquivos[0].motivo).toMatch(/ESTORNO/);
+    const n75 = db.consultar(`SELECT tp_nf, estorno FROM notas WHERE numero = '504775'`)[0] as any;
+    expect(n75).toMatchObject({ tp_nf: '0', estorno: 1 });
+    expect((db.consultar(`SELECT tp_nf, estorno FROM notas WHERE numero = '504774'`)[0] as any)).toMatchObject({ tp_nf: '1', estorno: 0 });
+    const base = `/api/empresas/${empresaId}/relatorios`;
+    const cfop = await json(`${base}/cfop?competencia=2026-08`);
+    expect(cfop.totais.notas).toBe(1);
+    expect(cfop.estornos.map((e: any) => e.numero)).toEqual(['504775']);
+    expect((await json(`${base}/produtos?competencia=2026-08`)).estornos).toHaveLength(1);
+    const an = await json(`${base}/analitico?competencia=2026-08`);
+    expect(new Set(an.linhas.map((l: any) => l.numero))).toEqual(new Set(['504774']));
+    expect(an.estornos).toHaveLength(1);
+    // no período sem ele, a lista vem vazia
+    expect((await json(`${base}/cfop?competencia=2026-08&ate=2026-08-01`)).estornos).toHaveLength(0);
+    // a lista de notas traz a marca, para a tela destacar
+    const lista = await json(`/api/empresas/${empresaId}/notas`);
+    expect((lista.notas ?? lista).find((n: any) => n.numero === '504775').estorno).toBe(1);
+  });
+
+  it('29/09: entrada emitida pela PRÓPRIA empresa não é estorno', async () => {
+    const propria = outraNota(XML, '76', [
+      ['<tpNF>1</tpNF>', '<tpNF>0</tpNF>'],
+      ['<emit><CNPJ>83646984003044</CNPJ>', '<emit><CNPJ>11222333000181</CNPJ>'],
+      ['<dest><CNPJ>11222333000181</CNPJ>', '<dest><CNPJ>83646984003044</CNPJ>'],
+    ]);
+    const r = await subir(empresaId, propria);
+    expect(r.importadas).toBe(1);
+    expect(r.arquivos[0].estorno).toBeUndefined();
+    expect((db.consultar(`SELECT estorno FROM notas WHERE numero = '504776'`)[0] as any).estorno).toBe(0);
+  });
+
   it('29/09: período de emissão nos relatórios — de/até recorta CFOP, produto, analítico e notas do CFOP', async () => {
     const em = (d: string): [string, string] => ['<dhEmi>2026-08-14T09:31:00-03:00</dhEmi>', `<dhEmi>2026-08-${d}T09:31:00-03:00</dhEmi>`];
     await subir(empresaId, outraNota(XML, '71', [em('05')]));

@@ -1853,6 +1853,7 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
 
   if (qual !== 'produtos') await garantirValoresFiscais(c, empresaId, competencia);
   const canceladas = await repo.contarCanceladas(empresaId, competencia, periodo);
+  const estornos = await repo.estornos(empresaId, competencia, periodo);
 
   if (qual === 'analitico' || qual === 'notas') {
     const linhas = await repo.relatorioAnalitico(empresaId, competencia, cfopFiltro, periodo);
@@ -1865,7 +1866,7 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
     // Relatório "Por nota" (28/09): a tela aplica a regra de ICMS de cada CFOP
     // item a item, igual ao relatório por CFOP, para os dois baterem.
     const regras = Object.fromEntries(await repo.regrasIcms());
-    return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, cfop: cfopFiltro ?? null, canceladas, regras, linhas });
+    return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, cfop: cfopFiltro ?? null, canceladas, estornos, regras, linhas });
   }
 
   let rel: any =
@@ -1895,7 +1896,7 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   if (csv) {
     return csvResposta(qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any), `relatorio-${qual}-${sufixo}.csv`);
   }
-  return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, canceladas, naoFecharam, ...rel });
+  return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, canceladas, estornos, naoFecharam, ...rel });
 });
 
 /** Regras de ICMS por CFOP (28/09, planilha da Taís): valem para o escritório inteiro. */
@@ -2561,6 +2562,7 @@ app.get('/api/empresas/:id/xml-corrigidos.zip', async (c) => {
   for (const n of notas) {
     const rotulo = `NF ${n.numero} · ${n.emit_nome ?? n.emit_cnpj}`;
     if (n.cancelada_em) { fora.push(`${rotulo} — cancelada (não entra na escrituração)`); continue; }
+    if (Number(n.estorno) === 1) { fora.push(`${rotulo} — ESTORNO: lançar manualmente nas saídas`); continue; }
     if (Number(n.itens_sem_cfop) > 0) { fora.push(`${rotulo} — ${n.itens_sem_cfop} item(ns) sem CFOP de entrada`); continue; }
     if (Number(n.itens_revisados) < Number(n.total_itens)) {
       fora.push(`${rotulo} — ${n.itens_revisados} de ${n.total_itens} itens conferidos`);

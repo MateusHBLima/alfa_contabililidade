@@ -44,6 +44,8 @@ export type ResultadoArquivo = {
   itens?: number;
   preenchidos?: number;
   motivo?: string;
+  /** Nota de estorno: veio como ENTRADA (tpNF 0) de terceiro. Não soma nas entradas. */
+  estorno?: boolean;
 };
 
 export type ResultadoLote = {
@@ -242,6 +244,11 @@ async function importarUma(
   const notaId = repo.novoId();
   const tenant = repo.contexto.sessao.tenantId;
 
+  // Estorno (29/09, Taís): nota com tipo de operação ENTRADA emitida por TERCEIRO para a
+  // empresa. Para a empresa é saída - não entra nas entradas; ela lança à mão nas saídas.
+  // Entrada emitida pela PRÓPRIA empresa (produtor rural, importação) segue normal.
+  const estorno = nota.tpNF === '0' && doc(nota.emit.cnpj) !== daEmpresa;
+
   // A nota so e gravada junto com os itens, num batch unico (o batch do D1 e
   // atomico). Antes ela entrava primeiro: se o motor de regras falhasse depois,
   // sobrava uma nota sem item nenhum na tela - foi o que aconteceu com a
@@ -251,14 +258,14 @@ async function importarUma(
       `INSERT INTO notas
          (id, tenant_id, empresa_id, chave, numero, serie, modelo, emit_cnpj, emit_nome,
           emit_uf, dest_cnpj, dh_emi, competencia, valor_total, protocolo, status,
-          r2_original, hash_original, lote_id, origem, criado_em, criado_por)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'importada',?,?,?,?,?,?)`,
+          r2_original, hash_original, lote_id, origem, criado_em, criado_por, tp_nf, estorno)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'importada',?,?,?,?,?,?,?,?)`,
     )
     .bind(
       notaId, tenant, empresa.id, nota.chave, nota.numero, nota.serie, nota.modelo,
       nota.emit.cnpj, nota.emit.nome, nota.emit.uf, nota.dest.cnpj, nota.dhEmi,
       nota.competencia, nota.vNF, nota.protocolo, chaveR2, hash, loteId, origem,
-      repo.agora(), repo.contexto.sessao.usuarioId,
+      repo.agora(), repo.contexto.sessao.usuarioId, nota.tpNF, estorno ? 1 : 0,
     );
 
   // --- motor de regras: uma consulta para a nota inteira -----------------
@@ -351,6 +358,11 @@ async function importarUma(
     notaId,
     itens: nota.itens.length,
     preenchidos,
+    ...(estorno ? {
+      estorno: true,
+      motivo: `ESTORNO: a NF ${nota.numero ?? ''} veio como ENTRADA (tipo de operação 0) emitida por ${nota.emit.nome ?? nota.emit.cnpj}. ` +
+        'Não soma nas entradas nem nos relatórios — lance manualmente nas saídas.',
+    } : {}),
   };
 }
 

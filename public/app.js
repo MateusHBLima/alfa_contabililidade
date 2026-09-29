@@ -828,7 +828,7 @@ function textoResultadoImportacao(totalArquivos, tot, linhas) {
   };
   // O que pede acao dela vem primeiro: evento, depois recusa. O resto e conferencia.
   const ordem = { evento: 0, recusada: 1, importada: 2, duplicada: 3 };
-  const ordenadas = [...linhas].sort((a, b) => (ordem[a.status] ?? 9) - (ordem[b.status] ?? 9));
+  const ordenadas = [...linhas].sort((a, b) => (a.estorno ? -1 : ordem[a.status] ?? 9) - (b.estorno ? -1 : ordem[b.status] ?? 9));
 
   const placar = `${tot.importadas} importada(s) · ${tot.duplicadas} já existia(m)` +
     (tot.eventos ? ` · ${tot.eventos} evento(s)` : '') + ` · ${tot.recusadas} recusada(s)`;
@@ -842,6 +842,10 @@ function textoResultadoImportacao(totalArquivos, tot, linhas) {
   }
   if (tot.eventos > 0) {
     cabecalho.push(`ATENÇÃO: ${tot.eventos} arquivo(s) são EVENTO de nota (cancelamento/correção) — veja logo abaixo qual nota.`);
+  }
+  const nEstornos = linhas.filter((a) => a.estorno).length;
+  if (nEstornos > 0) {
+    cabecalho.push(`ATENÇÃO: ${nEstornos} nota(s) de ESTORNO (vieram como entrada) — ficam fora das entradas; lançar manualmente nas saídas.`);
   }
   return cabecalho.join('\n') + '\n\n' + ordenadas.map(texto).join('\n');
 }
@@ -918,9 +922,24 @@ async function carregarNotas() {
   renderNotas();
 }
 
-/** O valor que a nota soma: zero se cancelada (o XML continua com o valor original). */
+/** O valor que a nota soma: zero se cancelada ou estorno (o XML continua com o valor original). */
 function valorQueConta(n) {
-  return n?.cancelada_em ? 0 : (n?.valor_total ?? 0);
+  return n?.cancelada_em || Number(n?.estorno) === 1 ? 0 : (n?.valor_total ?? 0);
+}
+
+/* Nota de estorno (29/09, Taís): veio como ENTRADA (tipo de operação 0) emitida por
+   terceiro. Para a empresa é saída: fica fora das entradas e aparece em destaque para
+   ela lançar à mão nas saídas - "isso a gente acaba esquecendo". */
+function faixaEstornos(lista, onde) {
+  if (!lista.length) return '';
+  const cnpj = (d) => String(d ?? '').replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+  return `<div class="faixa-estorno">
+    <b>↩ ${lista.length === 1 ? '1 nota de ESTORNO' : `${lista.length} notas de ESTORNO`}</b> ${onde} — ${lista.length === 1 ? 'veio como ENTRADA e é saída' : 'vieram como ENTRADA e são saídas'} da empresa.
+    <b>Lançar manualmente nas saídas:</b>
+    <ul>${lista.map((n) => `<li>NF <b>${esc(n.numero)}</b>${n.serie ? `/${esc(n.serie)}` : ''} · ${esc(dataCurta(n.dh_emi))} ·
+      ${esc(n.emit_nome ?? '')} <span class="tiny">${esc(cnpj(n.emit_cnpj))}</span> · <b>R$ ${moeda(n.valor_total)}</b>
+      <button type="button" class="btn sm" data-ver-estorno="${esc(n.id)}">Ver nota</button></li>`).join('')}</ul>
+  </div>`;
 }
 
 function renderNotas() {
@@ -963,7 +982,10 @@ function renderNotas() {
 
   // Empresa com 200 notas nao se trata num dia. Separar o que ja passou por gente
   // do que ainda nao passou foi o primeiro pedido da contadora depois de usar.
-  const tratada = (n) => !!n.cancelada_em || ((n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens);
+  const tratada = (n) => !!n.cancelada_em || Number(n.estorno) === 1 || ((n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens);
+  const estornos = noPeriodo.filter((n) => Number(n.estorno) === 1 && !n.cancelada_em);
+  $('#estornos-notas').classList.toggle('hidden', estornos.length === 0);
+  $('#estornos-notas').innerHTML = faixaEstornos(estornos, periodo ? 'neste período' : 'nesta empresa');
   const imp = estado.importacoes.find((i) => i.id === estado.importacaoId);
   const lotesDaImportacao = imp ? new Set(imp.lotes) : null;
   const visiveis = noPeriodo.filter((n) => {
@@ -990,10 +1012,11 @@ function renderNotas() {
     // Três estados, não dois. "Comecei e parei no meio" é o caso normal numa
     // empresa de 200 notas, e era exatamente o que não dava para ver: tudo que
     // não estava 100% aparecia igual a nunca tocada.
-    const estagio = n.cancelada_em ? 'cancelada'
+    const estagio = n.cancelada_em ? 'cancelada' : Number(n.estorno) === 1 ? 'estorno'
       : total === 0 ? 'vazia' : feitos === 0 ? 'nova' : pendentes === 0 ? 'pronta' : 'andando';
     const selo = {
       cancelada: '<span class="tag dan" title="Nota cancelada: vale zero e fica fora das somas, dos relatórios e da exportação">CANCELADA</span>',
+      estorno: '<span class="tag estorno" title="Veio como ENTRADA emitida pelo fornecedor: é saída da empresa. Fora das entradas e dos relatórios — lançar à mão nas saídas.">↩ ESTORNO · lançar na saída</span>',
       vazia: '<span class="tag mut">sem itens</span>',
       nova: `<span class="tag warn">${pendentes} a revisar</span>`,
       andando: `<span class="tag info">${feitos} de ${total} conferidos</span>`,
@@ -1005,6 +1028,7 @@ function renderNotas() {
     // é para continuar, não para começar de novo.
     const acao = {
       cancelada: { rotulo: 'Ver →', classe: '', dica: 'Nota cancelada' },
+      estorno: { rotulo: 'Ver →', classe: '', dica: 'Nota de estorno: lançar nas saídas' },
       vazia: { rotulo: 'Abrir →', classe: '', dica: 'Nota sem itens' },
       nova: { rotulo: 'Tratar →', classe: 'primary', dica: 'Começar a tratar esta nota' },
       andando: { rotulo: 'Continuar →', classe: 'primary', dica: `Faltam ${pendentes} item(ns)` },
@@ -1016,7 +1040,9 @@ function renderNotas() {
       <td class="mono">${esc(n.numero)}</td>
       <td>${esc(n.emit_nome ?? n.emit_cnpj)}<span class="porque">${esc(n.emit_cnpj)}</span></td>
       <td class="mono tiny">${esc(String(n.chave).slice(0, 12))}…</td>
-      <td class="num">${n.cancelada_em
+      <td class="num">${Number(n.estorno) === 1 && !n.cancelada_em
+        ? `<span title="Estorno: R$ ${moeda(n.valor_total)} é saída — fora das entradas">(${moeda(n.valor_total)})</span>`
+        : n.cancelada_em
         ? `<span title="Valor do XML: R$ ${moeda(n.valor_total)} — nota cancelada, vale zero">0,00</span>`
         : moeda(n.valor_total)}</td>
       <td class="num">${n.total_itens ?? 0}</td>
@@ -1066,6 +1092,14 @@ function renderNotas() {
 // com `return` antes da ligacao, e Tratar/Ver/Continuar/Apagar ficaram mortos
 // para todo mundo ate 22/09. Ouvinte na tabela nao depende de como ela foi
 // desenhada, nem agora nem no proximo jeito que aparecer.
+$('#estornos-notas').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-ver-estorno]');
+  if (b) abrirNota(b.dataset.verEstorno);
+});
+$('#rel-estornos').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-ver-estorno]');
+  if (b) abrirNotaDoRelatorio(b.dataset.verEstorno, null, b);
+});
 $('#tbl-notas').addEventListener('click', (ev) => {
   const abrir = ev.target.closest('button[data-nota]');
   if (abrir) return abrirNota(abrir.dataset.nota);
@@ -1403,6 +1437,10 @@ function renderItens() {
   const r = n.resumo;
   const classe = r.criticos > 0 ? 'critico' : r.atencao > 0 ? 'atencao' : 'ok';
   $('#faixa-resumo').innerHTML =
+    (Number(n.nota.estorno) === 1 && !cancelada
+      ? `<div class="faixa-estorno"><b>↩ Nota de ESTORNO</b> — veio como ENTRADA (tipo de operação 0) emitida por ${esc(n.nota.emit_nome ?? n.nota.emit_cnpj)}.
+           Para a empresa é uma SAÍDA: não soma nas entradas, nos relatórios nem no XML corrigido. <b>Lançar manualmente nas saídas.</b></div>`
+      : '') +
     (cancelada
       ? `<div class="faixa critico"><b>⊘ Nota cancelada</b> — vale zero: fica fora das somas, dos relatórios e do XML corrigido.
            <span class="porque">${esc(n.nota.cancelada_motivo ?? '')}${n.nota.cancelada_em ? ' · ' + dataCurta(n.nota.cancelada_em) : ''}</span></div>`
@@ -1423,7 +1461,7 @@ function renderItens() {
           r.semDescricaoPadrao === 1 ? 'item ainda está' : 'itens ainda estão'
         } com a descrição do fornecedor</div>`
       : '') +
-    barraConferirCertos(n, cancelada);
+    barraConferirCertos(n, cancelada || Number(n.nota.estorno) === 1);
 
   const lista = itensVisiveis();
 
@@ -3172,6 +3210,13 @@ async function carregarRelatorio() {
   }
   limparGruposNota();
   mostrarPeriodoRel();
+  const meu = ++seqRelatorio;
+  // Data sendo digitada ("0002-09-30" enquanto ela escreve o ano): espera terminar.
+  if ((rel.de && rel.de < '2000-01-01') || (rel.ate && rel.ate < '2000-01-01')) {
+    cab.innerHTML = pe.innerHTML = '';
+    corpo.innerHTML = '<tr><td class="vazio">Termine de digitar a data.</td></tr>';
+    return;
+  }
   if (rel.de && rel.ate && rel.de > rel.ate) {
     cab.innerHTML = pe.innerHTML = '';
     corpo.innerHTML = '<tr><td class="vazio">A data "de" está depois da data "até". Troque uma das duas.</td></tr>';
@@ -3189,15 +3234,22 @@ async function carregarRelatorio() {
       r.totais = { itens: r.linhas.length, conferidos: r.linhas.filter((l) => l.revisado).length };
     }
   } catch (e) {
+    if (meu !== seqRelatorio) return; // já tem pedido mais novo: esta falha não importa
     cab.innerHTML = pe.innerHTML = '';
-    corpo.innerHTML = `<tr><td class="vazio">Não consegui montar o relatório: ${esc(e.message)}</td></tr>`;
+    corpo.innerHTML = `<tr><td class="vazio">Não consegui montar o relatório (${esc(e.message)}).
+      <button type="button" class="btn sm" id="rel-tentar">Tentar de novo</button></td></tr>`;
+    $('#rel-tentar')?.addEventListener('click', carregarRelatorio);
     return;
   }
 
+  // Só a resposta do ÚLTIMO pedido vai para a tela (29/09): com a data sendo mexida,
+  // um pedido antigo que chegasse depois pintaria o total de outro período.
+  if (meu !== seqRelatorio || pedido !== rel.qual) return;
   rel.ultimo = { ...r, qual: pedido };
-  if (pedido !== rel.qual) return; // chegou depois de trocar de relatório
   desenharRelatorio();
 }
+let seqRelatorio = 0;
+let esperaDatasRel = null;
 
 /* Busca dentro do relatório (27/09, pedido da Taís): filtra as linhas que já
    estão na tela - produto, código, CFOP ou valor - e o total passa a ser só do
@@ -3263,6 +3315,9 @@ function desenharRelatorio() {
     pendentes > 0 ? `⚠ ${pendentes} de ${r.totais.itens} itens ainda não foram conferidos — entram aqui com o valor sugerido pelo sistema.` : '',
     canceladas > 0 ? `⊘ ${canceladas} nota(s) cancelada(s) fora do relatório.` : '',
   ].filter(Boolean).join(' ');
+  const est = $('#rel-estornos');
+  est.classList.toggle('hidden', !(r.estornos ?? []).length);
+  est.innerHTML = faixaEstornos(r.estornos ?? [], 'fora deste relatório');
 
   const qtd = (v) => Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 4 });
   if (qual === 'nota') {
@@ -3416,6 +3471,7 @@ function imprimirRelatorio() {
       <div><b>Relatório ${esc(nome)}</b> · ${esc(mes)}${periodo ? ` · <b>${esc(periodo)}</b>` : ''}${filtros ? ` · ${filtros}` : ''}</div>
       <div>Empresa: <b>${esc(emp?.razao_social ?? '')}</b> · CNPJ ${esc(cnpj(emp?.cnpj))}</div>
       ${aviso.classList.contains('hidden') ? '' : `<div class="obs">${esc(aviso.textContent)}</div>`}
+      ${(r.estornos ?? []).length ? `<div><b>Estorno (lançar nas saídas, fora deste relatório):</b> ${r.estornos.map((n) => `NF ${esc(n.numero)} · ${esc(n.emit_nome ?? '')} · R$ ${moeda(n.valor_total)}`).join(' — ')}</div>` : ''}
       <div class="obs">Impresso em ${new Date().toLocaleString('pt-BR')} por ${esc(estado.eu?.nome ?? '')}</div>
     </div>
     ${copia.outerHTML}`;
@@ -3434,7 +3490,11 @@ $$('#rel-qual button').forEach((b) => b.addEventListener('click', () => {
 }));
 $('#rel-competencia').addEventListener('change', (e) => { rel.competencia = e.target.value; carregarRelatorio(); });
 for (const [id, campo] of [['#rel-de', 'de'], ['#rel-ate', 'ate']]) {
-  $(id).addEventListener('change', (e) => { rel[campo] = e.target.value; carregarRelatorio(); });
+  $(id).addEventListener('change', (e) => {
+    rel[campo] = e.target.value;
+    clearTimeout(esperaDatasRel);
+    esperaDatasRel = setTimeout(carregarRelatorio, 400); // espera ela terminar de mexer na data
+  });
 }
 $('#rel-limpar-datas').addEventListener('click', () => {
   rel.de = rel.ate = '';

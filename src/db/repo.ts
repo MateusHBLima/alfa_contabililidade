@@ -1381,6 +1381,22 @@ export class Repo {
     return { sql: sql.join(' '), binds };
   }
 
+  /** Notas de estorno do recorte (29/09): ficam fora dos relatórios e aparecem em destaque. */
+  async estornos(empresaId: string, competencia?: string, periodo?: Periodo): Promise<any[]> {
+    this.exigirEmpresa(empresaId);
+    const r = this.recorteCompetencia(competencia, periodo);
+    const { results } = await this.db
+      .prepare(
+        `SELECT n.id, n.numero, n.serie, n.dh_emi, n.emit_nome, n.emit_cnpj, n.valor_total
+           FROM notas n
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.estorno = 1 AND n.cancelada_em IS NULL ${r.sql}
+          ORDER BY n.dh_emi, n.numero`,
+      )
+      .bind(this.tenant, empresaId, ...r.binds)
+      .all<any>();
+    return results;
+  }
+
   async relatorioCfop(empresaId: string, competencia?: string, periodo?: Periodo): Promise<any[]> {
     this.exigirEmpresa(empresaId);
     const r = this.recorteCompetencia(competencia, periodo);
@@ -1393,7 +1409,7 @@ export class Repo {
                 SUM(COALESCE(i.v_st, 0) + COALESCE(i.v_fcp_st, 0)) AS v_st, SUM(COALESCE(i.v_ipi, 0)) AS v_ipi,
                 GROUP_CONCAT(DISTINCT n.id) AS notas
            FROM itens i JOIN notas n ON n.id = i.nota_id
-          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL ${r.sql}
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0 ${r.sql}
           GROUP BY i.cfop_novo, i.cfop_original`,
       )
       .bind(this.tenant, empresaId, ...r.binds)
@@ -1423,7 +1439,7 @@ export class Repo {
                 COALESCE(i.v_st, 0) + COALESCE(i.v_fcp_st, 0) AS v_st, COALESCE(i.v_ipi, 0) AS v_ipi,
                 COALESCE(i.valor_contabil, i.valor_total) AS valor_contabil
            FROM itens i JOIN notas n ON n.id = i.nota_id
-          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL ${r.sql} ${filtro}
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0 ${r.sql} ${filtro}
           ORDER BY n.dh_emi, n.numero, i.n_item
           LIMIT 20000`,
       )
@@ -1447,7 +1463,7 @@ export class Repo {
                 MIN(i.x_prod_original) AS descricao_original,
                 COUNT(DISTINCT i.x_prod_original) AS descricoes_originais
            FROM itens i JOIN notas n ON n.id = i.nota_id
-          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL ${r.sql}
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0 ${r.sql}
           GROUP BY UPPER(TRIM(COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original))),
                    UPPER(TRIM(COALESCE(i.unidade, '')))`,
       )

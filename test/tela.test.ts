@@ -564,3 +564,19 @@ describe('tela: conferir de uma vez o que veio certo e período nos relatórios 
     expect(APP).toContain("${periodo ? ` · <b>${esc(periodo)}</b>` : ''}");
   });
 });
+
+describe('tela: estorno em destaque e relatório que só aceita a última resposta (29/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('estorno: faixa nas notas e nos relatórios, etiqueta na lista, fora da soma', () => {
+    expect(HTML).toContain('id="estornos-notas"');
+    expect(HTML).toContain('id="rel-estornos"');
+    expect(APP).toMatch(/function faixaEstornos\(lista, onde\)/);
+    expect(APP).toContain("return n?.cancelada_em || Number(n?.estorno) === 1 ? 0 : (n?.valor_total ?? 0);");
+    expect(APP).toContain('↩ ESTORNO · lançar na saída');
+  });
+  it('relatório: só a resposta do último pedido vai para a tela, com "Tentar de novo"', () => {
+    expect(APP).toContain('if (meu !== seqRelatorio || pedido !== rel.qual) return;');
+    expect(APP).toContain('id="rel-tentar"');
+    expect(APP).toContain('esperaDatasRel = setTimeout(carregarRelatorio, 400);');
+  });
+});

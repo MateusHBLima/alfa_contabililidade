@@ -46,6 +46,8 @@ export type NotaFiscal = {
   serie: string | null;
   modelo: string | null;
   dhEmi: string | null;
+  /** tpNF: '0' entrada, '1' saída (do ponto de vista do EMITENTE) */
+  tpNF: string | null;
   /** AAAA-MM derivado de dhEmi */
   competencia: string | null;
   emit: { cnpj: string; nome: string | null; uf: string | null };

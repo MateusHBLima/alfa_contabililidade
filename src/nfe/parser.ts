@@ -240,6 +240,7 @@ export function parseNFe(xml: string): NotaFiscal {
     serie: texto(ide['serie']),
     modelo,
     dhEmi,
+    tpNF: texto(ide['tpNF']),
     competencia,
     emit: {
       cnpj: emitCnpj,
