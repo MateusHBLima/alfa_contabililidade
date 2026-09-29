@@ -574,3 +574,11 @@ tr.nota-subtotal td b{font-weight:700}
 .conferir-certos .btn{font-size:14px;padding:8px 16px}
 .conferir-certos .tiny{color:var(--ok)}
 .rel-periodo{margin:0 14px 8px;padding:7px 12px;border-radius:8px;background:#eaf1fa;color:#1c3b63;font-size:13px}
+
+/* Nota de estorno (29/09) */
+.faixa-estorno{background:#f3e8ff;color:#4c1d95;border:1px solid #c4b5fd;border-left:5px solid #7c3aed;border-radius:var(--radius);padding:11px 15px;margin-bottom:16px;font-size:13.5px}
+.faixa-estorno ul{margin:6px 0 0;padding-left:18px}
+.faixa-estorno li{margin:3px 0}
+.faixa-estorno .btn{margin-left:6px}
+.tag.estorno{background:#ede9fe;color:#5b21b6;font-weight:700}
+tr.nota-estorno td{background:#faf5ff}
