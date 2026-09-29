@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import forge from 'node-forge';
 import { readFileSync } from 'node:fs';
 import { D1Local, R2Local } from './d1-local';
 import { Repo } from '../src/db/repo';
@@ -89,7 +90,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(25); // + produtos_nao_fecharam (0017), regras_icms (0018)
+    expect(tabelas.length).toBe(26); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(3);
   });
@@ -4179,3 +4180,111 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
   });
 });
 
+
+describe('29/09: certificados A1 da captura no SAT — a chave vai para o cofre e nunca fica aqui', () => {
+  const CONTA = 'conta-teste';
+  const ambiente = (extra: Record<string, unknown> = {}) => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+    CF_ACCOUNT_ID: CONTA, CF_API_TOKEN: 'token-teste', ...extra,
+  }) as never;
+
+  /** A1 sintético: autoassinado, "ICP-Brasil" só no nome. Nunca um certificado real. */
+  function pfxSintetico(cn: string, senha: string, validoAte = new Date(Date.now() + 200 * 86400000)): Uint8Array {
+    const chaves = forge.pki.rsa.generateKeyPair(1024);
+    const cert = forge.pki.createCertificate();
+    cert.publicKey = chaves.publicKey;
+    cert.serialNumber = String(Math.floor(Math.random() * 1e12));
+    cert.validity.notBefore = new Date(Date.now() - 86400000);
+    cert.validity.notAfter = validoAte;
+    const nome = [{ name: 'commonName', value: cn }, { name: 'organizationName', value: 'ICP-Brasil' }];
+    cert.setSubject(nome);
+    cert.setIssuer([{ name: 'commonName', value: 'AC TESTE' }, { name: 'organizationName', value: 'ICP-Brasil' }]);
+    cert.sign(chaves.privateKey, forge.md.sha256.create());
+    const p12 = forge.pkcs12.toPkcs12Asn1(chaves.privateKey, [cert], senha, { algorithm: '3des' });
+    return forge.util.binary.raw.decode(forge.asn1.toDer(p12).getBytes());
+  }
+
+  let ck = '';
+  let chamadasCloudflare: { metodo: string; url: string; corpo: any }[] = [];
+  beforeEach(async () => {
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), ambiente());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    chamadasCloudflare = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init: any) => {
+      chamadasCloudflare.push({ metodo: init?.method ?? 'GET', url: String(url), corpo: init?.body ? JSON.parse(init.body) : null });
+      if (init?.method === 'DELETE') return new Response(JSON.stringify({ success: true }), { status: 200 });
+      return new Response(JSON.stringify({ success: true, result: { id: 'cf-cert-123' } }), { status: 200 });
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const enviar = (pfx: Uint8Array, senha: string, minhaSenha = 'uma frase de senha longa', extra: Record<string, unknown> = {}) => {
+    const fd = new FormData();
+    fd.append('arquivo', new File([pfx], 'alfa.pfx'));
+    fd.append('senha', senha);
+    fd.append('minhaSenha', minhaSenha);
+    fd.append('nome', 'Escritório ALFA');
+    return app.fetch(new Request('http://x/api/certificados', { method: 'POST', body: fd, headers: { Cookie: ck } }), ambiente(extra));
+  };
+
+  it('lê o e-CNPJ, manda chave e certificado para a Cloudflare e guarda só os dados que se pode mostrar', async () => {
+    const r = await enviar(pfxSintetico('ALFA CONTABILIDADE LTDA:12345678000195', 'senha-do-a1'), 'senha-do-a1');
+    expect(r.status).toBe(200);
+    const j: any = await r.json();
+    expect(j).toMatchObject({ ok: true, titular: 'ALFA CONTABILIDADE LTDA', documento: '12345678000195', tipo: 'e-CNPJ', cloudflareId: 'cf-cert-123' });
+    expect(JSON.stringify(j)).not.toMatch(/PRIVATE KEY/);
+    // Para a Cloudflare foram a chave e o certificado, na conta certa.
+    expect(chamadasCloudflare).toHaveLength(1);
+    expect(chamadasCloudflare[0]!.url).toBe(`https://api.cloudflare.com/client/v4/accounts/${CONTA}/mtls_certificates`);
+    expect(chamadasCloudflare[0]!.corpo.private_key).toMatch(/BEGIN RSA PRIVATE KEY/);
+    expect(chamadasCloudflare[0]!.corpo.certificates).toMatch(/BEGIN CERTIFICATE/);
+    // No nosso banco, nada da chave.
+    const linhas = db.consultar('SELECT * FROM certificados');
+    expect(linhas).toHaveLength(1);
+    expect(JSON.stringify(linhas)).not.toMatch(/PRIVATE KEY|BEGIN/);
+    expect(JSON.stringify(db.consultar('SELECT * FROM auditoria'))).not.toMatch(/PRIVATE KEY|senha-do-a1/);
+    const lista: any = await (await app.fetch(new Request('http://x/api/certificados', { headers: { Cookie: ck } }), ambiente())).json();
+    expect(lista.configurado).toBe(true);
+    expect(lista.certificados[0]).toMatchObject({ nome: 'Escritório ALFA', tipo: 'e-CNPJ', cloudflare_id: 'cf-cert-123' });
+    // O mesmo certificado de novo é recusado.
+    // (serial igual só acontece reenviando o mesmo arquivo)
+  });
+
+  it('recusa senha errada, sua senha errada, certificado vencido e cofre não configurado', async () => {
+    const pfx = pfxSintetico('ISA CONTADORA:12345678909', 'certa');
+    expect((await enviar(pfx, 'errada')).status).toBe(400);
+    expect(((await (await enviar(pfx, 'errada')).json()) as any).erro).toMatch(/Senha do certificado incorreta/);
+    expect((await enviar(pfx, 'certa', 'nao-e-minha-senha')).status).toBe(400);
+    const vencido = pfxSintetico('ISA CONTADORA:12345678909', 'certa', new Date(Date.now() - 86400000));
+    expect(((await (await enviar(vencido, 'certa')).json()) as any).erro).toMatch(/venceu/);
+    expect((await enviar(pfx, 'certa', undefined, { CF_API_TOKEN: undefined })).status).toBe(503);
+    expect(chamadasCloudflare).toHaveLength(0);
+    // e-CPF passa
+    const ok: any = await (await enviar(pfx, 'certa')).json();
+    expect(ok).toMatchObject({ tipo: 'e-CPF', documento: '12345678909' });
+    expect((await enviar(pfx, 'certa')).status).toBe(409);
+  });
+
+  it('remover tira do cofre e da lista, pedindo a senha de quem age', async () => {
+    const j: any = await (await enviar(pfxSintetico('ALFA:12345678000195', 's'), 's')).json();
+    const rem = (senha: string) => app.fetch(new Request(`http://x/api/certificados/${j.id}`, {
+      method: 'DELETE', headers: { Cookie: ck, 'content-type': 'application/json' }, body: JSON.stringify({ minhaSenha: senha }),
+    }), ambiente());
+    expect((await rem('errada')).status).toBe(400);
+    expect((await rem('uma frase de senha longa')).status).toBe(200);
+    expect(chamadasCloudflare.at(-1)).toMatchObject({ metodo: 'DELETE', url: expect.stringContaining('/mtls_certificates/cf-cert-123') });
+    const lista: any = await (await app.fetch(new Request('http://x/api/certificados', { headers: { Cookie: ck } }), ambiente())).json();
+    expect(lista.certificados).toHaveLength(0);
+  });
+
+  it('só quem tem certificados.gerenciar', async () => {
+    db.consultar("DELETE FROM papel_permissoes WHERE permissao = 'certificados.gerenciar'");
+    const r = await app.fetch(new Request('http://x/api/certificados', { headers: { Cookie: ck } }), ambiente());
+    expect(r.status).toBe(403);
+  });
+});
