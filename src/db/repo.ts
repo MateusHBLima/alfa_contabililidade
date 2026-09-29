@@ -1381,6 +1381,75 @@ export class Repo {
     return { sql: sql.join(' '), binds };
   }
 
+  // ---------------------------------------------------------------- certificados
+
+  /** Certificados A1 da captura no SAT (29/09). Só metadados; a chave está na Cloudflare. */
+  async listarCertificados(): Promise<any[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT c.id, c.nome, c.titular, c.documento, c.tipo, c.emissor, c.serial, c.valido_de, c.valido_ate,
+                c.cloudflare_id, c.enviado_em, u.nome AS enviado_por_nome
+           FROM certificados c LEFT JOIN usuarios u ON u.id = c.enviado_por
+          WHERE c.tenant_id = ? AND c.removido_em IS NULL
+          ORDER BY c.valido_ate DESC`,
+      )
+      .bind(this.tenant)
+      .all<any>();
+    return results;
+  }
+
+  async certificadoPorSerial(serial: string): Promise<{ id: string } | null> {
+    return await this.db
+      .prepare('SELECT id FROM certificados WHERE tenant_id = ? AND serial = ? AND removido_em IS NULL')
+      .bind(this.tenant, serial)
+      .first<{ id: string }>();
+  }
+
+  async gravarCertificado(c: {
+    nome: string; titular: string; documento: string | null; tipo: string; emissor: string; serial: string;
+    validoDe: string; validoAte: string; cloudflareId: string;
+  }): Promise<string> {
+    const id = this.novoId();
+    await this.db
+      .prepare(
+        `INSERT INTO certificados (id, tenant_id, nome, titular, documento, tipo, emissor, serial, valido_de,
+            valido_ate, cloudflare_id, enviado_em, enviado_por) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .bind(id, this.tenant, c.nome, c.titular, c.documento, c.tipo, c.emissor, c.serial, c.validoDe,
+        c.validoAte, c.cloudflareId, agora(), this.ctx.sessao.usuarioId)
+      .run();
+    await this.aud.registrarLote([
+      this.evento({
+        acao: 'criar', entidade: 'certificado', entidadeId: id, campo: 'certificado',
+        valorAntes: null, valorDepois: `${c.tipo} ${c.titular} ${c.documento ?? ''} até ${c.validoAte.slice(0, 10)}`,
+        origem: 'manual',
+      }),
+    ]);
+    return id;
+  }
+
+  async obterCertificado(id: string): Promise<any | null> {
+    return await this.db
+      .prepare('SELECT * FROM certificados WHERE tenant_id = ? AND id = ? AND removido_em IS NULL')
+      .bind(this.tenant, id)
+      .first<any>();
+  }
+
+  async removerCertificado(id: string): Promise<void> {
+    const c = await this.obterCertificado(id);
+    if (!c) throw new ForaDoEscopo('Certificado não encontrado');
+    await this.db
+      .prepare('UPDATE certificados SET removido_em = ?, removido_por = ? WHERE tenant_id = ? AND id = ?')
+      .bind(agora(), this.ctx.sessao.usuarioId, this.tenant, id)
+      .run();
+    await this.aud.registrarLote([
+      this.evento({
+        acao: 'alterar', entidade: 'certificado', entidadeId: id, campo: 'removido',
+        valorAntes: `${c.tipo} ${c.titular}`, valorDepois: 'removido', origem: 'manual',
+      }),
+    ]);
+  }
+
   /** Notas de estorno do recorte (29/09): ficam fora dos relatórios e aparecem em destaque. */
   async estornos(empresaId: string, competencia?: string, periodo?: Periodo): Promise<any[]> {
     this.exigirEmpresa(empresaId);
