@@ -2385,8 +2385,23 @@ $('#btn-nova-empresa').addEventListener('click', () => formularioEmpresa(null));
  */
 /* Regime tributário da empresa (reunião 25/09): as regras de zerar e a
    antecipação dependem dele. */
-const REGIMES = [['', 'não informado'], ['simples', 'Simples Nacional'], ['presumido', 'Lucro Presumido'], ['real', 'Lucro Real']];
-const nomeRegime = (v) => (REGIMES.find(([k]) => k === (v ?? '')) ?? REGIMES[0])[1];
+// Simples dividido em três (29/09, pedido da Taís): integral, híbrido e por fora.
+// 'simples' sem classificação é de cadastro antigo: continua aparecendo até alguém escolher.
+const REGIMES = [['', 'não informado'],
+  ['simples_integral', 'Simples Integral', 'Simples Nacional'], ['simples_hibrido', 'Simples Híbrido', 'Simples Nacional'],
+  ['simples_fora', 'Simples por Fora', 'Simples Nacional'],
+  ['presumido', 'Lucro Presumido'], ['real', 'Lucro Real']];
+const REGIME_ANTIGO = ['simples', 'Simples Nacional (falta classificar)'];
+const nomeRegime = (v) => ((v === 'simples' ? REGIME_ANTIGO : REGIMES.find(([k]) => k === (v ?? ''))) ?? REGIMES[0])[1];
+function opcoesRegime(atual) {
+  const op = ([v, r]) => `<option value="${v}" ${(atual ?? '') === v ? 'selected' : ''}>${r}</option>`;
+  return [
+    op(REGIMES[0]),
+    atual === 'simples' ? op(REGIME_ANTIGO) : '',
+    `<optgroup label="Simples Nacional">${REGIMES.filter((x) => x[2]).map(op).join('')}</optgroup>`,
+    ...REGIMES.filter((x) => x[0] && !x[2]).map(op),
+  ].join('');
+}
 
 // Responsáveis: na empresa nova, quem cadastra já vem marcado; nas outras, o que está gravado.
 let responsaveisOriginais = null;
@@ -2447,7 +2462,7 @@ function formularioEmpresa(empresa) {
       não tem padrão próprio. A partir da primeira nota tratada, o aprendizado passa por cima disso.</p>
     <div style="margin-top:11px"><label class="fl">Regime tributário</label>
       <select id="e-regime" style="width:100%">
-        ${REGIMES.map(([v, r]) => `<option value="${v}" ${(empresa?.regime ?? '') === v ? 'selected' : ''}>${r}</option>`).join('')}
+        ${opcoesRegime(empresa?.regime)}
       </select></div>
     ${pode('usuarios.visualizar') ? `<div style="margin-top:13px"><label class="fl">Responsáveis por esta empresa</label>
       <div id="e-responsaveis" class="resp-lista"><span class="tiny">carregando…</span></div>
