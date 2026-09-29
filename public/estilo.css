@@ -582,3 +582,5 @@ tr.nota-subtotal td b{font-weight:700}
 .faixa-estorno .btn{margin-left:6px}
 .tag.estorno{background:#ede9fe;color:#5b21b6;font-weight:700}
 tr.nota-estorno td{background:#faf5ff}
+.cert-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px 14px;align-items:end}
+.cert-form .campo{margin:0}

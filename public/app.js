@@ -484,7 +484,7 @@ function marcarEscopo() {
   }
 }
 
-const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vRegrasIcms', 'vUsuarios', 'vPapeis'];
+const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vRegrasIcms', 'vUsuarios', 'vPapeis', 'vCertificados'];
 
 function telaAtual() {
   return TELAS.find((v) => !$('#' + v).classList.contains('hidden')) ?? 'v1';
@@ -531,6 +531,7 @@ function irPara(view) {
   if (view === 'vRegrasIcms') carregarRegrasIcms();
   if (view === 'vUsuarios') carregarUsuarios();
   if (view === 'vPapeis') carregarPapeis();
+  if (view === 'vCertificados') carregarCertificados();
 }
 
 /* Trocar de empresa pede OK (reunião 25/09). Escolher no seletor sozinho
@@ -688,7 +689,7 @@ async function iniciar() {
   $('#btn-novo-usuario').classList.toggle('hidden', !pode('usuarios.criar'));
   $('#btn-convidar').classList.toggle('hidden', !pode('usuarios.convidar'));
   $('#btn-novo-papel').classList.toggle('hidden', !pode('papeis.gerenciar'));
-  for (const [botao, permissao] of [['vUsuarios', 'usuarios.visualizar'], ['vPapeis', 'papeis.gerenciar']]) {
+  for (const [botao, permissao] of [['vUsuarios', 'usuarios.visualizar'], ['vPapeis', 'papeis.gerenciar'], ['vCertificados', 'certificados.gerenciar']]) {
     const b = document.querySelector(`#nav button[data-view="${botao}"]`);
     if (b) b.classList.toggle('hidden', !pode(permissao));
   }
@@ -3842,6 +3843,75 @@ async function carregarRegras(suspeitas = false) {
 let acaoModal = null;
 /** Chamado quando o modal fecha SEM confirmar. Usado por confirmar(). */
 let aoDesistir = null;
+
+/* ---- Certificados A1 da captura no SAT (29/09) ----
+   O arquivo vai para o servidor, que lê, manda a chave para o cofre da Cloudflare
+   e guarda só titular, validade e o código no cofre. */
+async function carregarCertificados() {
+  const corpo = $('#tbl-certificados tbody');
+  corpo.innerHTML = '<tr><td colspan="8" class="vazio">carregando…</td></tr>';
+  let r;
+  try { r = await api('/api/certificados'); } catch (e) {
+    corpo.innerHTML = `<tr><td colspan="8" class="vazio">Não consegui listar: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+  const aviso = $('#cert-aviso');
+  aviso.classList.toggle('hidden', r.configurado);
+  aviso.innerHTML = r.configurado ? '' : '<b>O cofre ainda não foi ligado.</b> Falta a Planee configurar a chave da API da Cloudflare; até lá o envio fica bloqueado.';
+  $('#cert-enviar').disabled = !r.configurado;
+  const dias = (d) => Math.floor((new Date(d).getTime() - Date.now()) / 86400000);
+  const doc = (d) => !d ? '—' : d.length === 14 ? d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5') : d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
+  corpo.innerHTML = r.certificados.length ? r.certificados.map((c) => {
+    const d = dias(c.valido_ate);
+    const vence = d < 0 ? '<span class="tag dan">vencido</span>' : d <= 30 ? `<span class="tag warn">vence em ${d} dia(s)</span>` : '';
+    return `<tr>
+      <td><b>${esc(c.nome)}</b></td><td>${esc(c.titular)}</td><td>${esc(c.tipo)}</td><td class="mono">${esc(doc(c.documento))}</td>
+      <td>${esc(dataCurta(c.valido_ate))} ${vence}</td>
+      <td class="tiny">${esc(dataCurta(c.enviado_em))}${c.enviado_por_nome ? ` · ${esc(c.enviado_por_nome)}` : ''}</td>
+      <td class="mono tiny">${esc(c.cloudflare_id)}</td>
+      <td><button type="button" class="btn sm perigo" data-remover-cert="${esc(c.id)}">Remover</button></td></tr>`;
+  }).join('') : '<tr><td colspan="8" class="vazio">Nenhum certificado enviado ainda.</td></tr>';
+}
+
+$('#form-certificado').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const arquivo = $('#cert-arquivo').files?.[0];
+  if (!arquivo) return alerta('Escolha o arquivo do certificado (.pfx).');
+  const form = new FormData();
+  form.append('arquivo', arquivo);
+  form.append('nome', $('#cert-nome').value);
+  form.append('senha', $('#cert-senha').value);
+  form.append('minhaSenha', $('#cert-minha-senha').value);
+  mostrarEspera('Lendo o certificado e guardando no cofre…');
+  try {
+    const r = await api('/api/certificados', { method: 'POST', body: form });
+    $('#form-certificado').reset();
+    avisarSalvo(`Certificado de ${r.titular} guardado`);
+  } catch (e) {
+    alerta(e.message);
+  } finally {
+    // As senhas não ficam na tela, deu certo ou não.
+    $('#cert-senha').value = '';
+    $('#cert-minha-senha').value = '';
+    esconderEspera();
+  }
+  carregarCertificados();
+});
+
+$('#tbl-certificados').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('[data-remover-cert]');
+  if (!b) return;
+  abrirModal('Remover certificado', `
+    <p class="dialogo-texto">O certificado sai do cofre e a busca no SAT das empresas que usam ele para. Não dá para desfazer: para voltar, envie o arquivo de novo.</p>
+    <div class="campo"><label class="fl" for="cert-rem-senha">Sua senha do sistema</label><input type="password" id="cert-rem-senha"></div>`,
+  async () => {
+    await api(`/api/certificados/${b.dataset.removerCert}`, { method: 'DELETE', body: JSON.stringify({ minhaSenha: $('#cert-rem-senha').value }) });
+    avisarSalvo('Certificado removido');
+    carregarCertificados();
+  });
+  $('#modal-ok').textContent = 'Remover';
+  $('#modal-ok').classList.add('perigo');
+});
 
 function abrirModal(titulo, html, aoSalvar) {
   $('#modal-titulo').textContent = titulo;
