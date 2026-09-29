@@ -17,6 +17,10 @@ import { aplicarAcerto, aplicarErro, aprender, recalcularConfianca } from '../ru
  * Nao existe SQL de dominio fora deste arquivo.
  */
 
+
+/** Periodo de emissao, AAAA-MM-DD, inclusive nas duas pontas. */
+export type Periodo = { de?: string; ate?: string };
+
 export class ForaDoEscopo extends Error {
   constructor(msg = 'Registro fora do escopo deste usuário') {
     super(msg);
@@ -1103,9 +1107,9 @@ export class Repo {
   }
 
   /** Quantas notas canceladas ficaram fora do recorte (para o aviso do relatorio). */
-  async contarCanceladas(empresaId: string, competencia?: string): Promise<number> {
+  async contarCanceladas(empresaId: string, competencia?: string, periodo?: Periodo): Promise<number> {
     this.exigirEmpresa(empresaId);
-    const r = this.recorteCompetencia(competencia);
+    const r = this.recorteCompetencia(competencia, periodo);
     const l = await this.db
       .prepare(`SELECT COUNT(*) AS n FROM notas n WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NOT NULL ${r.sql}`)
       .bind(this.tenant, empresaId, ...r.binds)
@@ -1121,7 +1125,7 @@ export class Repo {
    */
   async buscarItens(
     empresaId: string,
-    filtro: { texto?: string; produto?: string; unidade?: string; competencia?: string },
+    filtro: { texto?: string; produto?: string; unidade?: string; competencia?: string; periodo?: Periodo },
   ): Promise<any[]> {
     this.exigirEmpresa(empresaId);
     const onde: string[] = [];
@@ -1137,7 +1141,7 @@ export class Repo {
       onde.push("UPPER(TRIM(COALESCE(i.unidade, ''))) = UPPER(TRIM(?))");
       binds.push(filtro.unidade ?? '');
     }
-    const r = this.recorteCompetencia(filtro.competencia);
+    const r = this.recorteCompetencia(filtro.competencia, filtro.periodo);
     const { results } = await this.db
       .prepare(
         `SELECT i.id AS item_id, i.n_item, i.x_prod_original, i.x_prod_novo, i.c_prod, i.c_ean, i.ncm,
@@ -1361,16 +1365,25 @@ export class Repo {
   // So leitura e so agregacao: o formato e o CSV moram em src/relatorios.
   // Uma consulta por relatorio, qualquer que seja o tamanho da competencia.
 
-  private recorteCompetencia(competencia?: string): { sql: string; binds: string[] } {
-    if (!competencia) return { sql: '', binds: [] };
-    return /^\d{4}$/.test(competencia)
-      ? { sql: 'AND n.competencia LIKE ?', binds: [`${competencia}-%`] }
-      : { sql: 'AND n.competencia = ?', binds: [competencia] };
+  /**
+   * Competencia (AAAA ou AAAA-MM) e, opcionalmente, periodo de EMISSAO (29/09, pedido
+   * da Taís: "do dia 1 ao dia 20"). A data e a do XML, como veio (sem converter fuso).
+   */
+  private recorteCompetencia(competencia?: string, periodo?: Periodo): { sql: string; binds: string[] } {
+    const sql: string[] = [];
+    const binds: string[] = [];
+    if (competencia) {
+      if (/^\d{4}$/.test(competencia)) { sql.push('AND n.competencia LIKE ?'); binds.push(`${competencia}-%`); }
+      else { sql.push('AND n.competencia = ?'); binds.push(competencia); }
+    }
+    if (periodo?.de) { sql.push('AND substr(n.dh_emi, 1, 10) >= ?'); binds.push(periodo.de); }
+    if (periodo?.ate) { sql.push('AND substr(n.dh_emi, 1, 10) <= ?'); binds.push(periodo.ate); }
+    return { sql: sql.join(' '), binds };
   }
 
-  async relatorioCfop(empresaId: string, competencia?: string): Promise<any[]> {
+  async relatorioCfop(empresaId: string, competencia?: string, periodo?: Periodo): Promise<any[]> {
     this.exigirEmpresa(empresaId);
-    const r = this.recorteCompetencia(competencia);
+    const r = this.recorteCompetencia(competencia, periodo);
     const { results } = await this.db
       .prepare(
         `SELECT i.cfop_novo AS cfop_novo, i.cfop_original AS cfop_original,
@@ -1392,9 +1405,9 @@ export class Repo {
    * Analitico: um item por linha, com a nota e os valores fiscais. `cfop` filtra
    * pelo CFOP de ENTRADA (o que ela tratou); vazio = todos. '(sem CFOP)' = sem CFOP.
    */
-  async relatorioAnalitico(empresaId: string, competencia?: string, cfop?: string): Promise<any[]> {
+  async relatorioAnalitico(empresaId: string, competencia?: string, cfop?: string, periodo?: Periodo): Promise<any[]> {
     this.exigirEmpresa(empresaId);
-    const r = this.recorteCompetencia(competencia);
+    const r = this.recorteCompetencia(competencia, periodo);
     const filtro = cfop === undefined ? '' : cfop === '(sem CFOP)'
       ? "AND TRIM(COALESCE(i.cfop_novo, '')) = ''"
       : 'AND TRIM(i.cfop_novo) = ?';
@@ -1419,9 +1432,9 @@ export class Repo {
     return results;
   }
 
-  async relatorioProdutos(empresaId: string, competencia?: string): Promise<any[]> {
+  async relatorioProdutos(empresaId: string, competencia?: string, periodo?: Periodo): Promise<any[]> {
     this.exigirEmpresa(empresaId);
-    const r = this.recorteCompetencia(competencia);
+    const r = this.recorteCompetencia(competencia, periodo);
     const { results } = await this.db
       .prepare(
         `SELECT MIN(COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original)) AS descricao,

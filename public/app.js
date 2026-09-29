@@ -1340,6 +1340,28 @@ function montarSeletorCfop() {
     CFOPS.map(([c, d]) => `<option value="${c}">${c} — ${d}</option>`).join('');
 }
 
+/* "Conferir tudo de uma vez" (29/09, vídeo da Taís): nota que veio inteira com
+   "vocês ensinaram" e ela clicando Conferido item por item. Vieram certos = o CFOP
+   veio do que vocês ensinaram ou de um padrão fixado, e o item não tem aviso de
+   atenção nem crítico. O resto fica para ela olhar. */
+function itensQueVieramCertos(n) {
+  return (n?.itens ?? []).filter((i) => !i.revisado && !conferindo.has(i.id)
+    && String(i.cfop_novo ?? '').trim() !== ''
+    && ['aprendida', 'fixada'].includes(i.procedencia?.fonte)
+    && !(i.alertas ?? []).some((a) => a.severidade === 'critico' || a.severidade === 'atencao'));
+}
+function barraConferirCertos(n, cancelada) {
+  if (cancelada) return '';
+  const certos = itensQueVieramCertos(n);
+  if (certos.length === 0) return '';
+  const pendentes = n.itens.filter((i) => !i.revisado).length;
+  const resto = pendentes - certos.length;
+  return `<div class="conferir-certos">
+    <button type="button" class="btn ok" id="btn-conferir-certos">✓ Conferir ${certos.length === 1 ? 'o item que veio certo' : `os ${certos.length} itens que vieram certos`}</button>
+    <span class="tiny">“Vocês ensinaram” ou padrão fixado, sem nenhum aviso.${resto > 0 ? ` ${resto === 1 ? 'O outro item fica' : `Os outros ${resto} ficam`} para você olhar.` : ' É a nota inteira.'}</span>
+  </div>`;
+}
+
 function itensVisiveis() {
   const itens = estado.notaAberta?.itens ?? [];
   return itens.filter((i) => {
@@ -1400,7 +1422,8 @@ function renderItens() {
       ? `<div class="placar sutil" title="O CFOP de entrada é a decisão fiscal e já está resolvido. A descrição padronizada é organização do cadastro: sem ela, o XML corrigido sai com o nome que o fornecedor escreveu.">✎ ${r.semDescricaoPadrao} ${
           r.semDescricaoPadrao === 1 ? 'item ainda está' : 'itens ainda estão'
         } com a descrição do fornecedor</div>`
-      : '');
+      : '') +
+    barraConferirCertos(n, cancelada);
 
   const lista = itensVisiveis();
 
@@ -1637,7 +1660,9 @@ function linhaItem(i) {
     <td>
       ${i.revisado
         ? `<button class="btn sm sutil" data-desconferir="${i.id}" title="Voltar a marcar como pendente">desfazer</button>`
-        : `<button class="btn sm ok" data-conferir="${i.id}">✓ Conferido</button>`}
+        : conferindo.has(i.id)
+          ? '<button class="btn sm ok" disabled title="Salvando…">✓ salvando…</button>'
+          : `<button class="btn sm ok" data-conferir="${i.id}">✓ Conferido</button>`}
     </td>
   </tr>`;
 }
@@ -1759,6 +1784,31 @@ async function desconferirItem(id) {
   }
 }
 
+/* Conferir UM item sem travar a tela (29/09): antes cada clique abria a janela
+   "Conferindo 1 item(ns)…" e esperava salvar, recarregar a nota e recarregar a
+   lista de notas. Agora a linha muda na hora e dá para seguir clicando; a nota
+   recarrega uma vez só, quando o último clique termina de salvar. */
+const conferindo = new Set();
+async function conferirUm(itemId, botao) {
+  const notaId = estado.notaAberta?.nota?.id;
+  if (!notaId || conferindo.has(itemId)) return;
+  conferindo.add(itemId);
+  botao.disabled = true;
+  botao.textContent = '✓ salvando…';
+  let erro = null;
+  try {
+    await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [itemId] }) });
+  } catch (e) {
+    erro = e;
+  } finally {
+    conferindo.delete(itemId);
+  }
+  if (erro) alerta(`Não consegui conferir o item: ${erro.message}`);
+  if (conferindo.size > 0 || estado.notaAberta?.nota?.id !== notaId) return;
+  await recarregarNota();
+  carregarNotas().catch(() => {}); // lista de notas atualiza por trás
+}
+
 async function recarregarNota() {
   if (!estado.notaAberta) return;
   estado.notaAberta = await api(`/api/notas/${estado.notaAberta.nota.id}`);
@@ -1767,7 +1817,11 @@ async function recarregarNota() {
 
 document.addEventListener('click', (ev) => {
   const c = ev.target.closest('[data-conferir]');
-  if (c) return conferirItens([c.dataset.conferir]);
+  if (c) return conferirUm(c.dataset.conferir, c);
+  if (ev.target.closest('#btn-conferir-certos')) {
+    const ids = itensQueVieramCertos(estado.notaAberta).map((i) => i.id);
+    if (ids.length) return conferirItens(ids);
+  }
   const d = ev.target.closest('[data-desconferir]');
   if (d) return desconferirItem(d.dataset.desconferir);
   const f = ev.target.closest('[data-fixar]');
@@ -3069,7 +3123,25 @@ $('#btn-novo-usuario').addEventListener('click', () => editarUsuario(null).catch
 // medicao do projeto. A conta e do servidor; a tela so desenha, e a planilha
 // baixada sai da MESMA rota (formato=csv), para tela e arquivo nunca discordarem.
 
-const rel = { qual: 'cfop', competencia: '', filtro: '', ultimo: null, soNaoFechou: false };
+const rel = { qual: 'cfop', competencia: '', filtro: '', ultimo: null, soNaoFechou: false, de: '', ate: '' };
+
+/* Período de emissão nos relatórios (29/09, pedido da Taís): "do dia 1 ao dia 20",
+   e a data tem que aparecer no print e no PDF para saber de que período era. */
+function qsPeriodo() {
+  return (rel.de ? `&de=${rel.de}` : '') + (rel.ate ? `&ate=${rel.ate}` : '');
+}
+function textoPeriodo() {
+  if (!rel.de && !rel.ate) return '';
+  const br = (d) => d.split('-').reverse().join('/');
+  return `Emissão ${rel.de ? `de ${br(rel.de)}` : 'desde o início do mês'} ${rel.ate ? `a ${br(rel.ate)}` : 'até o fim do mês'}`;
+}
+function mostrarPeriodoRel() {
+  const t = textoPeriodo();
+  const el = $('#rel-periodo');
+  el.classList.toggle('hidden', !t);
+  el.innerHTML = t ? `📅 <b>${esc(t)}</b> — os totais abaixo são só desse período.` : '';
+  $('#rel-limpar-datas').classList.toggle('hidden', !t);
+}
 
 async function abrirRelatorios() {
   if (!estado.empresaId) return;
@@ -3099,13 +3171,19 @@ async function carregarRelatorio() {
     return;
   }
   limparGruposNota();
+  mostrarPeriodoRel();
+  if (rel.de && rel.ate && rel.de > rel.ate) {
+    cab.innerHTML = pe.innerHTML = '';
+    corpo.innerHTML = '<tr><td class="vazio">A data "de" está depois da data "até". Troque uma das duas.</td></tr>';
+    return;
+  }
   corpo.innerHTML = '<tr><td class="vazio">calculando…</td></tr>';
   const pedido = rel.qual;
   let r;
   try {
     // "Por nota" usa o analítico (um item por linha) e agrupa aqui.
     const rota = pedido === 'nota' ? 'analitico' : pedido;
-    r = await api(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}`);
+    r = await api(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}${qsPeriodo()}`);
     if (pedido === 'nota') {
       r.linhas = r.linhas.map((l) => aplicarRegraNoItem(l, r.regras?.[l.cfop_novo] ?? null));
       r.totais = { itens: r.linhas.length, conferidos: r.linhas.filter((l) => l.revisado).length };
@@ -3332,9 +3410,10 @@ function imprimirRelatorio() {
   const aviso = $('#rel-aviso');
   const filtros = [rel.filtro.trim() ? `busca “${esc(rel.filtro.trim())}”` : '', r.qual === 'produtos' && rel.soNaoFechou ? 'só os que não fecharam' : '']
     .filter(Boolean).join(' · ');
+  const periodo = textoPeriodo();
   $('#impressao-nota').innerHTML = `
     <div class="imp-topo">
-      <div><b>Relatório ${esc(nome)}</b> · ${esc(mes)}${filtros ? ` · ${filtros}` : ''}</div>
+      <div><b>Relatório ${esc(nome)}</b> · ${esc(mes)}${periodo ? ` · <b>${esc(periodo)}</b>` : ''}${filtros ? ` · ${filtros}` : ''}</div>
       <div>Empresa: <b>${esc(emp?.razao_social ?? '')}</b> · CNPJ ${esc(cnpj(emp?.cnpj))}</div>
       ${aviso.classList.contains('hidden') ? '' : `<div class="obs">${esc(aviso.textContent)}</div>`}
       <div class="obs">Impresso em ${new Date().toLocaleString('pt-BR')} por ${esc(estado.eu?.nome ?? '')}</div>
@@ -3354,6 +3433,14 @@ $$('#rel-qual button').forEach((b) => b.addEventListener('click', () => {
   carregarRelatorio();
 }));
 $('#rel-competencia').addEventListener('change', (e) => { rel.competencia = e.target.value; carregarRelatorio(); });
+for (const [id, campo] of [['#rel-de', 'de'], ['#rel-ate', 'ate']]) {
+  $(id).addEventListener('change', (e) => { rel[campo] = e.target.value; carregarRelatorio(); });
+}
+$('#rel-limpar-datas').addEventListener('click', () => {
+  rel.de = rel.ate = '';
+  $('#rel-de').value = $('#rel-ate').value = '';
+  carregarRelatorio();
+});
 let esperaFiltroRel = null;
 $('#rel-busca').addEventListener('input', (e) => {
   clearTimeout(esperaFiltroRel);
@@ -3370,7 +3457,7 @@ $('#tbl-relatorio').addEventListener('click', async (ev) => {
   }
   const baixarCfop = ev.target.closest('button[data-baixar-cfop]');
   if (baixarCfop) {
-    return baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&cfop=${encodeURIComponent(baixarCfop.dataset.baixarCfop)}&formato=csv`);
+    return baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&cfop=${encodeURIComponent(baixarCfop.dataset.baixarCfop)}&formato=csv${qsPeriodo()}`);
   }
   const marcar = ev.target.closest('[data-marcar-produto]');
   if (marcar) return alternarNaoFechou(marcar.closest('tr[data-rel-produto]'));
@@ -3387,7 +3474,7 @@ $('#tbl-relatorio').addEventListener('click', async (ev) => {
   sub.innerHTML = '<td colspan="12" class="vazio">carregando as notas…</td>';
   linha.after(sub);
   try {
-    const r = await api(`/api/empresas/${estado.empresaId}/relatorios/notas?competencia=${rel.competencia}&cfop=${encodeURIComponent(cfop)}`);
+    const r = await api(`/api/empresas/${estado.empresaId}/relatorios/notas?competencia=${rel.competencia}&cfop=${encodeURIComponent(cfop)}${qsPeriodo()}`);
     const soma = (k) => r.notas.reduce((s, n) => s + n[k], 0);
     sub.innerHTML = `<td colspan="12"><div class="rel-notas-caixa">
       <div class="rel-notas-topo"><b>${r.notas.length} nota(s) no CFOP ${esc(cfop)}</b>
@@ -3625,7 +3712,7 @@ async function abrirNotasDoProduto(linha) {
   linha.after(sub);
   try {
     const q = new URLSearchParams({ produto: linha.dataset.relProduto, unidade: linha.dataset.relUnidade, competencia: rel.competencia });
-    const r = await api(`/api/empresas/${estado.empresaId}/busca-itens?${q}`);
+    const r = await api(`/api/empresas/${estado.empresaId}/busca-itens?${q}${qsPeriodo()}`);
     sub.innerHTML = `<td colspan="8">${tabelaDeItensAchados(r.itens, `${r.itens.length} item(ns) de ${esc(linha.dataset.relProduto)}`)}</td>`;
     pintarVistas(sub);
   } catch (e) {
@@ -3635,14 +3722,14 @@ async function abrirNotasDoProduto(linha) {
 
 $('#rel-baixar-analitico').addEventListener('click', () => {
   if (!estado.empresaId || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
-  baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&formato=csv`);
+  baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&formato=csv${qsPeriodo()}`);
 });
 
 $('#rel-baixar').addEventListener('click', () => {
   if (!estado.empresaId || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
   const so = rel.qual === 'produtos' && rel.soNaoFechou ? '&soNaoFechou=1' : '';
   const rota = rel.qual === 'nota' ? 'analitico' : rel.qual; // "Por nota" baixa o analítico, item a item
-  baixar(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}&formato=csv${so}`);
+  baixar(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}&formato=csv${so}${qsPeriodo()}`);
 });
 
 async function carregarFornecedores() {

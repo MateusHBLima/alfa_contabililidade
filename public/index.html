@@ -487,6 +487,11 @@
               <button data-rel="nota" title="Cada nota com a capa, os itens e o total por CFOP — para conferir com o Questor nota a nota">Por nota</button>
             </div>
             <select id="rel-competencia" style="font-size:12px;width:210px"></select>
+            <label class="tiny" for="rel-de">Emissão de</label>
+            <input type="date" id="rel-de" style="font-size:12px;width:140px">
+            <label class="tiny" for="rel-ate">até</label>
+            <input type="date" id="rel-ate" style="font-size:12px;width:140px">
+            <button type="button" class="btn sm sutil hidden" id="rel-limpar-datas">limpar datas</button>
             <input type="search" id="rel-busca" placeholder="Procurar no relatório: produto, código, CFOP ou valor" style="font-size:12px;width:300px" autocomplete="off">
             <button type="button" class="btn sm hidden" id="rel-so-nf" title="Mostra só os produtos marcados com ✗ (não fecharam com o outro sistema). A planilha baixada também vem só com eles.">✗ Só os que não fecharam (0)</button>
             <div class="sep"></div>
@@ -495,6 +500,7 @@
             <button class="btn sm" id="rel-imprimir" title="Imprime o relatório que está na tela, já com a busca aplicada. Para PDF, escolha “Salvar como PDF”.">🖨 Imprimir</button>
             <button class="btn sm sutil" id="rel-limpar-vistas" title="Tira as marcas de nota já aberta desta competência">Limpar marcas “aberta”</button>
           </div>
+          <div id="rel-periodo" class="rel-periodo hidden"></div>
           <div id="rel-aviso" class="placar sutil hidden" style="margin:0 14px 8px"></div>
           <div class="body tight">
             <div class="scroll"><table id="tbl-relatorio"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>

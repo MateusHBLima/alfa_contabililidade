@@ -567,3 +567,10 @@ tr.nota-capa.parou-aqui>td{background:#cfe0f5}
 tr.nota-item td{font-size:12px}
 tr.nota-subtotal td{font-size:12px;background:#f7f9fc;font-weight:600}
 tr.nota-subtotal td b{font-weight:700}
+
+/* Conferir de uma vez o que veio certo (29/09) */
+.conferir-certos{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:-4px 0 16px;padding:10px 14px;
+  border:1px solid #bfe5d6;background:var(--ok-soft);border-radius:var(--radius)}
+.conferir-certos .btn{font-size:14px;padding:8px 16px}
+.conferir-certos .tiny{color:var(--ok)}
+.rel-periodo{margin:0 14px 8px;padding:7px 12px;border-radius:8px;background:#eaf1fa;color:#1c3b63;font-size:13px}

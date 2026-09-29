@@ -545,3 +545,22 @@ describe('tela: período de emissão nas notas carregadas (29/09)', () => {
     expect(APP).toContain('const visiveis = noPeriodo.filter(');
   });
 });
+
+describe('tela: conferir de uma vez o que veio certo e período nos relatórios (29/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('botão grande para os itens que vieram certos; Conferido de um item não trava a tela', () => {
+    expect(APP).toMatch(/function itensQueVieramCertos\(n\)/);
+    expect(APP).toContain("['aprendida', 'fixada'].includes(i.procedencia?.fonte)");
+    expect(APP).toContain('id="btn-conferir-certos"');
+    expect(APP).toMatch(/async function conferirUm\(itemId, botao\)/);
+    expect(APP).toContain('if (c) return conferirUm(c.dataset.conferir, c);');
+  });
+  it('relatórios com Emissão de/até, no print e na planilha', () => {
+    expect(HTML).toContain('id="rel-de"');
+    expect(HTML).toContain('id="rel-ate"');
+    expect(HTML).toContain('id="rel-periodo"');
+    expect(APP).toMatch(/function qsPeriodo\(\)/);
+    expect((APP.match(/\$\{qsPeriodo\(\)\}/g) ?? []).length).toBe(6);
+    expect(APP).toContain("${periodo ? ` · <b>${esc(periodo)}</b>` : ''}");
+  });
+});

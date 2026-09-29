@@ -4010,6 +4010,36 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     expect(db.consultar('SELECT * FROM produtos_nao_fecharam')).toHaveLength(0);
   });
 
+  it('29/09: período de emissão nos relatórios — de/até recorta CFOP, produto, analítico e notas do CFOP', async () => {
+    const em = (d: string): [string, string] => ['<dhEmi>2026-08-14T09:31:00-03:00</dhEmi>', `<dhEmi>2026-08-${d}T09:31:00-03:00</dhEmi>`];
+    await subir(empresaId, outraNota(XML, '71', [em('05')]));
+    await subir(empresaId, outraNota(XML, '72', [em('15')]));
+    await subir(empresaId, outraNota(XML, '73', [em('25')]));
+    const base = `/api/empresas/${empresaId}/relatorios`;
+    const tudo = await json(`${base}/cfop?competencia=2026-08`);
+    const ate20 = await json(`${base}/cfop?competencia=2026-08&de=2026-08-01&ate=2026-08-20`);
+    expect(ate20.periodo).toEqual({ de: '2026-08-01', ate: '2026-08-20' });
+    expect(ate20.totais.notas).toBe(2);
+    expect(tudo.totais.notas).toBe(3);
+    expect(ate20.totais.valorContabil).toBeCloseTo((tudo.totais.valorContabil * 2) / 3, 2);
+    // só "de", e as duas pontas contam
+    expect((await json(`${base}/cfop?competencia=2026-08&de=2026-08-15`)).totais.notas).toBe(2);
+    expect((await json(`${base}/cfop?competencia=2026-08&ate=2026-08-05`)).totais.notas).toBe(1);
+    // os outros relatórios seguem o mesmo recorte
+    const lin = (await json(`${base}/analitico?competencia=2026-08&de=2026-08-10&ate=2026-08-20`)).linhas;
+    expect(new Set(lin.map((l: any) => l.numero))).toEqual(new Set(['504772']));
+    const cfop = tudo.linhas[0].cfop;
+    expect((await json(`${base}/notas?competencia=2026-08&cfop=${cfop}&ate=2026-08-15`)).notas).toHaveLength(2);
+    const prod = await json(`${base}/produtos?competencia=2026-08&de=2026-08-20`);
+    expect(prod.totais.valor).toBeCloseTo((await json(`${base}/produtos?competencia=2026-08`)).totais.valor / 3, 2);
+    // planilha leva o período no nome do arquivo
+    const r = await req(`${base}/cfop?competencia=2026-08&de=2026-08-01&ate=2026-08-20&formato=csv`);
+    expect(r.headers.get('content-disposition')).toContain('-emissao-2026-08-01-a-2026-08-20.csv');
+    // data errada ou invertida é recusada
+    expect((await req(`${base}/cfop?competencia=2026-08&de=01/08/2026`)).status).toBe(400);
+    expect((await req(`${base}/cfop?competencia=2026-08&de=2026-08-20&ate=2026-08-01`)).status).toBe(400);
+  });
+
   it('28/09: regras de ICMS — CFOP em "outras" sai com base e ICMS zerados e o valor em Outras', async () => {
     await subir(empresaId, outraNota(XML, '62'));
     const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
