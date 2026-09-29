@@ -523,3 +523,13 @@ describe('tela: relatório por nota, item a item, e impressão do relatório (28
     expect(APP).toContain("copia.querySelectorAll('button, .seta, .tag-vista, .marca-nf').forEach((x) => x.remove());");
   });
 });
+
+describe('tela: Simples dividido em integral, híbrido e por fora (29/09)', () => {
+  it('cadastro oferece as três classificações do Simples', () => {
+    expect(APP).toContain("['simples_integral', 'Simples Integral'");
+    expect(APP).toContain("['simples_hibrido', 'Simples Híbrido'");
+    expect(APP).toContain("['simples_fora', 'Simples por Fora'");
+    expect(APP).toContain('<optgroup label="Simples Nacional">');
+    expect(APP).toContain('${opcoesRegime(empresa?.regime)}');
+  });
+});
