@@ -13,6 +13,8 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const estado = {
   filtroNotas: 'todas',
+  dataDe: '',   // período de emissão em Notas carregadas (AAAA-MM-DD), pedido da Taís 29/09
+  dataAte: '',
   importacoes: [],
   importacaoId: '',
   agruparFornecedor: false,
@@ -926,18 +928,35 @@ function renderNotas() {
   const vazio = $('#vazio-notas');
   vazio.classList.toggle('hidden', estado.notas.length > 0);
 
-  const totalItens = estado.notas.reduce((s, n) => s + (n.total_itens ?? 0), 0);
-  const revisados = estado.notas.reduce((s, n) => s + (n.itens_revisados ?? 0), 0);
+  // Período de emissão (29/09, pedido da Taís): "importamos do 1 ao 20, depois do 1
+  // ao 28, e o total não fecha mais". O placar e a lista passam a ser só do período.
+  const periodo = !!(estado.dataDe || estado.dataAte);
+  const invertido = !!(estado.dataDe && estado.dataAte && estado.dataDe > estado.dataAte);
+  const dia = (n) => String(n.dh_emi ?? '').slice(0, 10); // a data como está no XML, sem fuso
+  const noPeriodo = estado.notas.filter((n) =>
+    !invertido && (!estado.dataDe || dia(n) >= estado.dataDe) && (!estado.dataAte || dia(n) <= estado.dataAte));
+  const dataBr = (d) => d.split('-').reverse().join('/');
+  const aviso = $('#periodo-notas');
+  aviso.classList.toggle('hidden', !periodo);
+  $('#notas-limpar-datas').classList.toggle('hidden', !periodo);
+  aviso.innerHTML = !periodo ? ''
+    : invertido ? '⚠ A data "de" está depois da data "até". Troque uma das duas.'
+    : `Mostrando as notas emitidas <b>${estado.dataDe ? `de ${dataBr(estado.dataDe)}` : 'desde o início'}</b>
+       <b>${estado.dataAte ? `até ${dataBr(estado.dataAte)}` : 'até hoje'}</b> — ${noPeriodo.length} de ${estado.notas.length} nota(s).
+       O placar acima soma só esse período.`;
+
+  const totalItens = noPeriodo.reduce((s, n) => s + (n.total_itens ?? 0), 0);
+  const revisados = noPeriodo.reduce((s, n) => s + (n.itens_revisados ?? 0), 0);
   // Nota cancelada vale zero (23/09, NF 419887): fica na lista, fora da soma.
-  const valor = estado.notas.reduce((s, n) => s + valorQueConta(n), 0);
-  const fornecedores = new Set(estado.notas.map((n) => n.emit_cnpj)).size;
+  const valor = noPeriodo.reduce((s, n) => s + valorQueConta(n), 0);
+  const fornecedores = new Set(noPeriodo.map((n) => n.emit_cnpj)).size;
 
   $('#kpis-notas').innerHTML = [
-    ['Notas', estado.notas.length],
+    ['Notas', noPeriodo.length],
     ['Fornecedores', fornecedores],
     ['Itens', totalItens],
     ['Itens revisados', totalItens ? `${revisados}<small> de ${totalItens}</small>` : '—'],
-    ['Valor total', 'R$ ' + moeda(valor)],
+    [periodo ? 'Valor no período' : 'Valor total', 'R$ ' + moeda(valor)],
   ].map(([l, v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
 
   $('#hint-notas').textContent = estado.notas.length ? `${estado.notas.length} nota(s)` : '';
@@ -947,7 +966,7 @@ function renderNotas() {
   const tratada = (n) => !!n.cancelada_em || ((n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens);
   const imp = estado.importacoes.find((i) => i.id === estado.importacaoId);
   const lotesDaImportacao = imp ? new Set(imp.lotes) : null;
-  const visiveis = estado.notas.filter((n) => {
+  const visiveis = noPeriodo.filter((n) => {
     if (lotesDaImportacao && !lotesDaImportacao.has(n.lote_id)) return false;
     if (estado.filtroNotas === 'tratar') return !tratada(n);
     if (estado.filtroNotas === 'tratadas') return tratada(n);
@@ -956,7 +975,8 @@ function renderNotas() {
 
   if (visiveis.length === 0) {
     corpo.innerHTML = `<tr><td colspan="8" class="vazio">${
-      lotesDaImportacao ? 'Nenhuma nota desta importação neste filtro.'
+      periodo && noPeriodo.length === 0 ? 'Nenhuma nota emitida nesse período.'
+      : lotesDaImportacao ? 'Nenhuma nota desta importação neste filtro.'
       : estado.filtroNotas === 'tratadas' ? 'Nenhuma nota tratada ainda.' : 'Nenhuma nota pendente.'
     }</td></tr>`;
     return;
@@ -1233,6 +1253,14 @@ async function abrirOriginal() {
 }
 
 $('#busca').addEventListener('input', (e) => { estado.busca = e.target.value.toLowerCase(); renderItens(); });
+for (const [id, campo] of [['#notas-de', 'dataDe'], ['#notas-ate', 'dataAte']]) {
+  $(id).addEventListener('change', (e) => { estado[campo] = e.target.value; renderNotas(); });
+}
+$('#notas-limpar-datas').addEventListener('click', () => {
+  estado.dataDe = estado.dataAte = '';
+  $('#notas-de').value = $('#notas-ate').value = '';
+  renderNotas();
+});
 $$('#filtros-notas button').forEach((b) => b.addEventListener('click', () => {
   $$('#filtros-notas button').forEach((x) => x.classList.remove('on'));
   b.classList.add('on');

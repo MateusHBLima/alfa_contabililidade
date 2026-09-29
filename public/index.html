@@ -268,8 +268,15 @@
               <label class="tiny" for="sel-importacao">Importação</label>
               <select id="sel-importacao" style="font-size:12px;max-width:300px"><option value="">todas</option></select>
               <div class="sep"></div>
+              <label class="tiny" for="notas-de">Emissão de</label>
+              <input type="date" id="notas-de" style="font-size:12px;width:140px">
+              <label class="tiny" for="notas-ate">até</label>
+              <input type="date" id="notas-ate" style="font-size:12px;width:140px">
+              <button type="button" class="btn sm sutil hidden" id="notas-limpar-datas">limpar datas</button>
+              <div class="sep"></div>
               <button class="btn sm" id="btn-agrupar" title="Dobra a lista por fornecedor: a decisão de CFOP costuma ser por fornecedor">▤ Agrupar por fornecedor</button>
             </div>
+            <div id="periodo-notas" class="placar sutil hidden" style="margin:0 14px 10px"></div>
             <div id="detalhe-importacao" class="log hidden" style="margin:0 14px 10px;max-height:260px"></div>
             <div class="scroll"><table id="tbl-notas">
               <thead><tr>
