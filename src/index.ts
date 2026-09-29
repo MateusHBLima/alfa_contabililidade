@@ -1844,7 +1844,10 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
       const regra = (await repo.regrasIcms()).get(cfopFiltro!) ?? null;
       return c.json({ competencia: competencia ?? null, cfop: cfopFiltro, regra, notas: aplicarRegraNasNotas(notasDoAnalitico(linhas), regra) });
     }
-    return c.json({ competencia: competencia ?? null, cfop: cfopFiltro ?? null, linhas });
+    // Relatório "Por nota" (28/09): a tela aplica a regra de ICMS de cada CFOP
+    // item a item, igual ao relatório por CFOP, para os dois baterem.
+    const regras = Object.fromEntries(await repo.regrasIcms());
+    return c.json({ competencia: competencia ?? null, cfop: cfopFiltro ?? null, canceladas, regras, linhas });
   }
 
   let rel: any =

@@ -3050,15 +3050,23 @@ async function carregarRelatorio() {
   const [cab, corpo, pe] = [tabela.querySelector('thead'), tabela.querySelector('tbody'), tabela.querySelector('tfoot')];
   if (!estado.empresaId || !rel.competencia) {
     cab.innerHTML = pe.innerHTML = '';
+    limparGruposNota();
     corpo.innerHTML = '<tr><td class="vazio">Importe notas desta empresa para ver os relatórios.</td></tr>';
     aviso.classList.add('hidden');
     return;
   }
+  limparGruposNota();
   corpo.innerHTML = '<tr><td class="vazio">calculando…</td></tr>';
   const pedido = rel.qual;
   let r;
   try {
-    r = await api(`/api/empresas/${estado.empresaId}/relatorios/${pedido}?competencia=${rel.competencia}`);
+    // "Por nota" usa o analítico (um item por linha) e agrupa aqui.
+    const rota = pedido === 'nota' ? 'analitico' : pedido;
+    r = await api(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}`);
+    if (pedido === 'nota') {
+      r.linhas = r.linhas.map((l) => aplicarRegraNoItem(l, r.regras?.[l.cfop_novo] ?? null));
+      r.totais = { itens: r.linhas.length, conferidos: r.linhas.filter((l) => l.revisado).length };
+    }
   } catch (e) {
     cab.innerHTML = pe.innerHTML = '';
     corpo.innerHTML = `<tr><td class="vazio">Não consegui montar o relatório: ${esc(e.message)}</td></tr>`;
@@ -3091,10 +3099,15 @@ function linhaPassaNoFiltro(l, filtro, qual) {
   if (!palavras.length) return true;
   const texto = semAcentoMaiusc(qual === 'cfop'
     ? [l.cfop, l.natureza, l.origem].join(' ')
-    : [l.descricao, l.descricaoOriginal, l.unidade, l.cfops, l.codigos].join(' '));
+    : qual === 'nota'
+      ? [l.x_prod_novo, l.x_prod_original, l.c_prod, l.ncm, l.unidade, l.cfop_novo, l.cfop_original,
+          l.numero, l.emit_nome, l.emit_cnpj].join(' ')
+      : [l.descricao, l.descricaoOriginal, l.unidade, l.cfops, l.codigos].join(' '));
   const valores = (qual === 'cfop'
     ? [l.valorContabil, l.baseIcms, l.icms, l.outras, l.st, l.ipi]
-    : [l.valor, l.valorUnitarioMedio, l.quantidade]
+    : qual === 'nota'
+      ? [l.valor_total, l.valor_contabil, l.v_bc, l.v_icms, l.v_st, l.v_ipi, l.valor_nota]
+      : [l.valor, l.valorUnitarioMedio, l.quantidade]
   ).filter((v) => v !== null && v !== undefined).map((v) => Math.round(Number(v) * 100) / 100);
   return palavras.every((w) => {
     if (texto.includes(semAcentoMaiusc(w))) return true;
@@ -3111,13 +3124,14 @@ function desenharRelatorio() {
   const aviso = $('#rel-aviso');
   const [cab, corpo, pe] = [tabela.querySelector('thead'), tabela.querySelector('tbody'), tabela.querySelector('tfoot')];
   const filtro = rel.filtro.trim();
+  limparGruposNota();
   const soNf = qual === 'produtos' && rel.soNaoFechou;
   const linhas = r.linhas
     .filter((l) => !soNf || l.naoFechou)
     .filter((l) => !filtro || linhaPassaNoFiltro(l, filtro, qual));
   atualizarBotaoNaoFechou();
   const soma = (k) => linhas.reduce((s, l) => s + Number(l[k] ?? 0), 0);
-  const rotuloFiltro = `${linhas.length} de ${r.linhas.length} ${qual === 'cfop' ? 'CFOPs' : 'produtos'}`
+  const rotuloFiltro = `${linhas.length} de ${r.linhas.length} ${qual === 'cfop' ? 'CFOPs' : qual === 'nota' ? 'itens' : 'produtos'}`
     + (soNf ? ' que não fecharam' : '') + (filtro ? ` com “${esc(filtro)}”` : '');
   // O relatorio inclui o que ainda nao foi conferido - e diz isso, para o total
   // bater com o do outro sistema sem fazer palpite passar por decisao.
@@ -3130,7 +3144,9 @@ function desenharRelatorio() {
   ].filter(Boolean).join(' ');
 
   const qtd = (v) => Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 4 });
-  if (qual === 'cfop') {
+  if (qual === 'nota') {
+    desenharPorNota(r, linhas, filtro, rotuloFiltro);
+  } else if (qual === 'cfop') {
     // Sintetico no formato do livro de entradas; clicar na linha abre as notas
     // daquele CFOP (analitico). Pedido da Tais, 22/09: "so um CFOP fechou (...)
     // eu nao consigo procurar a minha diferenca".
@@ -3161,13 +3177,133 @@ function desenharRelatorio() {
     pe.innerHTML = `<tr><th>${filtrado ? rotuloFiltro : `Total · ${r.linhas.length} produtos`}</th><th></th><th></th><th></th><th class="num">${moeda(filtrado ? soma('valor') : r.totais.valor)}</th><th></th><th></th><th></th></tr>`;
   }
   if (r.linhas.length === 0) {
-    corpo.innerHTML = '<tr><td class="vazio" colspan="8">Nenhum item nesta competência.</td></tr>';
+    limparGruposNota();
+    corpo.innerHTML = '<tr><td class="vazio" colspan="12">Nenhum item nesta competência.</td></tr>';
   } else if (linhas.length === 0) {
+    limparGruposNota();
     corpo.innerHTML = soNf && !filtro
       ? '<tr><td class="vazio" colspan="12">Nenhum produto marcado como “não fechou” neste mês. Marque no ✗ de cada linha.</td></tr>'
       : `<tr><td class="vazio" colspan="12">Nada com “${esc(filtro)}”${soNf ? ' entre os que não fecharam' : ''} neste relatório. Tente só um pedaço do nome, o código ou o valor.</td></tr>`;
   }
 }
+
+/* ---- Relatório "Por nota (item a item)" (28/09, pedido da Taís) ----
+   A auxiliar confere no Questor pela capa da nota e pelo detalhamento dos
+   itens; não tira relatório de lá. Então o nosso vem no mesmo jeito: cada nota
+   com a capa em cima, os itens embaixo e o total por CFOP da nota, em ordem de
+   emissão - para comparar tela com tela ou imprimir e riscar no papel. */
+function aplicarRegraNoItem(l, regra) {
+  if (regra !== 'outras') return { ...l, regra, outras: 0 };
+  return { ...l, regra, outras: Number(l.valor_contabil ?? 0), v_bc_xml: l.v_bc, v_icms_xml: l.v_icms, v_bc: 0, v_icms: 0 };
+}
+
+function limparGruposNota() {
+  $$('#tbl-relatorio tbody.nota-grupo').forEach((t) => t.remove());
+}
+
+function desenharPorNota(r, linhas, filtro, rotuloFiltro) {
+  const tabela = $('#tbl-relatorio');
+  const [cab, corpo, pe] = [tabela.querySelector('thead'), tabela.querySelector('tbody'), tabela.querySelector('tfoot')];
+  const cnpj = (d) => String(d ?? '').replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+  const n2 = (v) => Math.round(Number(v ?? 0) * 100) / 100;
+  const somar = (lista) => lista.reduce((t, l) => {
+    t.valor += n2(l.valor_total); t.contabil += n2(l.valor_contabil); t.base += n2(l.v_bc); t.icms += n2(l.v_icms);
+    t.outras += n2(l.outras); t.st += n2(l.v_st); t.ipi += n2(l.v_ipi);
+    return t;
+  }, { valor: 0, contabil: 0, base: 0, icms: 0, outras: 0, st: 0, ipi: 0 });
+  const celulas = (t) => `<td class="num">${moeda(t.valor)}</td><td class="num"><b>${moeda(t.contabil)}</b></td>
+    <td class="num">${moeda(t.base)}</td><td class="num">${moeda(t.icms)}</td>
+    <td class="num">${t.outras ? moeda(t.outras) : ''}</td><td class="num">${t.st ? moeda(t.st) : ''}</td><td class="num">${t.ipi ? moeda(t.ipi) : ''}</td>`;
+
+  cab.innerHTML = '<tr><th class="num">Item</th><th>Produto</th><th>CFOP saída → entrada</th><th class="num">Valor produto</th><th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th class="num">Outras</th><th class="num">ICMS ST</th><th class="num">IPI</th><th>Conf.</th></tr>';
+  corpo.innerHTML = '';
+
+  // Agrupa na ordem que veio do servidor (emissão, número, item).
+  const todas = new Map();
+  for (const l of r.linhas) todas.set(l.nota_id, (todas.get(l.nota_id) ?? 0) + 1);
+  const grupos = new Map();
+  for (const l of linhas) {
+    if (!grupos.has(l.nota_id)) grupos.set(l.nota_id, []);
+    grupos.get(l.nota_id).push(l);
+  }
+
+  const html = [...grupos.values()].map((itens) => {
+    const n = itens[0];
+    const t = somar(itens);
+    const parcial = itens.length < todas.get(n.nota_id);
+    const porCfop = new Map();
+    for (const i of itens) {
+      const k = i.cfop_novo || '(sem CFOP)';
+      if (!porCfop.has(k)) porCfop.set(k, []);
+      porCfop.get(k).push(i);
+    }
+    const dif = n2(n.valor_nota) - n2(t.contabil);
+    const capa = `<tr class="nota-capa"><td colspan="11">
+      <div class="nota-capa-linha">
+        <span><b>Nota nº ${esc(n.numero)}</b>${n.serie ? ` · série ${esc(n.serie)}` : ''} · ${esc(dataCurta(n.dh_emi))}</span>
+        <span>${esc(n.emit_nome ?? '')} <span class="tiny">CNPJ ${esc(cnpj(n.emit_cnpj))}${n.emit_uf ? ` · ${esc(n.emit_uf)}` : ''}</span></span>
+        <span class="nota-capa-valores">Total da nota <b>R$ ${moeda(n.valor_nota)}</b> · Base ICMS ${moeda(t.base)} · ICMS ${moeda(t.icms)}</span>
+        <button class="btn sm" data-abrir-nota-rel="${esc(n.nota_id)}">Abrir →</button>
+      </div>
+      ${parcial ? `<div class="porque">mostrando ${itens.length} de ${todas.get(n.nota_id)} itens desta nota (busca “${esc(filtro)}”)</div>` : ''}
+    </td></tr>`;
+    const linhasItens = itens.map((i) => {
+      const desc = i.x_prod_novo || i.x_prod_original;
+      return `<tr class="nota-item">
+        <td class="num tiny">${i.n_item}</td>
+        <td>${esc(desc)}${i.x_prod_novo && i.x_prod_novo !== i.x_prod_original ? `<span class="porque">na nota: ${esc(i.x_prod_original)}</span>` : ''}
+          <span class="porque">cód. ${esc(i.c_prod ?? '—')} · NCM ${esc(i.ncm ?? '—')} · ${qtdTela(i.quantidade)} ${esc(i.unidade ?? '')}</span></td>
+        <td class="mono">${esc(i.cfop_original ?? '—')} → <b>${esc(i.cfop_novo || '—')}</b>${i.regra === 'outras' ? ' <span class="tag" title="Regra de ICMS deste CFOP: base e ICMS vão para Outras">outras</span>' : ''}</td>
+        <td class="num">${moeda(i.valor_total)}</td><td class="num"><b>${moeda(i.valor_contabil)}</b></td>
+        <td class="num">${moeda(i.v_bc)}</td><td class="num">${moeda(i.v_icms)}</td>
+        <td class="num">${i.outras ? moeda(i.outras) : ''}</td><td class="num">${Number(i.v_st) ? moeda(i.v_st) : ''}</td><td class="num">${Number(i.v_ipi) ? moeda(i.v_ipi) : ''}</td>
+        <td class="tiny">${i.revisado ? '✓' : '—'}</td></tr>`;
+    }).join('');
+    const subtotais = [...porCfop.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([cfop, lista]) => `<tr class="nota-subtotal">
+        <td></td><td colspan="2">Total CFOP <b>${esc(cfop)}</b>${parcial ? ' <span class="tiny">(só os itens mostrados)</span>' : ''}</td>${celulas(somar(lista))}<td></td></tr>`).join('');
+    const aviso = !parcial && Math.abs(dif) > 0.009
+      ? `<tr class="nota-subtotal"><td></td><td colspan="10" class="tiny">Diferença de R$ ${moeda(dif)} entre o total da nota e a soma do valor contábil dos itens.</td></tr>` : '';
+    return `<tbody class="nota-grupo" data-nota="${esc(n.nota_id)}">${capa}${linhasItens}${subtotais}${aviso}</tbody>`;
+  }).join('');
+  corpo.insertAdjacentHTML('afterend', html);
+
+  const t = somar(linhas);
+  pe.innerHTML = `<tr><th colspan="3">${filtro ? rotuloFiltro : `Total do mês · ${grupos.size} notas · ${linhas.length} itens`}</th>${celulas(t).replace(/<td/g, '<th').replace(/<\/td>/g, '</th>')}<th></th></tr>`;
+  pintarVistas(tabela);
+}
+
+function qtdTela(v) { return Number(v ?? 0).toLocaleString('pt-BR', { maximumFractionDigits: 4 }); }
+
+/* Imprimir o relatório que está na tela (qualquer um dos três), já filtrado. */
+function imprimirRelatorio() {
+  const r = rel.ultimo;
+  if (!r || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
+  const emp = (estado.empresas || []).find((x) => x.id === estado.empresaId);
+  const cnpj = (d) => String(d ?? '').replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+  const nome = { cfop: 'por CFOP', produtos: 'por produto', nota: 'por nota (item a item)' }[r.qual] ?? '';
+  const mes = `${MESES[Number(rel.competencia.slice(5)) - 1] ?? rel.competencia.slice(5)} de ${rel.competencia.slice(0, 4)}`;
+  const copia = $('#tbl-relatorio').cloneNode(true);
+  copia.removeAttribute('id');
+  copia.querySelectorAll('button, .seta, .tag-vista, .marca-nf').forEach((x) => x.remove());
+  copia.querySelectorAll('tr').forEach((x) => x.classList.remove('vista', 'parou-aqui', 'linha-procurada'));
+  const aviso = $('#rel-aviso');
+  const filtros = [rel.filtro.trim() ? `busca “${esc(rel.filtro.trim())}”` : '', r.qual === 'produtos' && rel.soNaoFechou ? 'só os que não fecharam' : '']
+    .filter(Boolean).join(' · ');
+  $('#impressao-nota').innerHTML = `
+    <div class="imp-topo">
+      <div><b>Relatório ${esc(nome)}</b> · ${esc(mes)}${filtros ? ` · ${filtros}` : ''}</div>
+      <div>Empresa: <b>${esc(emp?.razao_social ?? '')}</b> · CNPJ ${esc(cnpj(emp?.cnpj))}</div>
+      ${aviso.classList.contains('hidden') ? '' : `<div class="obs">${esc(aviso.textContent)}</div>`}
+      <div class="obs">Impresso em ${new Date().toLocaleString('pt-BR')} por ${esc(estado.eu?.nome ?? '')}</div>
+    </div>
+    ${copia.outerHTML}`;
+  document.body.classList.add('imprimindo-nota');
+  const fim = () => { document.body.classList.remove('imprimindo-nota'); window.removeEventListener('afterprint', fim); };
+  window.addEventListener('afterprint', fim);
+  window.print();
+  setTimeout(fim, 1000);
+}
+$('#rel-imprimir')?.addEventListener('click', imprimirRelatorio);
 
 $$('#rel-qual button').forEach((b) => b.addEventListener('click', () => {
   rel.qual = b.dataset.rel;
@@ -3286,6 +3422,15 @@ async function voltarAoRelatorio() {
   rel.competencia = v.competencia;
   $$('#rel-qual button').forEach((x) => x.classList.toggle('on', x.dataset.rel === v.qual));
   await irPara('vRelatorios'); // monta de novo: os valores mudam quando ela arruma a nota
+  if (v.qual === 'nota') {
+    const alvo = document.querySelector(`#tbl-relatorio [data-abrir-nota-rel="${CSS.escape(v.notaId)}"]`);
+    const tr = alvo?.closest('tr');
+    if (!tr) return window.scrollTo(0, v.rolagem ?? 0);
+    tr.classList.add('linha-procurada');
+    tr.scrollIntoView({ block: 'center' });
+    setTimeout(() => tr.classList.remove('linha-procurada'), 4000);
+    return;
+  }
   const linhas = [...document.querySelectorAll('#tbl-relatorio tbody > tr')];
   const linha = v.cfop
     ? linhas.find((t) => t.dataset.relCfop === v.cfop)
@@ -3307,7 +3452,7 @@ async function voltarAoRelatorio() {
 
 $('#rel-limpar-vistas')?.addEventListener('click', () => {
   try { localStorage.removeItem(chaveVistas()); } catch { /* nada */ }
-  $$('#tbl-relatorio tr.rel-notas').forEach((t) => {
+  $$('#tbl-relatorio tr.rel-notas, #tbl-relatorio tbody.nota-grupo').forEach((t) => {
     t.querySelectorAll('.tag-vista').forEach((x) => x.remove());
     t.querySelectorAll('[data-marcado]').forEach((x) => delete x.dataset.marcado);
     pintarVistas(t);
@@ -3453,7 +3598,8 @@ $('#rel-baixar-analitico').addEventListener('click', () => {
 $('#rel-baixar').addEventListener('click', () => {
   if (!estado.empresaId || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
   const so = rel.qual === 'produtos' && rel.soNaoFechou ? '&soNaoFechou=1' : '';
-  baixar(`/api/empresas/${estado.empresaId}/relatorios/${rel.qual}?competencia=${rel.competencia}&formato=csv${so}`);
+  const rota = rel.qual === 'nota' ? 'analitico' : rel.qual; // "Por nota" baixa o analítico, item a item
+  baixar(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}&formato=csv${so}`);
 });
 
 async function carregarFornecedores() {

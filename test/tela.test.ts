@@ -505,3 +505,21 @@ describe('tela: nota com ICMS no total por CFOP e impressão (28/09)', () => {
     expect(APP).toMatch(/function imprimirNota\(\)/);
   });
 });
+
+describe('tela: relatório por nota, item a item, e impressão do relatório (28/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('terceiro relatório "Por nota" usa o analítico e aplica a regra de ICMS no item', () => {
+    expect(HTML).toContain('<button data-rel="nota"');
+    expect(APP).toContain("const rota = pedido === 'nota' ? 'analitico' : pedido;");
+    expect(APP).toMatch(/function desenharPorNota\(r, linhas, filtro, rotuloFiltro\)/);
+    expect(APP).toMatch(/function aplicarRegraNoItem\(l, regra\)/);
+    expect(APP).toContain('<tbody class="nota-grupo"');
+    // a planilha do "Por nota" é o analítico
+    expect(APP).toContain("const rota = rel.qual === 'nota' ? 'analitico' : rel.qual;");
+  });
+  it('qualquer relatório imprime limpo, com a busca aplicada', () => {
+    expect(HTML).toContain('id="rel-imprimir"');
+    expect(APP).toMatch(/function imprimirRelatorio\(\)/);
+    expect(APP).toContain("copia.querySelectorAll('button, .seta, .tag-vista, .marca-nf').forEach((x) => x.remove());");
+  });
+});
