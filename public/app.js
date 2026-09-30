@@ -3999,81 +3999,159 @@ const alerta = avisar;
   try { await iniciar(); } catch { mostrarLogin(); }
 })();
 
-/* ---- Captura automática na SEF (30/09) ----
-   A tela só liga, desliga e testa. Quem consulta a SEF é o cron, a cada 15 minutos,
-   respeitando as esperas da SEF por empresa. */
-let capturaCache = null;
-
+/* ---- Busca na SEF: tela do administrador (30/09) ----
+   Só o teste de conexão e o histórico. A busca é feita em Notas recebidas. */
 async function carregarCaptura() {
-  const corpo = $('#tbl-captura tbody');
-  corpo.innerHTML = '<tr><td colspan="7" class="vazio">carregando…</td></tr>';
+  const cb = $('#tbl-captura-buscas tbody');
+  cb.innerHTML = '<tr><td colspan="5" class="vazio">carregando…</td></tr>';
   let r;
   try { r = await api('/api/captura'); } catch (e) {
-    corpo.innerHTML = `<tr><td colspan="7" class="vazio">Não consegui carregar: ${esc(e.message)}</td></tr>`;
+    cb.innerHTML = `<tr><td colspan="5" class="vazio">Não consegui carregar: ${esc(e.message)}</td></tr>`;
     return;
   }
-  capturaCache = r;
   const certs = r.certificados;
-  const aviso = $('#cap-aviso');
   const semLigacao = certs.filter((c) => !c.ligado);
   const msgs = [];
-  if (!certs.length) msgs.push('<b>Nenhum certificado no cofre.</b> Envie o A1 na tela Certificados antes de ligar a busca.');
+  if (!certs.length) msgs.push('<b>Nenhum certificado no cofre.</b> Envie o A1 na tela Certificados.');
   if (semLigacao.length) msgs.push(`<b>${semLigacao.map((c) => esc(c.nome)).join(', ')}</b>: está no cofre, mas ainda não foi ligado ao sistema. Fale com a Planee.`);
-  aviso.innerHTML = msgs.join('<br>');
-  aviso.classList.toggle('hidden', !msgs.length);
-
-  const opcoes = (sel) => certs.map((c) => `<option value="${esc(c.id)}"${c.id === sel ? ' selected' : ''}>${esc(c.nome)} · ${esc(c.tipo)}${c.ligado ? '' : ' (não ligado)'}</option>`).join('');
-  $('#cap-cert-teste').innerHTML = certs.length ? opcoes(null) : '<option value="">nenhum certificado</option>';
+  $('#cap-aviso').innerHTML = msgs.join('<br>');
+  $('#cap-aviso').classList.toggle('hidden', !msgs.length);
+  $('#cap-cert-teste').innerHTML = certs.length
+    ? certs.map((c) => `<option value="${esc(c.id)}">${esc(c.nome)} · ${esc(c.tipo)}${c.ligado ? '' : ' (não ligado)'}</option>`).join('')
+    : '<option value="">nenhum certificado</option>';
   $('#cap-testar').disabled = !certs.length;
-
-  const doc = (d) => { const v = String(d || '').replace(/\D/g, ''); return v.length === 14 ? v.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5') : (d || '—'); };
-  corpo.innerHTML = r.empresas.length ? r.empresas.map((e) => {
-    const c = e.captura;
-    const ligada = !!(c && c.ligada);
-    const certSel = c?.certificado_id || (certs.length === 1 ? certs[0].id : '');
-    let situacao;
-    if (!ligada) situacao = '<span class="tag">desligada</span>';
-    else if (c.ultimo_erro) situacao = `<span class="tag dan">com problema</span> <span class="tiny">${esc(c.ultimo_erro)}</span><br><span class="tiny">tenta de novo ${esc(dataHora(c.proxima_busca))}</span>`;
-    else situacao = `<span class="tag ok">ligada</span> <span class="tiny">próxima busca ${esc(dataHora(c.proxima_busca))}</span>`;
-    const ultima = c?.ultima_busca ? `${esc(dataHora(c.ultima_busca))}<br><span class="tiny">${esc(c.ultimo_motivo || '')}</span>` : '<span class="tiny">nunca</span>';
-    return `<tr data-cap-empresa="${esc(e.id)}">
-      <td><b>${esc(e.razao_social)}</b>${e.uf && e.uf !== 'SC' ? ` <span class="tag warn">${esc(e.uf)}: a SEF/SC só tem notas de SC</span>` : ''}</td>
-      <td class="mono">${esc(doc(e.cnpj))}</td>
-      <td><select data-cap-cert ${ligada ? 'disabled' : ''}>${certs.length ? opcoes(certSel) : '<option value="">—</option>'}</select></td>
-      <td>${situacao}</td>
-      <td>${ultima}</td>
-      <td class="num">${c?.notas_recebidas ?? 0}</td>
-      <td>${ligada
-        ? '<button type="button" class="btn sm" data-cap-desligar>Desligar</button>'
-        : `<button type="button" class="btn sm primary" data-cap-ligar ${certs.length ? '' : 'disabled'}>Ligar</button>`}</td></tr>`;
-  }).join('') : '<tr><td colspan="7" class="vazio">Nenhuma empresa cadastrada.</td></tr>';
-
-  const cb = $('#tbl-captura-buscas tbody');
   cb.innerHTML = r.buscas.length ? r.buscas.map((b) => `<tr>
-      <td>${esc(dataHora(b.quando))}</td><td>${esc(b.razao_social)}</td>
+      <td>${esc(dataHora(b.quando))}</td><td>${esc(b.razao_social)}</td><td>${esc(b.usuario_nome || '—')}</td>
       <td>${b.erro ? `<span class="tag dan">problema</span> ${esc(b.erro)}` : esc(b.motivo || '')}</td>
-      <td class="num">${b.documentos}</td><td class="num">${b.importadas}</td><td class="num">${b.duplicadas}</td><td class="num">${b.eventos}</td></tr>`).join('')
-    : '<tr><td colspan="7" class="vazio">Nenhuma busca feita ainda.</td></tr>';
+      <td class="num">${b.documentos}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="vazio">Nenhuma consulta feita ainda.</td></tr>';
 }
 
-$('#tbl-captura').addEventListener('click', async (ev) => {
-  const linha = ev.target.closest('[data-cap-empresa]');
-  if (!linha) return;
-  const empresaId = linha.dataset.capEmpresa;
-  const ligar = ev.target.closest('[data-cap-ligar]');
-  const desligar = ev.target.closest('[data-cap-desligar]');
-  if (!ligar && !desligar) return;
-  const certificadoId = linha.querySelector('[data-cap-cert]')?.value || null;
-  if (ligar && !certificadoId) return alerta('Escolha o certificado que vai buscar as notas desta empresa.');
-  const botao = ligar || desligar;
-  botao.disabled = true;
-  try {
-    await api(`/api/captura/empresas/${empresaId}`, { method: 'POST', body: JSON.stringify({ ligada: !!ligar, certificadoId }) });
-    avisarSalvo(ligar ? 'Busca ligada: começa em até 15 minutos' : 'Busca desligada');
-  } catch (e) {
-    alerta(e.message);
+/* ---- Buscar na SEF, em Notas recebidas (30/09) ----
+   A SEF não filtra por data: o servidor baixa o que houver para uma caixa à parte
+   e devolve só as notas do período escolhido. Nada entra sem ela confirmar. */
+let sefNotas = [];
+const dataSef = (d) => (d ? String(d).split('-').reverse().join('/') : '');
+
+function isoLocal(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+async function abrirPainelSef() {
+  if (!estado.empresaId) return alerta('Escolha uma empresa antes de buscar na SEF.');
+  const painel = $('#painel-sef');
+  painel.classList.remove('hidden');
+  $('#sef-resultado').innerHTML = '';
+  if (!$('#sef-de').value) {
+    const hoje = new Date();
+    $('#sef-de').value = isoLocal(new Date(hoje.getFullYear(), hoje.getMonth(), 1));
+    $('#sef-ate').value = isoLocal(hoje);
   }
-  carregarCaptura();
+  // A SEF guarda o mês atual e os dois anteriores.
+  const h = new Date();
+  $('#sef-de').min = isoLocal(new Date(h.getFullYear(), h.getMonth() - 2, 1));
+  $('#sef-info').textContent = 'carregando…';
+  try {
+    const r = await api(`/api/empresas/${estado.empresaId}/sef`);
+    const sel = $('#sef-cert');
+    sel.innerHTML = r.certificados.map((c) => `<option value="${esc(c.id)}"${r.estado?.certificadoId === c.id ? ' selected' : ''}>certificado ${esc(c.nome)}${c.ligado ? '' : ' (não ligado)'}</option>`).join('');
+    sel.classList.toggle('hidden', r.certificados.length < 2);
+    const partes = [];
+    if (!r.certificados.length) partes.push('Nenhum certificado no cofre: envie o A1 em Administração › Certificados.');
+    else if (r.certificados.length === 1) partes.push(`Certificado: ${r.certificados[0].nome}.`);
+    if (r.estado?.ultimaConsulta) partes.push(`Última consulta à SEF: ${dataHora(r.estado.ultimaConsulta)}.`);
+    if (r.estado?.liberadaEm && new Date(r.estado.liberadaEm) > new Date()) {
+      partes.push(`Nova consulta liberada pela SEF a partir de ${dataHora(r.estado.liberadaEm)}; até lá, a busca usa o que já foi baixado.`);
+    }
+    $('#sef-info').textContent = partes.join(' ');
+    $('#sef-consultar').disabled = !r.certificados.length;
+  } catch (e) {
+    $('#sef-info').textContent = 'Não consegui carregar: ' + e.message;
+  }
+}
+
+$('#btn-sef').addEventListener('click', abrirPainelSef);
+$('#sef-fechar').addEventListener('click', () => $('#painel-sef').classList.add('hidden'));
+
+$('#form-sef').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const de = $('#sef-de').value, ate = $('#sef-ate').value;
+  if (!de || !ate) return alerta('Escolha as duas datas.');
+  if (de > ate) return alerta('A data inicial é depois da final.');
+  const saida = $('#sef-resultado');
+  saida.innerHTML = '<p class="tiny">consultando a SEF… pode levar alguns segundos.</p>';
+  $('#sef-consultar').disabled = true;
+  try {
+    const certificadoId = $('#sef-cert').classList.contains('hidden') ? null : $('#sef-cert').value || null;
+    const r = await api(`/api/empresas/${estado.empresaId}/sef/consultar`, { method: 'POST', body: JSON.stringify({ de, ate, certificadoId }) });
+    sefNotas = r.notas;
+    const d = r.download;
+    const avisos = [];
+    if (d.erro) avisos.push(`<div class="aviso">${esc(d.erro)}</div>`);
+    else if (d.frase) avisos.push(`<p class="tiny">${esc(d.frase)}${d.liberadaEm && !d.temMais ? ` Próxima consulta à SEF liberada a partir de ${esc(dataHora(d.liberadaEm))}.` : ''}</p>`);
+    if (r.canceladasAplicadas) avisos.push(`<div class="aviso"><b>${r.canceladasAplicadas} nota(s) que já estavam no sistema foram canceladas na SEF</b> e foram marcadas como canceladas.</div>`);
+    const novas = sefNotas.filter((n) => !n.noSistema);
+    const periodo = `${dataSef(de)} a ${dataSef(ate)}`;
+    const resumo = sefNotas.length
+      ? `<p><b>${sefNotas.length} nota(s) emitidas de ${periodo}</b>${sefNotas.length - novas.length ? `, ${sefNotas.length - novas.length} já no sistema` : ''}.</p>`
+      : `<p>Nenhuma nota emitida de ${periodo} no que a SEF mandou até agora.</p>`;
+    const tabela = sefNotas.length ? `<div class="scroll sef-lista"><table>
+        <thead><tr><th>Emissão</th><th>Número</th><th>Fornecedor</th><th class="num">Valor</th><th></th></tr></thead>
+        <tbody>${sefNotas.map((n) => `<tr>
+          <td>${esc(dataSef(String(n.emissao || '').slice(0, 10)))}</td><td class="mono">${esc(n.numero || '')}</td>
+          <td>${esc(n.fornecedor || '')}</td><td class="num">${n.valor != null ? moeda(n.valor) : ''}</td>
+          <td>${n.noSistema ? '<span class="tag">já no sistema</span>' : '<span class="tag ok">nova</span>'}${n.cancelada ? ' <span class="tag dan">cancelada na SEF</span>' : ''}</td></tr>`).join('')}</tbody>
+      </table></div>` : '';
+    const botao = novas.length
+      ? `<div class="sef-acoes"><button class="btn primary" type="button" id="sef-importar">Importar ${novas.length} nota(s) nova(s)</button></div>` : '';
+    saida.innerHTML = avisos.join('') + resumo + tabela + botao;
+  } catch (e) {
+    saida.innerHTML = `<div class="aviso">${esc(e.message)}</div>`;
+  } finally {
+    $('#sef-consultar').disabled = false;
+  }
+});
+
+$('#sef-resultado').addEventListener('click', async (ev) => {
+  if (!ev.target.closest('#sef-importar')) return;
+  if (importando) return alerta('Já existe uma importação em andamento. Espere ela terminar.');
+  const chaves = sefNotas.filter((n) => !n.noSistema).map((n) => n.chave);
+  if (!chaves.length) return;
+  const empresaDoEnvio = estado.empresaId;
+  const envioId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2));
+  const tot = { importadas: 0, duplicadas: 0, duplicadasTratadas: 0, eventos: 0, recusadas: 0 };
+  const linhas = [];
+  let canceladas = 0;
+  const log = $('#log-import');
+  log.classList.remove('hidden');
+  $('#painel-sef').classList.add('hidden');
+  travarImportacao(true);
+  log.textContent = `importando da SEF… 0 de ${chaves.length}`;
+  try {
+    for (let i = 0; i < chaves.length; i += TAMANHO_LOTE_IMPORT) {
+      const fatia = chaves.slice(i, i + TAMANHO_LOTE_IMPORT);
+      try {
+        const r = await api(`/api/empresas/${empresaDoEnvio}/sef/importar`, { method: 'POST', body: JSON.stringify({ chaves: fatia, envio: envioId }) });
+        tot.importadas += r.importadas; tot.duplicadas += r.duplicadas;
+        tot.duplicadasTratadas += r.duplicadasTratadas ?? 0; tot.eventos += r.eventos ?? 0; tot.recusadas += r.recusadas;
+        canceladas += r.canceladas ?? 0;
+        linhas.push(...r.arquivos);
+      } catch (e) {
+        tot.recusadas += fatia.length;
+        linhas.push(...fatia.map((c) => ({ arquivo: `nota ${c}`, status: 'recusada', motivo: 'o envio falhou: ' + e.message })));
+      }
+      log.textContent = `importando da SEF… ${Math.min(i + TAMANHO_LOTE_IMPORT, chaves.length)} de ${chaves.length}`;
+    }
+    log.textContent = textoResultadoImportacao(chaves.length, tot, linhas)
+      + (canceladas ? `\n\n${canceladas} nota(s) importada(s) já vieram canceladas pela SEF e foram marcadas como canceladas.` : '');
+    await carregarCompetencias();
+    await carregarImportacoes();
+    await carregarNotas();
+  } catch (e) {
+    log.textContent = 'falhou: ' + e.message;
+  } finally {
+    travarImportacao(false);
+  }
 });
 
 $('#cap-testar').addEventListener('click', async () => {

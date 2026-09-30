@@ -586,4 +586,8 @@ tr.nota-estorno td{background:#faf5ff}
 .cert-form .campo{margin:0}
 .cap-teste{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
 .cap-teste select{max-width:320px}
-#tbl-captura select{max-width:220px}
+.sef-barra{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
+.sef-painel{margin-top:12px;padding:12px 14px;border:1px solid var(--line);border-radius:10px}
+.sef-painel .toolbar{flex-wrap:wrap;gap:8px;align-items:center}
+.sef-lista{max-height:360px;overflow:auto;margin:8px 0}
+.sef-acoes{margin-top:8px}
