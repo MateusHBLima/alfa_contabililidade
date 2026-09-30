@@ -1,31 +1,37 @@
-import { Repo, capturasVencidas, reservarCaptura, registrarBuscaCaptura } from '../db/repo';
-import { importarArquivos } from '../nfe/importador';
-import type { Sessao } from '../auth/permissoes';
+import type { Repo } from '../db/repo';
+import { importarArquivos, type ResultadoLote } from '../nfe/importador';
 import {
   URL_SEF_SC, OPERACAO_PADRAO, lerWsdl, montarPedido, montarEnvelope, lerRetorno, descompactar, abrirLote,
-  documentoLimpo, esperaDepois, explicarCStat, EVENTOS_QUE_IMPORTAM, ErroSef, type Operacao, type Busca,
+  documentoLimpo, esperaDepois, explicarCStat, indiceDoDocumento, ErroSef, type Operacao, type Busca,
 } from './sefsc';
 
 /**
- * Busca automática de notas na SEF/SC (30/09/2026).
+ * Busca de notas na SEF/SC, manual e por período (30/09/2026).
  *
- * Roda no cron (a cada 15 minutos). Em cada execução, consulta as empresas que já
- * podem ser consultadas, uma chamada por empresa, e para quando já trouxe um lote
- * cheio: 50 notas importadas cabem folgadas nos limites de uma execução do Worker
- * (~8 idas ao banco por nota, medido). O resto fica para a próxima execução.
+ * A contadora escolhe o período e aperta "Buscar na SEF". O sistema:
+ *   1. se a SEF já liberou esta empresa, baixa o que houver de novo (desde o último
+ *      NSU) e guarda na CAIXA: XML no R2 de trabalho, índice em `captura_caixa`.
+ *      Nada entra na lista de notas nessa hora.
+ *   2. mostra as notas da caixa emitidas no período, dizendo quais já estão no sistema;
+ *   3. importa só as que ela confirmar, 20 por vez, pelo importador de sempre.
+ *
+ * A SEF não filtra por data e, depois de entregar tudo, exige 12 horas até a próxima
+ * consulta da mesma empresa. Por isso a caixa: um segundo período dentro das 12 horas
+ * é atendido com o que já foi baixado, sem chamar a SEF.
  *
  * O certificado sai do cofre mTLS da Cloudflare: cada certificado vira um binding
- * `MTLS_<id no cofre, com _ no lugar de ->` no wrangler.jsonc. Certificado novo =
- * uma linha nova lá e uma publicação.
+ * `MTLS_<id no cofre, com _ no lugar de ->` no wrangler.jsonc.
  */
 
 export type AmbienteCaptura = {
   DB: D1Database;
   XML_ORIGINAL: R2Bucket;
   XML_TRABALHO: R2Bucket;
-  AUDIT_SEED: string;
   [binding: string]: unknown;
 };
+
+/** Até 6 lotes de 50 por clique: cabe folgado nos limites de uma requisição do Worker. */
+export const LOTES_POR_CONSULTA = 6;
 
 export function nomeDoBinding(cloudflareId: string): string {
   return `MTLS_${cloudflareId.replace(/-/g, '_')}`;
@@ -78,126 +84,127 @@ export async function consultarSef(busca: Busca, operacao: Operacao, pedido: str
   return lerRetorno(await r.text());
 }
 
-export type ResumoExecucao = { consultadas: number; documentos: number; detalhes: string[] };
+export type ResultadoDownload = {
+  /** false: a SEF ainda não liberou esta empresa, usamos só o que já estava na caixa. */
+  consultou: boolean;
+  documentos: number;
+  frase: string;
+  erro: string | null;
+  /** Parou no limite de lotes por clique: tem mais esperando na SEF. */
+  temMais: boolean;
+  liberadaEm: string | null;
+};
 
-export async function executarCaptura(env: AmbienteCaptura, agora = new Date()): Promise<ResumoExecucao> {
-  const agoraIso = agora.toISOString();
-  const devidas = await capturasVencidas(env.DB, agoraIso, 10);
-  const resumo: ResumoExecucao = { consultadas: 0, documentos: 0, detalhes: [] };
-  for (const c of devidas) {
-    if (resumo.consultadas >= 5 || resumo.documentos >= 50) break;
-    if (!(await reservarCaptura(env.DB, c.empresa_id, agoraIso))) continue;
-    resumo.consultadas++;
-    const r = await buscarEmpresa(env, c, agora);
-    resumo.documentos += r.documentos;
-    resumo.detalhes.push(`${c.razao_social}: ${r.frase}`);
-  }
-  return resumo;
-}
-
-async function buscarEmpresa(env: AmbienteCaptura, c: any, agora: Date): Promise<{ documentos: number; frase: string }> {
+/**
+ * Baixa da SEF o que houver de novo para a empresa e guarda na caixa.
+ * Não importa nada. Quem chama já conferiu a permissão de importar.
+ */
+export async function baixarDaSef(
+  env: AmbienteCaptura, repo: Repo, empresa: { id: string; cnpj: string },
+  cert: { id: string; nome: string; cloudflare_id: string; valido_ate: string }, agora = new Date(),
+): Promise<ResultadoDownload> {
   const quando = agora.toISOString();
-  const base = {
-    tenantId: c.tenant_id, empresaId: c.empresa_id, quando, ultNsu: null as string | null,
-    nsuDe: c.ult_nsu as string, nsuAte: null as string | null,
-    documentos: 0, importadas: 0, duplicadas: 0, eventos: 0, ignorados: 0, recusadas: 0, loteId: null as string | null,
-  };
-  const falhar = async (frase: string, cStat: string | null = null, motivo = '') => {
-    const { ms } = esperaDepois(cStat, 0, (c.erros_seguidos ?? 0) + 1);
-    await registrarBuscaCaptura(env.DB, {
-      ...base, proxima: new Date(agora.getTime() + ms).toISOString(), cStat, motivo: motivo || frase, erro: frase,
-    });
-    return { documentos: 0, frase };
-  };
+  const estado = await repo.estadoSef(empresa.id);
+  const semConsulta = (frase: string, erro: string | null = null): ResultadoDownload =>
+    ({ consultou: false, documentos: 0, frase, erro, temMais: false, liberadaEm: estado?.proxima_consulta ?? null });
 
-  const cert = await env.DB
-    .prepare('SELECT * FROM certificados WHERE tenant_id = ? AND id = ? AND removido_em IS NULL')
-    .bind(c.tenant_id, c.certificado_id)
-    .first<any>();
-  if (!cert) return falhar('O certificado escolhido para esta empresa foi removido. Escolha outro na tela Captura SEF.', 'CERT');
-  if (cert.valido_ate < quando) return falhar(`O certificado ${cert.nome} venceu em ${cert.valido_ate.slice(0, 10)}. Envie o novo.`, 'CERT');
+  // O que se resolve sem chamar a SEF vem antes, e não gasta a liberação.
+  if (cert.valido_ate < quando) return semConsulta('', `O certificado ${cert.nome} venceu em ${cert.valido_ate.slice(0, 10).split('-').reverse().join('/')}. Envie o novo na tela Certificados.`);
   const busca = buscaComCertificado(env, cert.cloudflare_id);
-  if (!busca) return falhar(`O certificado ${cert.nome} está no cofre mas ainda não foi ligado ao sistema. Fale com a Planee.`, 'CERT');
+  if (!busca) return semConsulta('', `O certificado ${cert.nome} está no cofre, mas ainda não foi ligado ao sistema. Fale com a Planee.`);
+  const doc = documentoLimpo(empresa.cnpj);
+  if (!doc) return semConsulta('', 'O CNPJ desta empresa está inválido no cadastro.');
 
-  const doc = documentoLimpo(c.cnpj);
-  if (!doc) return falhar('CNPJ da empresa inválido no cadastro.', 'CNPJ');
+  if (!(await repo.reservarConsultaSef(empresa.id, cert.id, quando))) {
+    const depois = await repo.estadoSef(empresa.id);
+    return { ...semConsulta('A SEF só libera uma nova consulta desta empresa depois do horário abaixo. Mostrando o que já foi baixado.'), liberadaEm: depois?.proxima_consulta ?? null };
+  }
 
-  const u = await env.DB
-    .prepare('SELECT id, tenant_id, email, nome, ativo FROM usuarios WHERE id = ?')
-    .bind(c.ligada_por)
-    .first<any>();
-  if (!u || u.ativo !== 1) return falhar('Quem ligou a busca desta empresa não está mais ativo. Desligue e ligue de novo.', 'USUARIO');
-
-  let operacao: Operacao;
-  let ret;
+  let nsu: string = estado?.ult_nsu || '0';
+  const nsuDe = nsu;
+  let documentos = 0;
+  let ultimo: { cStat: string; xMotivo: string; qtd: number } | null = null;
+  let erro: string | null = null;
   try {
-    operacao = (await descobrirOperacao(busca)).operacao;
-    ret = await consultarSef(busca, operacao, montarPedido(doc, c.ult_nsu || '0'));
+    const { operacao } = await descobrirOperacao(busca);
+    for (let lote = 0; lote < LOTES_POR_CONSULTA; lote++) {
+      const ret = await consultarSef(busca, operacao, montarPedido(doc, nsu));
+      if (ret.cStat !== '118' && ret.cStat !== '117') {
+        ultimo = { cStat: ret.cStat, xMotivo: ret.xMotivo, qtd: 0 };
+        // NSU fora da janela de 3 meses: na próxima, volta ao começo do que a SEF tem.
+        if (ret.cStat === '632' || ret.cStat === '589') nsu = '0';
+        erro = explicarCStat(ret.cStat, ret.xMotivo);
+        break;
+      }
+      const docs = ret.cStat === '118' && ret.loteDistComp ? abrirLote(await descompactar(ret.loteDistComp)) : [];
+      const guardar = [];
+      for (const d of docs) {
+        const r2Chave = `sef/${repo.contexto.sessao.tenantId}/${empresa.id}/${d.nsu}.xml`;
+        await env.XML_TRABALHO.put(r2Chave, d.xml);
+        guardar.push({ nsu: d.nsu, tipo: d.tipo, tpEvento: d.tpEvento, r2Chave, ...indiceDoDocumento(d) });
+      }
+      await repo.guardarNaCaixa(empresa.id, guardar);
+      documentos += docs.length;
+      nsu = ret.ultNuNSURet || (docs.length ? docs[docs.length - 1]!.nsu : nsu);
+      ultimo = { cStat: ret.cStat, xMotivo: ret.xMotivo, qtd: docs.length };
+      if (ret.cStat !== '118' || docs.length < 50) break;
+    }
   } catch (e) {
     esquecerOperacao();
-    return falhar(e instanceof Error ? e.message : String(e));
+    erro = e instanceof Error ? e.message : String(e);
   }
 
-  const frase = explicarCStat(ret.cStat, ret.xMotivo);
-  if (ret.cStat !== '118' && ret.cStat !== '117') {
-    // NSU fora da janela de 3 meses: volta ao começo do que a SEF tem. As repetidas não entram de novo.
-    if (ret.cStat === '632' || ret.cStat === '589') base.ultNsu = '0';
-    return falhar(frase, ret.cStat, ret.xMotivo);
-  }
-
-  let docs: ReturnType<typeof abrirLote> = [];
-  if (ret.cStat === '118' && ret.loteDistComp) {
-    try {
-      docs = abrirLote(await descompactar(ret.loteDistComp));
-    } catch (e) {
-      return falhar(`Não consegui abrir o lote que a SEF mandou: ${e instanceof Error ? e.message : String(e)}`, ret.cStat, ret.xMotivo);
-    }
-  }
-
-  const sessao: Sessao = {
-    usuarioId: u.id, tenantId: u.tenant_id, email: u.email, nome: u.nome,
-    permissoes: new Set(['notas.importar', 'notas.visualizar']) as Sessao['permissoes'],
-    empresas: new Set([c.empresa_id]), deveTrocarSenha: false,
-  };
-  const repo = new Repo(env.DB, { sessao, ip: null, requestId: `captura-sef-${crypto.randomUUID()}` }, env.AUDIT_SEED);
-
-  const arquivos: { nome: string; conteudo: string }[] = [];
-  for (const d of docs) {
-    if (d.tipo === 'nota' || (d.tipo === 'evento' && d.tpEvento && EVENTOS_QUE_IMPORTAM.has(d.tpEvento))) {
-      arquivos.push({ nome: `SEF-NSU${d.nsu}-${d.chave ?? 'sem-chave'}${d.tipo === 'evento' ? `-evento${d.tpEvento}` : ''}.xml`, conteudo: d.xml });
-    } else {
-      base.ignorados++;
-    }
-  }
-
-  if (arquivos.length) {
-    try {
-      const r = await importarArquivos(repo, env.XML_ORIGINAL, c.empresa_id, arquivos, 'sefaz');
-      Object.assign(base, {
-        importadas: r.importadas, duplicadas: r.duplicadas, eventos: r.eventos, recusadas: r.recusadas, loteId: r.loteId,
-      });
-      // Nenhum arquivo some: o que a importação recusou fica guardado como veio.
-      for (const a of r.arquivos.filter((x) => x.status === 'recusada')) {
-        const orig = arquivos.find((x) => x.nome === a.arquivo);
-        if (orig) await env.XML_TRABALHO.put(`captura/recusadas/${c.empresa_id}/${a.arquivo}`, orig.conteudo);
-      }
-    } catch (e) {
-      // Não avança o NSU: na próxima busca o mesmo lote vem de novo.
-      return falhar(`A SEF mandou ${docs.length} documento(s), mas a importação falhou: ${e instanceof Error ? e.message : String(e)}`, ret.cStat, ret.xMotivo);
-    }
-  }
-
-  base.documentos = docs.length;
-  base.ultNsu = ret.ultNuNSURet || (docs.length ? docs[docs.length - 1]!.nsu : null);
-  base.nsuAte = base.ultNsu;
-  const { ms } = esperaDepois(ret.cStat, docs.length, 0);
-  await registrarBuscaCaptura(env.DB, {
-    ...base, proxima: new Date(agora.getTime() + ms).toISOString(), cStat: ret.cStat, motivo: frase, erro: null,
+  const temMais = !erro && ultimo?.cStat === '118' && ultimo.qtd >= 50;
+  // Sem resposta da SEF (rede, TLS): libera de novo em 10 minutos. Com resposta, a regra da SEF.
+  const ms = !ultimo ? 10 * 60_000 : esperaDepois(ultimo.cStat, ultimo.qtd, 0).ms;
+  const proxima = new Date(agora.getTime() + ms).toISOString();
+  const frase = erro ?? (documentos ? `A SEF mandou ${documentos} documento(s) novo(s).` : 'Nada novo na SEF desde a última consulta.');
+  await repo.registrarConsultaSef(empresa.id, {
+    quando, proxima, cStat: ultimo?.cStat ?? null, motivo: frase, erro,
+    ultNsu: nsu, nsuDe, documentos,
   });
   return {
-    documentos: docs.length,
-    frase: ret.cStat === '118' ? `${base.importadas} nota(s) nova(s), ${base.duplicadas} já estavam, ${base.eventos} evento(s)` : frase,
+    consultou: true, documentos, erro, temMais, liberadaEm: proxima,
+    frase: temMais ? `${frase} Ainda tem mais na SEF: consulte de novo para baixar o resto.` : frase,
   };
+}
+
+async function lerDaCaixa(env: AmbienteCaptura, r2Chave: string): Promise<string | null> {
+  const o = await env.XML_TRABALHO.get(r2Chave);
+  return o ? await o.text() : null;
+}
+
+/**
+ * Cancelamentos e cartas de correção da caixa cuja nota já está no sistema: aplica.
+ * Roda depois de cada download e de cada importação, então a nota importada hoje
+ * recebe o cancelamento que chegou junto.
+ */
+export async function aplicarEventosDaCaixa(env: AmbienteCaptura, repo: Repo, empresaId: string): Promise<number> {
+  const pendentes = await repo.eventosPendentesDaCaixa(empresaId);
+  if (!pendentes.length) return 0;
+  const arquivos = [];
+  for (const e of pendentes) {
+    const xml = await lerDaCaixa(env, e.r2_chave);
+    if (xml) arquivos.push({ nome: `SEF-NSU${e.nsu}-${e.chave}-evento${e.tp_evento}.xml`, conteudo: xml });
+  }
+  if (arquivos.length) await importarArquivos(repo, env.XML_ORIGINAL, empresaId, arquivos, 'sefaz');
+  await repo.marcarEventosAplicados(empresaId, pendentes.map((e) => e.nsu));
+  return pendentes.filter((e) => e.tp_evento !== '110110').length;
+}
+
+/** Importa as notas escolhidas da caixa (até 20 por chamada), como um envio de XML. */
+export async function importarDaCaixa(
+  env: AmbienteCaptura, repo: Repo, empresaId: string, chaves: string[], envioId: string | null,
+): Promise<ResultadoLote & { canceladas: number }> {
+  const linhas = await repo.notasDaCaixaPorChave(empresaId, chaves);
+  const arquivos = [];
+  for (const l of linhas) {
+    const xml = await lerDaCaixa(env, l.r2_chave);
+    arquivos.push({ nome: `SEF-NSU${l.nsu}-${l.chave}.xml`, conteudo: xml ?? '' });
+  }
+  const r = await importarArquivos(repo, env.XML_ORIGINAL, empresaId, arquivos, 'sefaz', envioId);
+  const canceladas = await aplicarEventosDaCaixa(env, repo, empresaId);
+  return { ...r, canceladas };
 }
 
 /** Botão "Testar conexão": só pede a descrição do serviço, não consulta nenhuma empresa. */

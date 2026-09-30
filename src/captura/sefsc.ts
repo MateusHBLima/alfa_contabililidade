@@ -247,3 +247,27 @@ export function explicarCStat(cStat: string, xMotivo: string): string {
   };
   return m[cStat] ?? `${cStat} — ${xMotivo || 'sem descrição'}`;
 }
+
+/** O que a caixa precisa saber do documento para filtrar por data e mostrar na lista, sem abrir o XML inteiro. */
+export function indiceDoDocumento(d: DocumentoDistribuido): {
+  dhEmi: string | null; emitCnpj: string | null; emitNome: string | null; numero: string | null; valor: number | null; chave: string | null;
+} {
+  const x = d.xml;
+  const t = (re: RegExp) => x.match(re)?.[1]?.trim() ?? null;
+  if (d.tipo === 'nota') {
+    const emit = x.match(/<(?:\w+:)?emit>([\s\S]*?)<\/(?:\w+:)?emit>/)?.[1] ?? '';
+    const v = t(/<(?:\w+:)?ICMSTot>[\s\S]*?<(?:\w+:)?vNF>([^<]+)</);
+    return {
+      dhEmi: t(/<(?:\w+:)?dhEmi>([^<]+)</) ?? t(/<(?:\w+:)?dEmi>([^<]+)</),
+      emitCnpj: emit.match(/<(?:\w+:)?(?:CNPJ|CPF)>([^<]+)</)?.[1] ?? null,
+      emitNome: emit.match(/<(?:\w+:)?xNome>([^<]+)</)?.[1] ?? null,
+      numero: t(/<(?:\w+:)?nNF>([^<]+)</),
+      valor: v !== null && !Number.isNaN(Number(v)) ? Number(v) : null,
+      chave: d.chave ?? t(/<(?:\w+:)?chNFe>(\w{44})</) ?? x.match(/Id="NFe(\w{44})"/)?.[1] ?? null,
+    };
+  }
+  return {
+    dhEmi: t(/<(?:\w+:)?dhEvento>([^<]+)</), emitCnpj: null, emitNome: null, numero: null, valor: null,
+    chave: d.chave ?? t(/<(?:\w+:)?chNFe>(\w{44})</),
+  };
+}
