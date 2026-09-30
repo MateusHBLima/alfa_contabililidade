@@ -484,7 +484,7 @@ function marcarEscopo() {
   }
 }
 
-const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vRegrasIcms', 'vUsuarios', 'vPapeis', 'vCertificados'];
+const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vRegrasIcms', 'vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura'];
 
 function telaAtual() {
   return TELAS.find((v) => !$('#' + v).classList.contains('hidden')) ?? 'v1';
@@ -532,6 +532,7 @@ function irPara(view) {
   if (view === 'vUsuarios') carregarUsuarios();
   if (view === 'vPapeis') carregarPapeis();
   if (view === 'vCertificados') carregarCertificados();
+  if (view === 'vCaptura') carregarCaptura();
 }
 
 /* Trocar de empresa pede OK (reunião 25/09). Escolher no seletor sozinho
@@ -689,7 +690,7 @@ async function iniciar() {
   $('#btn-novo-usuario').classList.toggle('hidden', !pode('usuarios.criar'));
   $('#btn-convidar').classList.toggle('hidden', !pode('usuarios.convidar'));
   $('#btn-novo-papel').classList.toggle('hidden', !pode('papeis.gerenciar'));
-  for (const [botao, permissao] of [['vUsuarios', 'usuarios.visualizar'], ['vPapeis', 'papeis.gerenciar'], ['vCertificados', 'certificados.gerenciar']]) {
+  for (const [botao, permissao] of [['vUsuarios', 'usuarios.visualizar'], ['vPapeis', 'papeis.gerenciar'], ['vCertificados', 'certificados.gerenciar'], ['vCaptura', 'captura.gerenciar']]) {
     const b = document.querySelector(`#nav button[data-view="${botao}"]`);
     if (b) b.classList.toggle('hidden', !pode(permissao));
   }
@@ -3997,3 +3998,96 @@ const alerta = avisar;
 (async () => {
   try { await iniciar(); } catch { mostrarLogin(); }
 })();
+
+/* ---- Captura automática na SEF (30/09) ----
+   A tela só liga, desliga e testa. Quem consulta a SEF é o cron, a cada 15 minutos,
+   respeitando as esperas da SEF por empresa. */
+let capturaCache = null;
+
+async function carregarCaptura() {
+  const corpo = $('#tbl-captura tbody');
+  corpo.innerHTML = '<tr><td colspan="7" class="vazio">carregando…</td></tr>';
+  let r;
+  try { r = await api('/api/captura'); } catch (e) {
+    corpo.innerHTML = `<tr><td colspan="7" class="vazio">Não consegui carregar: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+  capturaCache = r;
+  const certs = r.certificados;
+  const aviso = $('#cap-aviso');
+  const semLigacao = certs.filter((c) => !c.ligado);
+  const msgs = [];
+  if (!certs.length) msgs.push('<b>Nenhum certificado no cofre.</b> Envie o A1 na tela Certificados antes de ligar a busca.');
+  if (semLigacao.length) msgs.push(`<b>${semLigacao.map((c) => esc(c.nome)).join(', ')}</b>: está no cofre, mas ainda não foi ligado ao sistema. Fale com a Planee.`);
+  aviso.innerHTML = msgs.join('<br>');
+  aviso.classList.toggle('hidden', !msgs.length);
+
+  const opcoes = (sel) => certs.map((c) => `<option value="${esc(c.id)}"${c.id === sel ? ' selected' : ''}>${esc(c.nome)} · ${esc(c.tipo)}${c.ligado ? '' : ' (não ligado)'}</option>`).join('');
+  $('#cap-cert-teste').innerHTML = certs.length ? opcoes(null) : '<option value="">nenhum certificado</option>';
+  $('#cap-testar').disabled = !certs.length;
+
+  const doc = (d) => { const v = String(d || '').replace(/\D/g, ''); return v.length === 14 ? v.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5') : (d || '—'); };
+  corpo.innerHTML = r.empresas.length ? r.empresas.map((e) => {
+    const c = e.captura;
+    const ligada = !!(c && c.ligada);
+    const certSel = c?.certificado_id || (certs.length === 1 ? certs[0].id : '');
+    let situacao;
+    if (!ligada) situacao = '<span class="tag">desligada</span>';
+    else if (c.ultimo_erro) situacao = `<span class="tag dan">com problema</span> <span class="tiny">${esc(c.ultimo_erro)}</span><br><span class="tiny">tenta de novo ${esc(dataHora(c.proxima_busca))}</span>`;
+    else situacao = `<span class="tag ok">ligada</span> <span class="tiny">próxima busca ${esc(dataHora(c.proxima_busca))}</span>`;
+    const ultima = c?.ultima_busca ? `${esc(dataHora(c.ultima_busca))}<br><span class="tiny">${esc(c.ultimo_motivo || '')}</span>` : '<span class="tiny">nunca</span>';
+    return `<tr data-cap-empresa="${esc(e.id)}">
+      <td><b>${esc(e.razao_social)}</b>${e.uf && e.uf !== 'SC' ? ` <span class="tag warn">${esc(e.uf)}: a SEF/SC só tem notas de SC</span>` : ''}</td>
+      <td class="mono">${esc(doc(e.cnpj))}</td>
+      <td><select data-cap-cert ${ligada ? 'disabled' : ''}>${certs.length ? opcoes(certSel) : '<option value="">—</option>'}</select></td>
+      <td>${situacao}</td>
+      <td>${ultima}</td>
+      <td class="num">${c?.notas_recebidas ?? 0}</td>
+      <td>${ligada
+        ? '<button type="button" class="btn sm" data-cap-desligar>Desligar</button>'
+        : `<button type="button" class="btn sm primary" data-cap-ligar ${certs.length ? '' : 'disabled'}>Ligar</button>`}</td></tr>`;
+  }).join('') : '<tr><td colspan="7" class="vazio">Nenhuma empresa cadastrada.</td></tr>';
+
+  const cb = $('#tbl-captura-buscas tbody');
+  cb.innerHTML = r.buscas.length ? r.buscas.map((b) => `<tr>
+      <td>${esc(dataHora(b.quando))}</td><td>${esc(b.razao_social)}</td>
+      <td>${b.erro ? `<span class="tag dan">problema</span> ${esc(b.erro)}` : esc(b.motivo || '')}</td>
+      <td class="num">${b.documentos}</td><td class="num">${b.importadas}</td><td class="num">${b.duplicadas}</td><td class="num">${b.eventos}</td></tr>`).join('')
+    : '<tr><td colspan="7" class="vazio">Nenhuma busca feita ainda.</td></tr>';
+}
+
+$('#tbl-captura').addEventListener('click', async (ev) => {
+  const linha = ev.target.closest('[data-cap-empresa]');
+  if (!linha) return;
+  const empresaId = linha.dataset.capEmpresa;
+  const ligar = ev.target.closest('[data-cap-ligar]');
+  const desligar = ev.target.closest('[data-cap-desligar]');
+  if (!ligar && !desligar) return;
+  const certificadoId = linha.querySelector('[data-cap-cert]')?.value || null;
+  if (ligar && !certificadoId) return alerta('Escolha o certificado que vai buscar as notas desta empresa.');
+  const botao = ligar || desligar;
+  botao.disabled = true;
+  try {
+    await api(`/api/captura/empresas/${empresaId}`, { method: 'POST', body: JSON.stringify({ ligada: !!ligar, certificadoId }) });
+    avisarSalvo(ligar ? 'Busca ligada: começa em até 15 minutos' : 'Busca desligada');
+  } catch (e) {
+    alerta(e.message);
+  }
+  carregarCaptura();
+});
+
+$('#cap-testar').addEventListener('click', async () => {
+  const certificadoId = $('#cap-cert-teste').value;
+  if (!certificadoId) return;
+  const saida = $('#cap-teste-resultado');
+  saida.textContent = 'conectando na SEF…';
+  $('#cap-testar').disabled = true;
+  try {
+    const r = await api('/api/captura/testar', { method: 'POST', body: JSON.stringify({ certificadoId }) });
+    saida.innerHTML = `${r.ok ? '<span class="tag ok">OK</span>' : '<span class="tag dan">não conectou</span>'} ${esc(r.detalhe)}`;
+  } catch (e) {
+    saida.innerHTML = `<span class="tag dan">erro</span> ${esc(e.message)}`;
+  } finally {
+    $('#cap-testar').disabled = false;
+  }
+});

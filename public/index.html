@@ -184,6 +184,7 @@
         <button data-view="vUsuarios"><span class="num">U</span><span>Usuários<span class="sub">quem entra e o que pode</span></span></button>
         <button data-view="vPapeis"><span class="num">P</span><span>Papéis<span class="sub">conjuntos de permissões</span></span></button>
         <button data-view="vCertificados"><span class="num">C</span><span>Certificados<span class="sub">A1 para buscar notas no SAT</span></span></button>
+        <button data-view="vCaptura"><span class="num">S</span><span>Captura SEF<span class="sub">busca automática das notas</span></span></button>
       </div>
     </nav>
     <div class="side-foot">
@@ -622,6 +623,44 @@
           <div class="body tight">
             <div class="scroll"><table id="tbl-certificados">
               <thead><tr><th>Nome</th><th>Titular</th><th>Tipo</th><th>CNPJ/CPF</th><th>Válido até</th><th>Enviado</th><th>Código no cofre</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- CAPTURA SEF -->
+      <section id="vCaptura" class="hidden">
+        <h1>Captura automática na SEF</h1>
+        <p class="page-desc">O sistema busca sozinho, com o certificado, as notas que cada empresa recebeu e importa como se
+          fosse um envio de XML. A SEF só libera a nota 24 horas depois de emitida, e só guarda o mês atual e os dois anteriores.
+          Depois de receber tudo, a SEF exige esperar 12 horas para consultar a mesma empresa de novo; por isso não existe
+          botão de buscar agora. A busca começa em até 15 minutos depois de ligar.</p>
+        <div id="cap-aviso" class="aviso hidden" style="margin-bottom:12px"></div>
+        <div class="card">
+          <header><h2>Testar a conexão</h2><span class="hint">só confere se a SEF aceita o certificado · não consulta nenhuma empresa</span></header>
+          <div class="body">
+            <div class="cap-teste">
+              <select id="cap-cert-teste"></select>
+              <button class="btn" type="button" id="cap-testar">Testar conexão</button>
+              <span id="cap-teste-resultado" class="tiny"></span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <header><h2>Empresas</h2><span class="hint">começa desligada em todas</span></header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-captura">
+              <thead><tr><th>Empresa</th><th>CNPJ</th><th>Certificado</th><th>Situação</th><th>Última busca</th><th class="num">Notas recebidas</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+        <div class="card">
+          <header><h2>Últimas buscas</h2></header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-captura-buscas">
+              <thead><tr><th>Quando</th><th>Empresa</th><th>Resultado</th><th class="num">Documentos</th><th class="num">Novas</th><th class="num">Já estavam</th><th class="num">Eventos</th></tr></thead>
               <tbody></tbody>
             </table></div>
           </div>

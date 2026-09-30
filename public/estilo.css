@@ -584,3 +584,6 @@ tr.nota-subtotal td b{font-weight:700}
 tr.nota-estorno td{background:#faf5ff}
 .cert-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px 14px;align-items:end}
 .cert-form .campo{margin:0}
+.cap-teste{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.cap-teste select{max-width:320px}
+#tbl-captura select{max-width:220px}
