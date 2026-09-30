@@ -40,16 +40,13 @@
     }
   ],
 
-  // Certificados A1 da captura na SEF (30/09). Cada um já está no cofre mTLS da conta
+  // Certificados A1 da busca na SEF (30/09). Cada um já está no cofre mTLS da conta
   // (tela Certificados); aqui ele é ligado ao Worker com o nome MTLS_<id com _>.
   // Certificado novo = uma entrada nova aqui + publicação. Ver src/captura/captura.ts.
   "mtls_certificates": [
     // Isa (e-CPF), enviado em 30/09, vale até 15/04/2027
     { "binding": "MTLS_7329489b_4f2c_488b_9ccc_ca85af32f441", "certificate_id": "7329489b-4f2c-488b-9ccc-ca85af32f441" }
   ],
-
-  // A cada 15 minutos o Worker olha quais empresas já podem ser consultadas na SEF.
-  "triggers": { "crons": ["*/15 * * * *"] },
 
   // O padrao e producao de proposito. O wrangler dev sobrescreve pelo .dev.vars,
   // que so existe na maquina de quem desenvolve. O contrario - padrao "dev" e
