@@ -592,13 +592,20 @@ describe('tela: certificados A1 (29/09)', () => {
   });
 });
 
-describe('tela: captura automática na SEF (30/09)', () => {
+describe('tela: busca na SEF (30/09)', () => {
   const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-  it('tela própria em Administração, só para quem pode, sem botão de buscar agora', () => {
+  it('buscar fica em Notas recebidas, por período, e só importa depois de confirmar', () => {
+    expect(HTML).toContain('id="btn-sef"');
+    expect(HTML).toContain('id="sef-de"');
+    expect(HTML).toContain('id="sef-ate"');
+    expect(APP).toContain('/sef/consultar');
+    expect(APP).toContain("id=\"sef-importar\"");
+    expect(APP).toContain('/sef/importar');
+  });
+  it('a tela do administrador só testa e mostra o histórico, sem ligar busca automática', () => {
     expect(HTML).toContain('<section id="vCaptura"');
     expect(HTML).toContain('id="cap-testar"');
     expect(APP).toContain("['vCaptura', 'captura.gerenciar']");
-    expect(APP).toMatch(/async function carregarCaptura\(\)/);
-    expect(HTML + APP).not.toMatch(/buscar agora<\/button>|data-cap-buscar/i);
+    expect(HTML + APP).not.toMatch(/data-cap-ligar|busca automática das notas/);
   });
 });
