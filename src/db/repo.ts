@@ -1450,6 +1450,75 @@ export class Repo {
     ]);
   }
 
+  // ---------------------------------------------------------------- captura na SEF
+
+  /** Tela da captura (30/09): empresas visíveis, situação da busca de cada uma e as últimas consultas. */
+  async painelCaptura(): Promise<{ empresas: any[]; buscas: any[] }> {
+    const empresas = await this.listarEmpresas();
+    const [rCap, rBuscas] = await this.db.batch([
+      this.db.prepare(
+        `SELECT c.*, u.nome AS ligada_por_nome FROM captura_empresas c
+           LEFT JOIN usuarios u ON u.id = c.ligada_por WHERE c.tenant_id = ?`,
+      ).bind(this.tenant),
+      this.db.prepare(
+        `SELECT b.*, e.razao_social FROM captura_buscas b JOIN empresas e ON e.id = b.empresa_id
+          WHERE b.tenant_id = ? ORDER BY b.quando DESC LIMIT 40`,
+      ).bind(this.tenant),
+    ]);
+    const porEmpresa = new Map((rCap!.results as any[]).map((c) => [c.empresa_id, c]));
+    const visiveis = new Set(empresas.map((e) => e.id));
+    return {
+      empresas: empresas.map((e) => ({
+        id: e.id, razao_social: e.razao_social, cnpj: e.cnpj, uf: e.uf, captura: porEmpresa.get(e.id) ?? null,
+      })),
+      buscas: (rBuscas!.results as any[]).filter((b) => visiveis.has(b.empresa_id)),
+    };
+  }
+
+  /**
+   * Liga ou desliga a busca de uma empresa. Ligar de novo NÃO antecipa a próxima
+   * busca: se a SEF mandou esperar 12 horas, continua esperando. Desligar mantém o
+   * ponto onde parou (NSU), para não baixar tudo de novo.
+   */
+  async configurarCaptura(empresaId: string, ligada: boolean, certificadoId: string | null): Promise<void> {
+    this.exigirEmpresa(empresaId);
+    if (ligada) {
+      if (!certificadoId) throw new ForaDoEscopo('Escolha o certificado que vai buscar as notas desta empresa.');
+      if (!(await this.obterCertificado(certificadoId))) throw new ForaDoEscopo('Certificado não encontrado');
+    }
+    const antes = await this.db
+      .prepare('SELECT * FROM captura_empresas WHERE tenant_id = ? AND empresa_id = ?')
+      .bind(this.tenant, empresaId)
+      .first<any>();
+    const t = agora();
+    const proxima = ligada
+      ? (antes?.proxima_busca && antes.proxima_busca > t ? antes.proxima_busca : t)
+      : antes?.proxima_busca ?? null;
+    await this.db
+      .prepare(
+        `INSERT INTO captura_empresas (empresa_id, tenant_id, ligada, certificado_id, proxima_busca, ligada_por, ligada_em, atualizado_em)
+         VALUES (?,?,?,?,?,?,?,?)
+         ON CONFLICT(empresa_id) DO UPDATE SET ligada = excluded.ligada,
+           certificado_id = COALESCE(excluded.certificado_id, captura_empresas.certificado_id),
+           proxima_busca = excluded.proxima_busca,
+           ligada_por = CASE WHEN excluded.ligada = 1 THEN excluded.ligada_por ELSE captura_empresas.ligada_por END,
+           ligada_em = CASE WHEN excluded.ligada = 1 THEN excluded.ligada_em ELSE captura_empresas.ligada_em END,
+           erros_seguidos = CASE WHEN excluded.ligada = 1 THEN 0 ELSE captura_empresas.erros_seguidos END,
+           atualizado_em = excluded.atualizado_em`,
+      )
+      .bind(empresaId, this.tenant, ligada ? 1 : 0, certificadoId, proxima,
+        ligada ? this.ctx.sessao.usuarioId : null, ligada ? t : null, t)
+      .run();
+    await this.aud.registrarLote([
+      this.evento({
+        acao: 'alterar', entidade: 'captura', entidadeId: empresaId, campo: 'ligada',
+        valorAntes: antes ? (antes.ligada ? 'ligada' : 'desligada') : null,
+        valorDepois: ligada ? `ligada (certificado ${certificadoId})` : 'desligada',
+        origem: 'manual',
+      }),
+    ]);
+  }
+
   /** Notas de estorno do recorte (29/09): ficam fora dos relatórios e aparecem em destaque. */
   async estornos(empresaId: string, competencia?: string, periodo?: Periodo): Promise<any[]> {
     this.exigirEmpresa(empresaId);
@@ -1720,4 +1789,65 @@ function linhaParaRegra(l: any): Regra {
     suspeita: (l.suspeita ?? 0) === 1,
     fixada: (l.fixada ?? 0) === 1,
   };
+}
+
+// ------------------------------------------------------------------ captura: nível sistema
+//
+// A busca automática roda no cron, sem ninguém logado e passando por todos os
+// escritórios. Estas três funções são as únicas consultas de fora do Repo, e só
+// mexem nas tabelas da captura. A IMPORTAÇÃO das notas continua passando pelo Repo,
+// com a sessão de quem ligou a captura, e vai para a trilha como sempre.
+
+/** Empresas com a busca ligada e já liberadas para consultar a SEF, as mais atrasadas primeiro. */
+export async function capturasVencidas(db: D1Database, agoraIso: string, limite: number): Promise<any[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT c.*, e.cnpj, e.razao_social FROM captura_empresas c
+         JOIN empresas e ON e.id = c.empresa_id
+        WHERE c.ligada = 1 AND e.ativo = 1 AND (c.proxima_busca IS NULL OR c.proxima_busca <= ?)
+        ORDER BY c.proxima_busca LIMIT ?`,
+    )
+    .bind(agoraIso, limite)
+    .all<any>();
+  return results;
+}
+
+/**
+ * Reserva a empresa para esta execução do cron: empurra a próxima busca 30 minutos
+ * para frente, só se ninguém fez isso antes. Duas execuções sobrepostas nunca
+ * consultam a mesma empresa (a SEF bloqueia consulta repetida).
+ */
+export async function reservarCaptura(db: D1Database, empresaId: string, agoraIso: string): Promise<boolean> {
+  const segura = new Date(Date.parse(agoraIso) + 30 * 60_000).toISOString();
+  const r = await db
+    .prepare(
+      `UPDATE captura_empresas SET proxima_busca = ?
+        WHERE empresa_id = ? AND ligada = 1 AND (proxima_busca IS NULL OR proxima_busca <= ?)`,
+    )
+    .bind(segura, empresaId, agoraIso)
+    .run();
+  return (r.meta?.changes ?? 0) === 1;
+}
+
+export async function registrarBuscaCaptura(db: D1Database, b: {
+  tenantId: string; empresaId: string; quando: string; proxima: string;
+  cStat: string | null; motivo: string; erro: string | null; ultNsu: string | null;
+  nsuDe: string | null; nsuAte: string | null;
+  documentos: number; importadas: number; duplicadas: number; eventos: number; ignorados: number; recusadas: number;
+  loteId: string | null;
+}): Promise<void> {
+  await db.batch([
+    db.prepare(
+      `UPDATE captura_empresas SET proxima_busca = ?, ultima_busca = ?, ultimo_cstat = ?, ultimo_motivo = ?,
+          ultimo_erro = ?, erros_seguidos = CASE WHEN ? IS NULL THEN 0 ELSE erros_seguidos + 1 END,
+          ult_nsu = COALESCE(?, ult_nsu), notas_recebidas = notas_recebidas + ?, atualizado_em = ?
+        WHERE empresa_id = ?`,
+    ).bind(b.proxima, b.quando, b.cStat, b.motivo, b.erro, b.erro, b.ultNsu, b.importadas, b.quando, b.empresaId),
+    db.prepare(
+      `INSERT INTO captura_buscas (id, tenant_id, empresa_id, quando, cstat, motivo, nsu_de, nsu_ate, documentos,
+          importadas, duplicadas, eventos, ignorados, recusadas, lote_id, erro)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).bind(crypto.randomUUID(), b.tenantId, b.empresaId, b.quando, b.cStat, b.motivo, b.nsuDe, b.nsuAte,
+      b.documentos, b.importadas, b.duplicadas, b.eventos, b.ignorados, b.recusadas, b.loteId, b.erro),
+  ]);
 }
