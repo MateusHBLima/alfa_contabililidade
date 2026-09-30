@@ -24,6 +24,7 @@ import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, res
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
+import { executarCaptura, testarConexao, buscaComCertificado, type AmbienteCaptura } from './captura/captura';
 import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 
@@ -52,6 +53,8 @@ type Env = {
    */
   CF_ACCOUNT_ID?: string;
   CF_API_TOKEN?: string;
+  // Os certificados ligados no wrangler.jsonc (`mtls_certificates`) chegam como
+  // MTLS_<id no cofre>. São lidos pelo nome em src/captura/captura.ts.
 };
 
 type Vars = { repo: Repo; sessao: Sessao };
@@ -2016,6 +2019,44 @@ app.delete('/api/certificados/:id', async (c) => {
   return c.json({ ok: true });
 });
 
+// ------------------------------------------------------------------ captura na SEF
+
+/**
+ * Busca automática de notas na SEF/SC (30/09). A tela liga e desliga por empresa e
+ * testa a conexão; quem consulta a SEF é o cron (ver `scheduled` no fim do arquivo).
+ * Não existe "buscar agora": a SEF bloqueia quem consulta a mesma empresa de novo
+ * antes de 12 horas, e um botão desses seria o jeito mais fácil de tomar bloqueio.
+ */
+app.get('/api/captura', async (c) => {
+  exigir(c.get('sessao'), 'captura.gerenciar');
+  const repo = c.get('repo');
+  const env = c.env as unknown as AmbienteCaptura;
+  const certificados = (await repo.listarCertificados()).map((x) => ({
+    id: x.id, nome: x.nome, titular: x.titular, tipo: x.tipo, documento: x.documento, valido_ate: x.valido_ate,
+    ligado: !!buscaComCertificado(env, x.cloudflare_id),
+  }));
+  return c.json({ certificados, ...(await repo.painelCaptura()) });
+});
+
+app.post('/api/captura/empresas/:id', async (c) => {
+  exigir(c.get('sessao'), 'captura.gerenciar');
+  const corpo = z.object({ ligada: z.boolean(), certificadoId: z.string().min(1).max(64).nullable().optional() })
+    .parse(await c.req.json());
+  if (corpo.ligada && !corpo.certificadoId) {
+    return c.json({ erro: 'Escolha o certificado que vai buscar as notas desta empresa.' }, 400);
+  }
+  await c.get('repo').configurarCaptura(c.req.param('id'), corpo.ligada, corpo.certificadoId ?? null);
+  return c.json({ ok: true });
+});
+
+app.post('/api/captura/testar', async (c) => {
+  exigir(c.get('sessao'), 'captura.gerenciar');
+  const { certificadoId } = z.object({ certificadoId: z.string().min(1).max(64) }).parse(await c.req.json());
+  const cert = await c.get('repo').obterCertificado(certificadoId);
+  if (!cert) return c.json({ erro: 'certificado não encontrado' }, 404);
+  return c.json(await testarConexao(c.env as unknown as AmbienteCaptura, cert.cloudflare_id));
+});
+
 /** Marca/desmarca um produto do relatório como "não fechou" (28/09). */
 app.put('/api/empresas/:id/relatorios/produtos/marca', async (c) => {
   // Anotação de conferência, não dado fiscal: quem vê o relatório pode marcar.
@@ -2828,4 +2869,15 @@ app.all('*', async (c) => {
   return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw));
 });
 
-export default app;
+/**
+ * O Worker responde às telas (fetch) e ao relógio (scheduled). O cron está no
+ * wrangler.jsonc: a cada 15 minutos ele olha quais empresas já podem ser
+ * consultadas na SEF. Quase sempre nenhuma, e aí é uma consulta ao banco e só.
+ */
+export default {
+  fetch: app.fetch,
+  async scheduled(_evento: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    const r = await executarCaptura(env as unknown as AmbienteCaptura);
+    if (r.consultadas) console.log('captura SEF', JSON.stringify(r));
+  },
+};
