@@ -4565,10 +4565,18 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     const ok: any = await (await chamar('/api/captura/testar', { certificadoId: certId })).json();
     expect(ok).toMatchObject({ ok: true, detalhe: expect.stringMatching(/Conectou na SEF.*NfeDownloadContab/) });
     expect(chamadas.map((c) => c.metodo)).toEqual(['GET']);
+    // As sondagens sem certificado usam o fetch global: aqui ele é simulado, o teste não sai para a rede.
+    const fetchGlobal = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('<h1>403.7 certificado exigido</h1>', { status: 403 }));
     const recusado: any = await (await chamar('/api/captura/testar', { certificadoId: certId }, {
       [BINDING]: { fetch: async () => new Response('<html>403 - Forbidden: Access is denied.</html>', { status: 403 }) },
     })).json();
     expect(recusado).toMatchObject({ ok: false, detalhe: expect.stringMatching(/respondeu 403.*Access is denied/) });
+    // Na falha, diz onde falha: sem certificado e na raiz do site (fetch global simulado)
+    expect(recusado.diagnostico).toHaveLength(3);
+    expect(recusado.diagnostico[2]).toMatch(/^com certificado, raiz do site: 403/);
+    expect(recusado.diagnostico[0]).toMatch(/^sem certificado, descrição do serviço: 403 .*403\.7 certificado exigido/);
+    expect(fetchGlobal).toHaveBeenCalledTimes(2);
+    fetchGlobal.mockRestore();
 
     db.consultar("DELETE FROM papel_permissoes WHERE permissao = 'captura.gerenciar'");
     expect((await chamar('/api/captura')).status).toBe(403);
