@@ -225,12 +225,11 @@ export async function baixarDaSef(
         break;
       }
       const docs = ret.cStat === '118' && ret.loteDistComp ? abrirLote(await descompactar(ret.loteDistComp)) : [];
-      // Os 50 arquivos vão para o R2 ao mesmo tempo: um atrás do outro eram ~50 idas e voltas.
-      const guardar = docs.map((d) => ({
-        nsu: d.nsu, tipo: d.tipo, tpEvento: d.tpEvento,
-        r2Chave: `sef/${repo.contexto.sessao.tenantId}/${empresa.id}/${d.nsu}.xml`, ...indiceDoDocumento(d),
-      }));
-      await Promise.all(docs.map((d, i) => env.XML_TRABALHO.put(guardar[i]!.r2Chave, d.xml)));
+      // O lote inteiro vai para o R2 num arquivo só (01/10): eram 50 gravações por lote, e
+      // o Worker só abre 6 conexões ao mesmo tempo — eram uns 8 s por lote só nisso.
+      const r2Chave = `sef/${repo.contexto.sessao.tenantId}/${empresa.id}/lote-${docs[0]?.nsu ?? nsu}-${docs.at(-1)?.nsu ?? nsu}.json`;
+      if (docs.length) await env.XML_TRABALHO.put(r2Chave, JSON.stringify(Object.fromEntries(docs.map((d) => [d.nsu, d.xml]))));
+      const guardar = docs.map((d) => ({ nsu: d.nsu, tipo: d.tipo, tpEvento: d.tpEvento, r2Chave, ...indiceDoDocumento(d) }));
       await repo.guardarNaCaixa(empresa.id, guardar);
       documentos += docs.length;
       nsu = ret.ultNuNSURet || (docs.length ? docs[docs.length - 1]!.nsu : nsu);
@@ -256,9 +255,21 @@ export async function baixarDaSef(
   return { consultou: true, documentos, erro, temMais, liberadaEm: proxima, frase, certificado: aceito?.nome ?? null };
 }
 
-async function lerDaCaixa(env: AmbienteCaptura, r2Chave: string): Promise<string | null> {
-  const o = await env.XML_TRABALHO.get(r2Chave);
-  return o ? await o.text() : null;
+/**
+ * O XML de um documento da caixa. Desde 01/10 cada lote é um arquivo JSON {nsu: xml};
+ * antes era um .xml por documento (os da primeira busca da ITALIANA ficaram assim).
+ * `lidos` guarda os lotes já abertos nesta requisição: 20 notas do mesmo lote = 1 leitura.
+ */
+async function lerDaCaixa(env: AmbienteCaptura, r2Chave: string, nsu: string, lidos: Map<string, Record<string, string> | null>): Promise<string | null> {
+  if (r2Chave.endsWith('.xml')) {
+    const o = await env.XML_TRABALHO.get(r2Chave);
+    return o ? await o.text() : null;
+  }
+  if (!lidos.has(r2Chave)) {
+    const o = await env.XML_TRABALHO.get(r2Chave);
+    lidos.set(r2Chave, o ? JSON.parse(await o.text()) : null);
+  }
+  return lidos.get(r2Chave)?.[nsu] ?? null;
 }
 
 /**
@@ -268,10 +279,11 @@ async function lerDaCaixa(env: AmbienteCaptura, r2Chave: string): Promise<string
  */
 export async function aplicarEventosDaCaixa(env: AmbienteCaptura, repo: Repo, empresaId: string): Promise<number> {
   const pendentes = await repo.eventosPendentesDaCaixa(empresaId);
+  const lidos = new Map<string, Record<string, string> | null>();
   if (!pendentes.length) return 0;
   const arquivos = [];
   for (const e of pendentes) {
-    const xml = await lerDaCaixa(env, e.r2_chave);
+    const xml = await lerDaCaixa(env, e.r2_chave, e.nsu, lidos);
     if (xml) arquivos.push({ nome: `SEF-NSU${e.nsu}-${e.chave}-evento${e.tp_evento}.xml`, conteudo: xml });
   }
   if (arquivos.length) await importarArquivos(repo, env.XML_ORIGINAL, empresaId, arquivos, 'sefaz');
@@ -284,9 +296,10 @@ export async function importarDaCaixa(
   env: AmbienteCaptura, repo: Repo, empresaId: string, chaves: string[], envioId: string | null,
 ): Promise<ResultadoLote & { canceladas: number }> {
   const linhas = await repo.notasDaCaixaPorChave(empresaId, chaves);
+  const lidos = new Map<string, Record<string, string> | null>();
   const arquivos = [];
   for (const l of linhas) {
-    const xml = await lerDaCaixa(env, l.r2_chave);
+    const xml = await lerDaCaixa(env, l.r2_chave, l.nsu, lidos);
     arquivos.push({ nome: `SEF-NSU${l.nsu}-${l.chave}.xml`, conteudo: xml ?? '' });
   }
   const r = await importarArquivos(repo, env.XML_ORIGINAL, empresaId, arquivos, 'sefaz', envioId);
