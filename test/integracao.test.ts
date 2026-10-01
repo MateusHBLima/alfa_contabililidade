@@ -4684,6 +4684,14 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     expect(info.automatica.resultado).toMatch(/Importou 1 nota/);
     const imp: any = await (await chamar(`/api/empresas/${empresaId}/importacoes`)).json();
     expect(JSON.stringify(imp)).toContain('sefaz-auto');
+
+    // No registro aparece "Busca automática", não quem ligou (a busca à mão continua com o nome da
+    // pessoa: teste "o histórico mostra quem consultou").
+    const h: any = await (await chamar('/api/captura')).json();
+    expect(h.buscas.map((b: any) => b.usuario_nome)).toEqual(['Busca automática']);
+    const trilha = db.consultar<any>("SELECT usuario_email, usuario_id FROM auditoria WHERE request_id LIKE 'sef-auto-%'");
+    expect(trilha.length).toBeGreaterThan(0);
+    expect(trilha.every((t) => t.usuario_email === 'Busca automática' && t.usuario_id === contadora)).toBe(true);
   });
 
   it('busca automática: cancelada e emitida pela própria empresa ficam na caixa, sem tentar de novo', async () => {
