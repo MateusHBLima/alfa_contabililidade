@@ -24,7 +24,7 @@ import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, res
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
-import { baixarDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
+import { baixarDaSef, executarBuscaAutomatica, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
 import { ErroSef } from './captura/sefsc';
 import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
@@ -2080,7 +2080,31 @@ app.get('/api/empresas/:id/sef', async (c) => {
       liberadaEm: e.proxima_consulta, ultimaConsulta: e.ultima_consulta,
       ultimoMotivo: e.ultimo_motivo, ultimoErro: e.ultimo_erro, naCaixa: e.na_caixa,
     } : null,
+    automatica: e ? {
+      ligada: !!e.auto_ligada, desde: e.auto_desde, ligadaEm: e.auto_ligada_em,
+      ligadaPor: e.auto_ligada_por ? (await c.env.DB.prepare('SELECT nome FROM usuarios WHERE id = ? AND tenant_id = ?')
+        .bind(e.auto_ligada_por, c.get('sessao').tenantId).first<{ nome: string }>())?.nome ?? null : null,
+      ultima: e.auto_ultima, resultado: e.auto_ultimo_resultado,
+    } : { ligada: false, desde: null, ligadaEm: null, ligadaPor: null, ultima: null, resultado: null },
   });
+});
+
+/**
+ * Liga ou desliga a busca automática da empresa (01/10). Quem liga é em nome de quem
+ * o cron importa depois — por isso exige a permissão de importar.
+ */
+app.post('/api/empresas/:id/sef/automatica', async (c) => {
+  exigir(c.get('sessao'), 'notas.importar');
+  const corpo = z.object({
+    ligada: z.boolean(),
+    desde: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  }).parse(await c.req.json());
+  const repo = c.get('repo');
+  const empresaId = c.req.param('id');
+  if (!(await repo.obterEmpresa(empresaId))) return c.json({ erro: 'empresa não encontrada' }, 404);
+  if (corpo.ligada && !corpo.desde) return c.json({ erro: 'Escolha a data de início da busca automática.' }, 400);
+  await repo.configurarBuscaAutomatica(empresaId, corpo.ligada, corpo.ligada ? corpo.desde! : null);
+  return c.json({ ok: true });
 });
 
 app.post('/api/empresas/:id/sef/consultar', async (c) => {
@@ -2960,4 +2984,20 @@ app.all('*', async (c) => {
   return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw));
 });
 
-export default app;
+/**
+ * Cron (wrangler.jsonc, a cada 15 minutos): a busca automática na SEF. Cada rodada
+ * cuida de uma empresa só e faz pouco — ver executarBuscaAutomatica.
+ */
+export default {
+  fetch: app.fetch,
+  async scheduled(_ev: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil((async () => {
+      try {
+        const r = await executarBuscaAutomatica(env as unknown as AmbienteCaptura & { AUDIT_SEED: string });
+        if (r) console.log(`busca automática: ${r.empresa}: ${r.resultado}`);
+      } catch (e) {
+        console.error(`busca automática falhou: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+      }
+    })());
+  },
+};
