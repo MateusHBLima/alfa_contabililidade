@@ -211,8 +211,31 @@ export async function importarDaCaixa(
   return { ...r, canceladas };
 }
 
-/** Botão "Testar conexão": só pede a descrição do serviço, não consulta nenhuma empresa. */
-export async function testarConexao(env: AmbienteCaptura, cloudflareId: string): Promise<{ ok: boolean; detalhe: string }> {
+/**
+ * Uma tentativa de conexão descrita em uma linha: status, servidor e começo da
+ * resposta, ou a mensagem do erro. Serve para o diagnóstico do "Testar conexão".
+ */
+async function sondar(rotulo: string, chamar: () => Promise<Response>): Promise<string> {
+  const t0 = Date.now();
+  try {
+    const r = await chamar();
+    const corpo = (await r.text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+    const servidor = r.headers.get('server') ?? '?';
+    return `${rotulo}: ${r.status} (servidor ${servidor}, ${Date.now() - t0} ms) ${corpo}`;
+  } catch (e) {
+    return `${rotulo}: erro (${Date.now() - t0} ms) ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/**
+ * Botão "Testar conexão": só pede a descrição do serviço, não consulta nenhuma empresa.
+ *
+ * Se falhar, tenta mais três caminhos para dizer ONDE falha (01/10: a primeira
+ * tentativa em produção voltou 520, que é a Cloudflare dizendo "a conexão com o
+ * servidor caiu"): sem certificado na mesma página, sem certificado na raiz do site
+ * e com certificado na raiz. Nenhum deles consulta empresa.
+ */
+export async function testarConexao(env: AmbienteCaptura, cloudflareId: string): Promise<{ ok: boolean; detalhe: string; diagnostico?: string[] }> {
   const busca = buscaComCertificado(env, cloudflareId);
   if (!busca) return { ok: false, detalhe: 'Este certificado está no cofre, mas ainda não foi ligado ao sistema (falta publicar a ligação). Fale com a Planee.' };
   esquecerOperacao();
@@ -225,6 +248,12 @@ export async function testarConexao(env: AmbienteCaptura, cloudflareId: string):
         : 'Conectou na SEF com o certificado, mas a descrição do serviço veio diferente do esperado. A busca vai usar o formato padrão.',
     };
   } catch (e) {
-    return { ok: false, detalhe: e instanceof Error ? e.message : String(e) };
+    const raiz = new URL(URL_SEF_SC).origin + '/';
+    const diagnostico = [
+      await sondar('sem certificado, descrição do serviço', () => fetch(`${URL_SEF_SC}?WSDL`)),
+      await sondar('sem certificado, raiz do site', () => fetch(raiz)),
+      await sondar('com certificado, raiz do site', () => busca(raiz, { method: 'GET' })),
+    ];
+    return { ok: false, detalhe: e instanceof Error ? e.message : String(e), diagnostico };
   }
 }
