@@ -602,6 +602,11 @@ describe('tela: busca na SEF (30/09)', () => {
     expect(APP).toContain("id=\"sef-importar\"");
     expect(APP).toContain('/sef/importar');
   });
+  it('consultar e importar mostram a roda girando, o tempo e a contagem', () => {
+    expect(APP).toContain('Consultando a SEF… ${seg} s');
+    expect(APP).toMatch(/while \(r\.download\.temMais && !r\.download\.erro && rodadas < SEF_RODADAS_MAX\)/);
+    expect(APP).toContain('Importando da SEF…');
+  });
   it('a tela do administrador só testa e mostra o histórico, sem ligar busca automática', () => {
     expect(HTML).toContain('<section id="vCaptura"');
     expect(HTML).toContain('id="cap-testar"');

@@ -4498,19 +4498,24 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     expect((await consultar('2026-07-01', '2026-07-31')).canceladasAplicadas).toBe(0);
   });
 
-  it('lote cheio: busca os seguintes no mesmo clique, até 6, e avisa se ficou mais na SEF', async () => {
-    for (let k = 0; k < 7; k++) {
-      const docs = Array.from({ length: 50 }, (_, i) => `<distNFeSC NSU="${k * 50 + i + 1}">${manifestacao}</distNFeSC>`);
-      respostas.push(() => new Response(retorno('118', 'ok', { ult: String((k + 1) * 50), qt: 50, lote: lote(docs) })));
+  it('lote cheio: cada requisição traz um lote e diz que tem mais; a seguinte continua na hora', async () => {
+    for (let k = 0; k < 3; k++) {
+      const docs = Array.from({ length: k < 2 ? 50 : 10 }, (_, i) => `<distNFeSC NSU="${k * 50 + i + 1}">${manifestacao}</distNFeSC>`);
+      respostas.push(() => new Response(retorno('118', 'ok', { ult: String(k * 50 + docs.length), qt: docs.length, lote: lote(docs) })));
     }
-    const r = await consultar('2026-07-01', '2026-07-31');
-    expect(posts()).toHaveLength(6);
-    expect(posts()[5]!.corpo).toContain('<ultNuNSU>250</ultNuNSU>');
-    expect(r.download).toMatchObject({ documentos: 300, temMais: true });
-    expect(r.download.frase).toMatch(/Ainda tem mais na SEF/);
-    expect(estado().ult_nsu).toBe('300');
+    const r1 = await consultar('2026-07-01', '2026-07-31');
+    expect(posts()).toHaveLength(1);
+    expect(r1.download).toMatchObject({ consultou: true, documentos: 50, temMais: true });
     // Liberada na hora para continuar
     expect(Date.parse(estado().proxima_consulta)).toBeLessThanOrEqual(Date.now());
+    const r2 = await consultar('2026-07-01', '2026-07-31');
+    expect(posts()[1]!.corpo).toContain('<ultNuNSU>50</ultNuNSU>');
+    expect(r2.download).toMatchObject({ documentos: 50, temMais: true });
+    const r3 = await consultar('2026-07-01', '2026-07-31');
+    expect(r3.download).toMatchObject({ documentos: 10, temMais: false });
+    expect(estado().ult_nsu).toBe('110');
+    expect(Date.parse(estado().proxima_consulta) - Date.now()).toBeGreaterThan(11.9 * H);
+    expect(db.consultar('SELECT * FROM captura_caixa')).toHaveLength(110);
   });
 
   it('certificado que não está ligado ao Worker: não chama a SEF, não gasta a liberação e diz o que falta', async () => {
