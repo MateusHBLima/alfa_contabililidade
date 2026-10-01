@@ -68,7 +68,7 @@ export async function importarArquivos(
   bucketOriginal: R2Bucket,
   empresaId: string,
   arquivos: { nome: string; conteudo: string }[],
-  origem: 'upload' | 'email' | 'sefaz' | 'integracao' = 'upload',
+  origem: 'upload' | 'email' | 'sefaz' | 'sefaz-auto' | 'integracao' = 'upload',
   /** Amarra os lotes de um mesmo envio da tela (20 arquivos por requisicao). */
   envioId: string | null = null,
 ): Promise<ResultadoLote> {

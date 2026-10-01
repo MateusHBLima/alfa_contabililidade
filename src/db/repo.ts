@@ -1593,6 +1593,76 @@ export class Repo {
       .bind(t, this.tenant, empresaId, nsu)));
   }
 
+  /** Liga ou desliga a busca automática da empresa (01/10). Ligar de novo não fura a espera da SEF. */
+  async configurarBuscaAutomatica(empresaId: string, ligada: boolean, desde: string | null): Promise<void> {
+    this.exigirEmpresa(empresaId);
+    const t = agora();
+    const antes = await this.estadoSef(empresaId);
+    await this.db
+      .prepare(
+        `INSERT INTO captura_empresas (empresa_id, tenant_id, atualizado_em) VALUES (?,?,?)
+         ON CONFLICT(empresa_id) DO NOTHING`,
+      )
+      .bind(empresaId, this.tenant, t)
+      .run();
+    await this.db
+      .prepare(
+        `UPDATE captura_empresas SET auto_ligada = ?, auto_desde = COALESCE(?, auto_desde),
+            auto_ligada_por = CASE WHEN ? = 1 THEN ? ELSE auto_ligada_por END,
+            auto_ligada_em = CASE WHEN ? = 1 THEN ? ELSE auto_ligada_em END, atualizado_em = ?
+          WHERE tenant_id = ? AND empresa_id = ?`,
+      )
+      .bind(ligada ? 1 : 0, desde, ligada ? 1 : 0, this.ctx.sessao.usuarioId, ligada ? 1 : 0, t, t, this.tenant, empresaId)
+      .run();
+    await this.aud.registrarLote([
+      this.evento({
+        acao: 'alterar', entidade: 'captura', entidadeId: empresaId, campo: 'busca_automatica',
+        valorAntes: antes?.auto_ligada ? `ligada desde ${antes.auto_desde}` : 'desligada',
+        valorDepois: ligada ? `ligada desde ${desde ?? antes?.auto_desde}` : 'desligada',
+        origem: 'manual',
+      }),
+    ]);
+  }
+
+  async registrarBuscaAutomatica(empresaId: string, quando: string, resultado: string): Promise<void> {
+    this.exigirEmpresa(empresaId);
+    await this.db
+      .prepare('UPDATE captura_empresas SET auto_ultima = ?, auto_ultimo_resultado = ? WHERE tenant_id = ? AND empresa_id = ?')
+      .bind(quando, resultado.slice(0, 500), this.tenant, empresaId)
+      .run();
+  }
+
+  /**
+   * Notas da caixa que a busca automática ainda tem de olhar: emitidas a partir de
+   * `desde`, que não estão no sistema e que ela não pulou antes. Mais antigas primeiro.
+   */
+  async pendentesDaBuscaAutomatica(empresaId: string, desde: string, limite: number): Promise<any[]> {
+    this.exigirEmpresa(empresaId);
+    const { results } = await this.db
+      .prepare(
+        `SELECT c.nsu, c.chave, c.emit_cnpj, c.dh_emi,
+                EXISTS (SELECT 1 FROM captura_caixa e WHERE e.empresa_id = c.empresa_id AND e.chave = c.chave
+                         AND e.tipo = 'evento' AND e.tp_evento IN ('110111','110112')) AS cancelada
+           FROM captura_caixa c
+          WHERE c.tenant_id = ? AND c.empresa_id = ? AND c.tipo = 'nota' AND c.chave IS NOT NULL
+            AND c.auto_recusada IS NULL AND substr(c.dh_emi, 1, 10) >= ?
+            AND NOT EXISTS (SELECT 1 FROM notas n WHERE n.tenant_id = c.tenant_id AND n.chave = c.chave)
+          ORDER BY c.dh_emi, c.nsu LIMIT ?`,
+      )
+      .bind(this.tenant, empresaId, desde, limite)
+      .all<any>();
+    return results;
+  }
+
+  /** A busca automática pulou estas notas (motivo por chave). Continuam na caixa para a importação à mão. */
+  async marcarPuladasNaBuscaAutomatica(empresaId: string, motivos: { chave: string; motivo: string }[]): Promise<void> {
+    this.exigirEmpresa(empresaId);
+    if (!motivos.length) return;
+    await this.db.batch(motivos.map((m) => this.db
+      .prepare(`UPDATE captura_caixa SET auto_recusada = ? WHERE tenant_id = ? AND empresa_id = ? AND chave = ? AND tipo = 'nota'`)
+      .bind(m.motivo.slice(0, 300), this.tenant, empresaId, m.chave)));
+  }
+
   /** Histórico das consultas à SEF, para a tela do administrador. */
   async historicoSef(): Promise<any[]> {
     const { results } = await this.db
@@ -1707,7 +1777,7 @@ export class Repo {
     this.exigirEmpresa(empresaId);
     const { results } = await this.db
       .prepare(
-        `SELECT l.id, l.envio_id, l.criado_em, l.criado_por, l.total_arquivos, l.importadas,
+        `SELECT l.id, l.envio_id, l.origem, l.criado_em, l.criado_por, l.total_arquivos, l.importadas,
                 l.duplicadas, l.recusadas, l.detalhe,
                 (SELECT u.nome FROM usuarios u WHERE u.id = l.criado_por) AS quem,
                 (SELECT COUNT(*) FROM notas n WHERE n.lote_id = l.id) AS notas
@@ -1722,7 +1792,7 @@ export class Repo {
     for (const l of results) {
       const chave = l.envio_id ?? l.id;
       const e = porEnvio.get(chave) ?? {
-        id: chave, criadoEm: l.criado_em, quem: l.quem ?? null, lotes: [] as string[],
+        id: chave, criadoEm: l.criado_em, quem: l.quem ?? null, origem: l.origem ?? null, lotes: [] as string[],
         arquivos: 0, importadas: 0, duplicadas: 0, recusadas: 0, eventos: 0, notas: 0,
         resultados: [] as any[],
       };
@@ -1879,3 +1949,56 @@ function linhaParaRegra(l: any): Regra {
   };
 }
 
+// ------------------------------------------------------------------ busca automática: nível sistema
+//
+// O cron roda sem ninguém logado e passa por todos os escritórios. Esta é a única
+// consulta de fora do Repo: acha as empresas com a busca automática ligada que a SEF
+// já liberou. O resto (baixar, importar, trilha) passa pelo Repo, na sessão de quem
+// ligou a busca daquela empresa.
+//
+// Entra quem a SEF já liberou (vai baixar) ou quem tem nota na caixa esperando a
+// importação (de uma rodada que parou no limite). Quem a SEF liberou vem primeiro.
+export async function buscasAutomaticasVencidas(db: D1Database, agoraIso: string, limite: number): Promise<any[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM (
+         SELECT c.empresa_id, c.tenant_id, c.auto_desde, c.auto_ligada_por, e.cnpj, e.razao_social,
+                (c.proxima_consulta IS NULL OR c.proxima_consulta <= ?) AS sef_liberada,
+                EXISTS (SELECT 1 FROM captura_caixa x
+                         WHERE x.empresa_id = c.empresa_id AND x.tipo = 'nota' AND x.chave IS NOT NULL
+                           AND x.auto_recusada IS NULL AND substr(x.dh_emi, 1, 10) >= c.auto_desde
+                           AND NOT EXISTS (SELECT 1 FROM notas n WHERE n.tenant_id = x.tenant_id AND n.chave = x.chave)
+                       ) AS tem_pendente,
+                c.auto_ultima
+           FROM captura_empresas c JOIN empresas e ON e.id = c.empresa_id
+          WHERE c.auto_ligada = 1 AND c.auto_desde IS NOT NULL AND e.ativo = 1
+       ) WHERE sef_liberada = 1 OR tem_pendente = 1
+       ORDER BY sef_liberada DESC, auto_ultima IS NOT NULL, auto_ultima LIMIT ?`,
+    )
+    .bind(agoraIso, limite)
+    .all<any>();
+  return results;
+}
+
+/** O usuário que ligou a busca automática, como sessão — o cron importa em nome dele. */
+export async function usuarioDaBuscaAutomatica(db: D1Database, usuarioId: string): Promise<{
+  usuario: any; papeis: string[]; empresas: string[]; excecoes: { permissao: string; concedida: number }[];
+} | null> {
+  const [rU, rP, rE, rX] = await db.batch([
+    db.prepare('SELECT id, tenant_id, email, nome, ativo FROM usuarios WHERE id = ?').bind(usuarioId),
+    db.prepare(
+      `SELECT DISTINCT pp.permissao FROM usuario_papeis up JOIN papel_permissoes pp ON pp.papel_id = up.papel_id
+        WHERE up.usuario_id = ?`,
+    ).bind(usuarioId),
+    db.prepare('SELECT empresa_id FROM usuario_empresas WHERE usuario_id = ?').bind(usuarioId),
+    db.prepare('SELECT permissao, concedida FROM usuario_permissoes WHERE usuario_id = ?').bind(usuarioId),
+  ]);
+  const u = (rU!.results as any[])[0];
+  if (!u || u.ativo !== 1) return null;
+  return {
+    usuario: u,
+    papeis: (rP!.results as any[]).map((x) => x.permissao),
+    empresas: (rE!.results as any[]).map((x) => x.empresa_id),
+    excecoes: rX!.results as any[],
+  };
+}
