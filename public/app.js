@@ -806,6 +806,7 @@ async function enviar(arquivos) {
     }
 
     log.textContent = textoResultadoImportacao(xmls.length, tot, linhas);
+    avisarNotasDeOutraEmpresa(linhas, empresaDoEnvio);
 
     // Nota nova pode trazer competencia nova: o seletor tem que saber dela.
     await carregarCompetencias();
@@ -817,6 +818,39 @@ async function enviar(arquivos) {
     travarImportacao(false);
     inputArquivo.value = '';
   }
+}
+
+/**
+ * Notas de OUTRA empresa: a importação já recusa (23/09), mas o resultado era uma linha
+ * "9 arquivo(s) · 0 importada(s) · 9 recusada(s)" e a Taís leu o 9 como importadas
+ * (01/10, notas da THE SAILOR soltas na ITALIANA GARDEN). Agora abre uma janela que não
+ * passa batido, dizendo que nada entrou e de quem são as notas.
+ */
+function frasesOutraEmpresa(linhas) {
+  const grupos = new Map();
+  for (const a of linhas) {
+    if (a.status !== 'recusada' || !a.outraEmpresa) continue;
+    const nome = a.outraEmpresa.cadastrada || a.outraEmpresa.nome || a.outraEmpresa.cnpj;
+    const g = grupos.get(nome) || { n: 0, cadastrada: !!a.outraEmpresa.cadastrada };
+    g.n++;
+    grupos.set(nome, g);
+  }
+  return [...grupos].map(([nome, g]) => `${g.n} nota(s) da ${nome}` + (g.cadastrada ? '' : ' (empresa não cadastrada no sistema)'));
+}
+
+function avisarNotasDeOutraEmpresa(linhas, empresaId) {
+  const frases = frasesOutraEmpresa(linhas);
+  if (!frases.length) return;
+  const aqui = estado.empresas?.find?.((e) => e.id === empresaId)?.razao_social || 'esta empresa';
+  const nenhuma = !linhas.some((a) => a.status === 'importada');
+  const corpo = `<p class="dialogo-texto"><b>${nenhuma ? 'Nenhuma nota foi importada.' : 'Algumas notas NÃO foram importadas.'}</b></p>
+    <p class="dialogo-texto">Os arquivos abaixo são de outra empresa, não da <b>${esc(aqui)}</b>, e foram recusados. Nada deles entrou no sistema:</p>
+    <ul class="dialogo-texto">${frases.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>
+    <p class="dialogo-texto">Para importar, abra a empresa certa lá em cima e envie os arquivos de novo.</p>`;
+  abrirModal('Notas de outra empresa', corpo, () => {});
+  $('#modal-cancelar').classList.add('hidden');
+  $('#modal-ok').textContent = 'Entendi';
+  $('#modal-ok').focus();
 }
 
 /** O resultado de uma importacao em texto — usado na hora e ao reabrir a importacao depois. */
@@ -834,7 +868,12 @@ function textoResultadoImportacao(totalArquivos, tot, linhas) {
 
   const placar = `${tot.importadas} importada(s) · ${tot.duplicadas} já existia(m)` +
     (tot.eventos ? ` · ${tot.eventos} evento(s)` : '') + ` · ${tot.recusadas} recusada(s)`;
-  const cabecalho = [`${totalArquivos} arquivo(s) · ${placar}`];
+  const cabecalho = [];
+  const deOutra = frasesOutraEmpresa(linhas);
+  if (deOutra.length) {
+    cabecalho.push(`ATENÇÃO: NOTAS DE OUTRA EMPRESA — NÃO FORAM IMPORTADAS: ${deOutra.join('; ')}. Abra a empresa certa e importe de novo.`, '');
+  }
+  cabecalho.push(`${totalArquivos} arquivo(s) · ${placar}`);
   if (tot.duplicadas > 0) {
     cabecalho.push(
       tot.duplicadasTratadas > 0

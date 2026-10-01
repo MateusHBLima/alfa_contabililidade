@@ -628,3 +628,11 @@ describe('tela: datas no formato brasileiro (01/10)', () => {
     expect(APP).toContain('certificado: descobrir sozinho');
   });
 });
+
+describe('tela: notas de outra empresa (01/10)', () => {
+  it('a importação avisa numa janela que nada entrou e de quem são as notas', () => {
+    expect(APP).toContain('avisarNotasDeOutraEmpresa(linhas, empresaDoEnvio);');
+    expect(APP).toContain("'Nenhuma nota foi importada.'");
+    expect(APP).toContain('NOTAS DE OUTRA EMPRESA — NÃO FORAM IMPORTADAS');
+  });
+});
