@@ -4516,6 +4516,8 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     expect(estado().ult_nsu).toBe('110');
     expect(Date.parse(estado().proxima_consulta) - Date.now()).toBeGreaterThan(11.9 * H);
     expect(db.consultar('SELECT * FROM captura_caixa')).toHaveLength(110);
+    // Um arquivo no R2 por lote, não um por documento (eram 50 gravações por lote).
+    expect(db.consultar('SELECT DISTINCT r2_chave FROM captura_caixa')).toHaveLength(3);
   });
 
   it('certificado que não está ligado ao Worker: não chama a SEF, não gasta a liberação e diz o que falta', async () => {
