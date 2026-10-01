@@ -363,7 +363,7 @@ export async function executarBuscaAutomatica(env: AmbienteAuto, agora = new Dat
   }
   // A sessão do cron só enxerga esta empresa, mesmo que a pessoa veja mais.
   const sessao: Sessao = { ...daPessoa, empresas: new Set([alvo.empresa_id]) };
-  const repo = new Repo(env.DB, { sessao, ip: null, requestId: `sef-auto-${crypto.randomUUID()}` }, env.AUDIT_SEED);
+  const repo = new Repo(env.DB, { sessao, ip: null, requestId: `sef-auto-${crypto.randomUUID()}`, automatica: true }, env.AUDIT_SEED);
   const empresa = { id: alvo.empresa_id as string, cnpj: alvo.cnpj as string };
 
   if (alvo.sef_liberada) {
