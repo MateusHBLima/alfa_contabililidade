@@ -2993,12 +2993,16 @@ describe('23/09: achar o que foi tratado errado, e XML de outra empresa é recus
     expect(r.recusadas).toBe(1);
     expect(r.arquivos[0].motivo).toMatch(/não é desta empresa/);
     expect(r.arquivos[0].motivo).toMatch(/THE SAILOR LTDA/);
+    // A tela usa isto para avisar em destaque (01/10).
+    expect(r.arquivos[0].outraEmpresa).toEqual({ cnpj: '51714504000104', nome: expect.anything(), cadastrada: 'THE SAILOR LTDA' });
     expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
     // Na empresa certa, entra.
     expect((await subir(sailor, daSailor)).importadas).toBe(1);
     // CNPJ que ninguém tem: recusa, dizendo para conferir o arquivo.
     const deNinguem = outraNota(XML, '87', [['<dest><CNPJ>11222333000181</CNPJ>', '<dest><CNPJ>99888777000166</CNPJ>']]);
-    expect((await subir(empresaId, deNinguem)).arquivos[0].motivo).toMatch(/Nenhuma empresa cadastrada/);
+    const ninguem = (await subir(empresaId, deNinguem)).arquivos[0];
+    expect(ninguem.motivo).toMatch(/Nenhuma empresa cadastrada/);
+    expect(ninguem.outraEmpresa).toMatchObject({ cnpj: '99888777000166', cadastrada: null });
   });
 
   it('nota de entrada emitida pela própria empresa (ela é a emitente) continua entrando', async () => {
