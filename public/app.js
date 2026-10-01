@@ -912,7 +912,7 @@ async function carregarImportacoes() {
       (i.duplicadas ? `, ${i.duplicadas} já existia(m)` : '') +
       (i.eventos ? `, ${i.eventos} evento(s)` : '') +
       (i.recusadas ? `, ${i.recusadas} recusada(s)` : '');
-    const quem = i.origem === 'sefaz-auto' ? 'automática da SEF' : i.origem === 'sefaz' ? `${i.quem || ''} (SEF)` : i.quem;
+    const quem = i.origem === 'sefaz-auto' ? 'Busca automática' : i.origem === 'sefaz' ? `${i.quem || ''} (SEF)` : i.quem;
     return `<option value="${esc(i.id)}">${esc(dataHora(i.criadoEm))}${quem ? ' · ' + esc(quem) : ''} — ${esc(resumo)}</option>`;
   }).join('');
   sel.value = estado.importacoes.some((i) => i.id === atual) ? atual : '';
