@@ -594,6 +594,10 @@ tr.nota-estorno td{background:#faf5ff}
 .sef-painel .toolbar{flex-wrap:wrap;gap:8px;align-items:center}
 .sef-lista{max-height:360px;overflow:auto;margin:8px 0}
 .sef-acoes{margin-top:8px}
+.sef-auto{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)}
+.sef-auto-ligar{display:inline-flex;flex-wrap:wrap;gap:8px;align-items:center}
+.sef-auto-ligar.hidden{display:none}
+.sef-auto .on{color:var(--ok,#1a7f37);font-weight:600}
 /* Campo de data dd/mm/aaaa com calendário em português (01/10) */
 .data-br{display:inline-flex;align-items:center;gap:2px;position:relative}
 .data-br input[type=text]{width:108px;font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);font-variant-numeric:tabular-nums}

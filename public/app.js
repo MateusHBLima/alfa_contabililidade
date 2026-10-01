@@ -912,7 +912,8 @@ async function carregarImportacoes() {
       (i.duplicadas ? `, ${i.duplicadas} já existia(m)` : '') +
       (i.eventos ? `, ${i.eventos} evento(s)` : '') +
       (i.recusadas ? `, ${i.recusadas} recusada(s)` : '');
-    return `<option value="${esc(i.id)}">${esc(dataHora(i.criadoEm))}${i.quem ? ' · ' + esc(i.quem) : ''} — ${esc(resumo)}</option>`;
+    const quem = i.origem === 'sefaz-auto' ? 'automática da SEF' : i.origem === 'sefaz' ? `${i.quem || ''} (SEF)` : i.quem;
+    return `<option value="${esc(i.id)}">${esc(dataHora(i.criadoEm))}${quem ? ' · ' + esc(quem) : ''} — ${esc(resumo)}</option>`;
   }).join('');
   sel.value = estado.importacoes.some((i) => i.id === atual) ? atual : '';
   if (sel.value !== atual) estado.importacaoId = '';
@@ -4135,10 +4136,53 @@ async function abrirPainelSef() {
     }
     $('#sef-info').textContent = partes.join(' ');
     $('#sef-consultar').disabled = !r.certificados.length;
+    mostrarBuscaAutomatica(r.automatica);
   } catch (e) {
     $('#sef-info').textContent = 'Não consegui carregar: ' + e.message;
   }
 }
+
+/**
+ * Busca automática (01/10, ideia da Taís): ligada, o sistema consulta a SEF da empresa
+ * sempre que ela libera (de 12 em 12 horas) e importa sozinho as notas emitidas a partir
+ * da data escolhida. As de antes, as emitidas pela própria empresa e as canceladas ficam
+ * na caixa, para a busca manual aqui em cima.
+ */
+function mostrarBuscaAutomatica(a) {
+  const ligada = !!a?.ligada;
+  const dBr = (d) => (d ? d.slice(0, 10).split('-').reverse().join('/') : '');
+  let texto;
+  if (ligada) {
+    texto = `<span class="on">Busca automática ligada</span>: o sistema consulta a SEF sozinho de 12 em 12 horas e importa as notas emitidas a partir de ${esc(dBr(a.desde))}` +
+      (a.ligadaPor ? ` (ligada por ${esc(a.ligadaPor)})` : '') + '.';
+    if (a.ultima) texto += ` Última vez: ${esc(dataHora(a.ultima))} — ${esc(a.resultado || '')}`;
+  } else {
+    texto = 'Busca automática desligada: as notas só entram quando alguém busca aqui.';
+  }
+  $('#sef-auto-texto').innerHTML = texto;
+  $('#sef-auto-ligar').classList.toggle('hidden', ligada);
+  $('#sef-auto-desligar').classList.toggle('hidden', !ligada);
+  if (!ligada) {
+    const campo = $('#sef-auto-desde');
+    // Padrão: hoje — "a partir de hoje", como a Taís pediu. O que é de antes, ela busca à mão.
+    if (!campo.value) campo.value = a?.desde || isoLocal(new Date());
+  }
+}
+
+async function ligarBuscaAutomatica(ligada) {
+  if (!estado.empresaId) return;
+  const desde = ligada ? $('#sef-auto-desde').value : null;
+  if (ligada && !desde) return alerta('Escolha a data de início.');
+  try {
+    await api(`/api/empresas/${estado.empresaId}/sef/automatica`, { method: 'POST', body: JSON.stringify({ ligada, desde }) });
+    const r = await api(`/api/empresas/${estado.empresaId}/sef`);
+    mostrarBuscaAutomatica(r.automatica);
+  } catch (e) {
+    alerta('Não consegui ' + (ligada ? 'ligar' : 'desligar') + ': ' + e.message);
+  }
+}
+$('#sef-auto-ligar-btn').addEventListener('click', () => ligarBuscaAutomatica(true));
+$('#sef-auto-desligar').addEventListener('click', () => ligarBuscaAutomatica(false));
 
 $('#btn-sef').addEventListener('click', abrirPainelSef);
 $('#sef-fechar').addEventListener('click', () => $('#painel-sef').classList.add('hidden'));

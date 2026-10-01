@@ -254,6 +254,14 @@
                 <button class="btn sm" type="button" id="sef-fechar">Fechar</button>
               </form>
               <p class="tiny" id="sef-info" style="margin:6px 0 0"></p>
+              <div class="sef-auto" id="sef-auto">
+                <span class="tiny" id="sef-auto-texto"></span>
+                <span id="sef-auto-ligar" class="sef-auto-ligar hidden">
+                  <label class="tiny" for="sef-auto-desde">importar sozinho as emitidas a partir de</label><input type="date" id="sef-auto-desde">
+                  <button class="btn sm primary" type="button" id="sef-auto-ligar-btn">Ligar busca automática</button>
+                </span>
+                <button class="btn sm hidden" type="button" id="sef-auto-desligar">Desligar busca automática</button>
+              </div>
               <div id="sef-resultado"></div>
             </div>
             <div id="log-import" class="log hidden" style="margin-top:12px"></div>
