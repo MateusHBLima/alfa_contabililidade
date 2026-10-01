@@ -4073,23 +4073,56 @@ async function abrirPainelSef() {
 $('#btn-sef').addEventListener('click', abrirPainelSef);
 $('#sef-fechar').addEventListener('click', () => $('#painel-sef').classList.add('hidden'));
 
+/** Mais que isso num clique só, a tela para e pede para consultar de novo (12 × 50 = 600 documentos). */
+const SEF_RODADAS_MAX = 12;
+
 $('#form-sef').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const de = $('#sef-de').value, ate = $('#sef-ate').value;
   if (!de || !ate) return alerta('Escolha as duas datas.');
   if (de > ate) return alerta('A data inicial é depois da final.');
   const saida = $('#sef-resultado');
-  saida.innerHTML = '<p class="tiny">consultando a SEF… pode levar alguns segundos.</p>';
+  saida.innerHTML = '';
   $('#sef-consultar').disabled = true;
+  // A SEF pode levar alguns segundos por lote. A roda gira, o relógio anda e a
+  // contagem de documentos sobe: ninguém acha que travou e clica de novo.
+  const inicio = Date.now();
+  let recebidos = 0;
+  const texto = () => {
+    const seg = Math.round((Date.now() - inicio) / 1000);
+    return `Consultando a SEF… ${seg} s` + (recebidos ? ` · ${recebidos} documento(s) recebido(s)` : '') +
+      '\nNão feche a tela: a SEF entrega em lotes de 50.';
+  };
+  mostrarEspera(texto());
+  const relogio = setInterval(() => mostrarEspera(texto()), 1000);
   try {
     const certificadoId = $('#sef-cert').classList.contains('hidden') ? null : $('#sef-cert').value || null;
-    const r = await api(`/api/empresas/${estado.empresaId}/sef/consultar`, { method: 'POST', body: JSON.stringify({ de, ate, certificadoId }) });
+    let r;
+    let consultou = false;
+    let canceladas = 0;
+    let rodadas = 0;
+    do {
+      r = await api(`/api/empresas/${estado.empresaId}/sef/consultar`, { method: 'POST', body: JSON.stringify({ de, ate, certificadoId }) });
+      rodadas++;
+      consultou = consultou || r.download.consultou;
+      recebidos += r.download.documentos;
+      canceladas += r.canceladasAplicadas || 0;
+      mostrarEspera(texto());
+    } while (r.download.temMais && !r.download.erro && rodadas < SEF_RODADAS_MAX);
     sefNotas = r.notas;
     const d = r.download;
     const avisos = [];
     if (d.erro) avisos.push(`<div class="aviso">${esc(d.erro)}</div>`);
-    else if (d.frase) avisos.push(`<p class="tiny">${esc(d.frase)}${d.liberadaEm && !d.temMais ? ` Próxima consulta à SEF liberada a partir de ${esc(dataHora(d.liberadaEm))}.` : ''}</p>`);
-    if (r.canceladasAplicadas) avisos.push(`<div class="aviso"><b>${r.canceladasAplicadas} nota(s) que já estavam no sistema foram canceladas na SEF</b> e foram marcadas como canceladas.</div>`);
+    if (consultou && !d.erro) {
+      const quanto = recebidos ? `A SEF mandou ${recebidos} documento(s) novo(s).` : 'Nada novo na SEF desde a última consulta.';
+      const depois = d.temMais
+        ? ' Ainda tem mais na SEF: aperte Consultar de novo para baixar o resto.'
+        : (d.liberadaEm ? ` Próxima consulta à SEF liberada a partir de ${dataHora(d.liberadaEm)}.` : '');
+      avisos.push(`<p class="tiny">${esc(quanto + depois)} (${Math.round((Date.now() - inicio) / 1000)} s)</p>`);
+    } else if (!consultou && !d.erro) {
+      avisos.push(`<p class="tiny">${esc(d.frase)}${d.liberadaEm ? ` Liberada a partir de ${esc(dataHora(d.liberadaEm))}.` : ''}</p>`);
+    }
+    if (canceladas) avisos.push(`<div class="aviso"><b>${canceladas} nota(s) que já estavam no sistema foram canceladas na SEF</b> e foram marcadas como canceladas.</div>`);
     const novas = sefNotas.filter((n) => !n.noSistema);
     const periodo = `${dataSef(de)} a ${dataSef(ate)}`;
     const resumo = sefNotas.length
@@ -4108,6 +4141,8 @@ $('#form-sef').addEventListener('submit', async (ev) => {
   } catch (e) {
     saida.innerHTML = `<div class="aviso">${esc(e.message)}</div>`;
   } finally {
+    clearInterval(relogio);
+    esconderEspera();
     $('#sef-consultar').disabled = false;
   }
 });
@@ -4127,6 +4162,7 @@ $('#sef-resultado').addEventListener('click', async (ev) => {
   $('#painel-sef').classList.add('hidden');
   travarImportacao(true);
   log.textContent = `importando da SEF… 0 de ${chaves.length}`;
+  mostrarEspera(`Importando da SEF… 0 de ${chaves.length} nota(s)\nCada nota já entra com os padrões aplicados.`);
   try {
     for (let i = 0; i < chaves.length; i += TAMANHO_LOTE_IMPORT) {
       const fatia = chaves.slice(i, i + TAMANHO_LOTE_IMPORT);
@@ -4141,6 +4177,7 @@ $('#sef-resultado').addEventListener('click', async (ev) => {
         linhas.push(...fatia.map((c) => ({ arquivo: `nota ${c}`, status: 'recusada', motivo: 'o envio falhou: ' + e.message })));
       }
       log.textContent = `importando da SEF… ${Math.min(i + TAMANHO_LOTE_IMPORT, chaves.length)} de ${chaves.length}`;
+      mostrarEspera(`Importando da SEF… ${Math.min(i + TAMANHO_LOTE_IMPORT, chaves.length)} de ${chaves.length} nota(s)`);
     }
     log.textContent = textoResultadoImportacao(chaves.length, tot, linhas)
       + (canceladas ? `\n\n${canceladas} nota(s) importada(s) já vieram canceladas pela SEF e foram marcadas como canceladas.` : '');
@@ -4150,6 +4187,7 @@ $('#sef-resultado').addEventListener('click', async (ev) => {
   } catch (e) {
     log.textContent = 'falhou: ' + e.message;
   } finally {
+    esconderEspera();
     travarImportacao(false);
   }
 });
