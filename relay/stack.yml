@@ -1,0 +1,67 @@
+# Intermediário da busca na SEF/SC — stack do Portainer (Docker Swarm).
+#
+# Antes de subir, criar no Portainer (uma vez):
+#   Secrets › sef_relay_token  — o mesmo valor do SEF_PONTE_TOKEN da Cloudflare
+#   Secrets › sef_relay_chave  — 64 caracteres hexadecimais (cifra os certificados em disco)
+#   Configs › sef_relay_v1     — o conteúdo de relay/relay.mjs
+# Código novo = config nova (sef_relay_v2, ...) e trocar o nome aqui embaixo.
+version: "3.8"
+
+services:
+  sef:
+    image: node:22-alpine
+    command: ["node", "/app/relay.mjs"]
+    environment:
+      PORT: "8080"
+      RELAY_DIR: /dados
+      RELAY_TOKEN_FILE: /run/secrets/sef_relay_token
+      RELAY_CHAVE_FILE: /run/secrets/sef_relay_chave
+    secrets:
+      - sef_relay_token
+      - sef_relay_chave
+    configs:
+      - source: sef_relay_v1
+        target: /app/relay.mjs
+    volumes:
+      - sef_relay_dados:/dados
+    networks:
+      - network_public
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/saude"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == worker-01
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+      labels:
+        traefik.enable: "true"
+        traefik.swarm.network: network_public
+        traefik.http.routers.sefrelay.rule: Host(`sef-alfa.planeelabia.com`)
+        traefik.http.routers.sefrelay.entrypoints: websecure
+        traefik.http.routers.sefrelay.tls.certresolver: letsencryptresolver
+        traefik.http.routers.sefrelay.service: sefrelay
+        traefik.http.services.sefrelay.loadbalancer.server.port: "8080"
+
+volumes:
+  sef_relay_dados:
+
+networks:
+  network_public:
+    external: true
+
+secrets:
+  sef_relay_token:
+    external: true
+  sef_relay_chave:
+    external: true
+
+configs:
+  sef_relay_v1:
+    external: true

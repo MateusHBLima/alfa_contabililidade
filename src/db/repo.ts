@@ -1388,7 +1388,7 @@ export class Repo {
     const { results } = await this.db
       .prepare(
         `SELECT c.id, c.nome, c.titular, c.documento, c.tipo, c.emissor, c.serial, c.valido_de, c.valido_ate,
-                c.cloudflare_id, c.enviado_em, u.nome AS enviado_por_nome
+                c.cloudflare_id, c.guardado_em, c.enviado_em, u.nome AS enviado_por_nome
            FROM certificados c LEFT JOIN usuarios u ON u.id = c.enviado_por
           WHERE c.tenant_id = ? AND c.removido_em IS NULL
           ORDER BY c.valido_ate DESC`,
@@ -1398,25 +1398,27 @@ export class Repo {
     return results;
   }
 
-  async certificadoPorSerial(serial: string): Promise<{ id: string } | null> {
+  async certificadoPorSerial(serial: string): Promise<{ id: string; guardado_em: string } | null> {
     return await this.db
-      .prepare('SELECT id FROM certificados WHERE tenant_id = ? AND serial = ? AND removido_em IS NULL')
+      .prepare('SELECT id, guardado_em FROM certificados WHERE tenant_id = ? AND serial = ? AND removido_em IS NULL')
       .bind(this.tenant, serial)
-      .first<{ id: string }>();
+      .first<{ id: string; guardado_em: string }>();
   }
 
   async gravarCertificado(c: {
     nome: string; titular: string; documento: string | null; tipo: string; emissor: string; serial: string;
     validoDe: string; validoAte: string; cloudflareId: string;
+    /** 'ponte' (intermediário na VPS, 01/10) ou 'cloudflare' (cofre mTLS, 29/09). */
+    guardadoEm?: 'ponte' | 'cloudflare'; id?: string;
   }): Promise<string> {
-    const id = this.novoId();
+    const id = c.id ?? this.novoId();
     await this.db
       .prepare(
         `INSERT INTO certificados (id, tenant_id, nome, titular, documento, tipo, emissor, serial, valido_de,
-            valido_ate, cloudflare_id, enviado_em, enviado_por) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            valido_ate, cloudflare_id, enviado_em, enviado_por, guardado_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .bind(id, this.tenant, c.nome, c.titular, c.documento, c.tipo, c.emissor, c.serial, c.validoDe,
-        c.validoAte, c.cloudflareId, agora(), this.ctx.sessao.usuarioId)
+        c.validoAte, c.cloudflareId, agora(), this.ctx.sessao.usuarioId, c.guardadoEm ?? 'cloudflare')
       .run();
     await this.aud.registrarLote([
       this.evento({

@@ -4521,7 +4521,7 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
   it('certificado que não está ligado ao Worker: não chama a SEF, não gasta a liberação e diz o que falta', async () => {
     const r = await consultar('2026-07-01', '2026-07-31', { [BINDING]: undefined });
     expect(chamadas).toHaveLength(0);
-    expect(r.download).toMatchObject({ consultou: false, erro: expect.stringMatching(/ainda não foi ligado ao sistema/) });
+    expect(r.download).toMatchObject({ consultou: false, erro: expect.stringMatching(/cofre da Cloudflare, que não serve para a SEF/) });
     expect(estado()).toBeUndefined();
   });
 
@@ -4591,5 +4591,142 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     await consultar('2026-07-01', '2026-07-31');
     const h: any = await (await chamar('/api/captura')).json();
     expect(h.buscas).toEqual([expect.objectContaining({ razao_social: 'MERCADO PILOTO LTDA', usuario_nome: 'Contadora', cstat: '117', documentos: 0 })]);
+  });
+});
+
+describe('01/10: intermediário da busca na SEF (a Cloudflare não renegocia TLS)', async () => {
+  const { gzipSync } = await import('node:zlib');
+  const sefsc = await import('../src/captura/sefsc');
+  const { esquecerOperacao } = await import('../src/captura/captura');
+  const PONTE = 'https://sef-alfa.teste';
+  const TOKEN = 'token-da-ponte-com-mais-de-32-caracteres';
+
+  function pfxSintetico(cn: string, senha: string, serial = String(Math.floor(Math.random() * 1e12))): Uint8Array {
+    const chaves = forge.pki.rsa.generateKeyPair(1024);
+    const cert = forge.pki.createCertificate();
+    cert.publicKey = chaves.publicKey;
+    cert.serialNumber = serial;
+    cert.validity.notBefore = new Date(Date.now() - 86400000);
+    cert.validity.notAfter = new Date(Date.now() + 200 * 86400000);
+    cert.setSubject([{ name: 'commonName', value: cn }, { name: 'organizationName', value: 'ICP-Brasil' }]);
+    cert.setIssuer([{ name: 'commonName', value: 'AC TESTE' }, { name: 'organizationName', value: 'ICP-Brasil' }]);
+    cert.sign(chaves.privateKey, forge.md.sha256.create());
+    const p12 = forge.pkcs12.toPkcs12Asn1(chaves.privateKey, [cert], senha, { algorithm: '3des' });
+    return forge.util.binary.raw.decode(forge.asn1.toDer(p12).getBytes());
+  }
+
+  const WSDL = `<wsdl:definitions targetNamespace="${sefsc.NS_DIST}"><s:element name="NfeDownloadContab"><s:complexType><s:sequence><s:element name="pXml"><s:complexType mixed="true"><s:sequence><s:any /></s:sequence></s:complexType></s:element></s:sequence></s:complexType></s:element><wsdl:operation name="NfeDownloadContab"><soap:operation soapAction="${sefsc.NS_DIST}/NfeDownloadContab" /></wsdl:operation></wsdl:definitions>`;
+  const NOTA = XML.replace(/^<\?xml[^>]*\?>\s*/, '');
+  const RET = `<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><NfeDownloadContabResponse xmlns="${sefsc.NS_DIST}"><NfeDownloadContabResult><retDistNFeSC versao="2.00" xmlns="${sefsc.NS_DIST}"><cStat>118</cStat><xMotivo>ok</xMotivo><ultNuNSURet>1</ultNuNSURet><qtDfeRet>1</qtDfeRet><loteDistComp>${gzipSync(Buffer.from(`<loteDistNFeSC versao="2.00"><distNFeSC NSU="1" chAcesso="${CHAVE_ORIGINAL}">${NOTA}</distNFeSC></loteDistNFeSC>`)).toString('base64')}</loteDistComp></retDistNFeSC></NfeDownloadContabResult></NfeDownloadContabResponse></soap:Body></soap:Envelope>`;
+
+  let ck = '';
+  let chamadas: { metodo: string; url: string; auth: string | null; soap: string | null; corpo: any }[] = [];
+  let empresaId = '';
+  const amb = (extra: Record<string, unknown> = {}) => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+    SEF_PONTE_URL: PONTE, SEF_PONTE_TOKEN: TOKEN, ...extra,
+  }) as never;
+  const chamar = (url: string, init: RequestInit = {}, extra?: Record<string, unknown>) =>
+    app.fetch(new Request(`http://x${url}`, { ...init, headers: { Cookie: ck, ...(init.headers as any) } }), amb(extra));
+  const enviar = (pfx: Uint8Array, senha: string) => {
+    const fd = new FormData();
+    fd.append('arquivo', new File([pfx], 'isa.pfx'));
+    fd.append('senha', senha);
+    fd.append('minhaSenha', 'uma frase de senha longa');
+    fd.append('nome', 'Isa');
+    return chamar('/api/certificados', { method: 'POST', body: fd });
+  };
+
+  beforeEach(async () => {
+    esquecerOperacao();
+    chamadas = [];
+    empresaId = await repo.criarEmpresa({ cnpj: '11.222.333/0001-81', razaoSocial: 'MERCADO PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), amb());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u: any, init: any) => {
+      const url = String(u);
+      const h = new Headers(init?.headers);
+      const corpo = typeof init?.body === 'string' && init.body.startsWith('{') ? JSON.parse(init.body) : init?.body ?? null;
+      chamadas.push({ metodo: init?.method ?? 'GET', url, auth: h.get('authorization'), soap: h.get('soapaction'), corpo });
+      if (!url.startsWith(PONTE)) return new Response('inesperado', { status: 599 });
+      if (url.includes('/certificados/')) return new Response('{"ok":true}', { status: 200 });
+      if (url.endsWith('?WSDL')) return new Response(WSDL, { status: 200 });
+      return new Response(RET, { status: 200 });
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('o certificado vai para o intermediário, com o token, e não para a Cloudflare', async () => {
+    const r = await enviar(pfxSintetico('ISA CONTADORA:12345678909', 's'), 's');
+    expect(r.status).toBe(200);
+    const j: any = await r.json();
+    expect(chamadas).toHaveLength(1);
+    expect(chamadas[0]).toMatchObject({ metodo: 'POST', url: `${PONTE}/certificados/${j.id}`, auth: `Bearer ${TOKEN}` });
+    expect(chamadas[0]!.corpo.key).toMatch(/PRIVATE KEY/);
+    expect(chamadas[0]!.corpo.cert).toMatch(/BEGIN CERTIFICATE/);
+    const linhas = db.consultar<any>('SELECT * FROM certificados');
+    expect(linhas).toEqual([expect.objectContaining({ guardado_em: 'ponte', cloudflare_id: '' })]);
+    expect(JSON.stringify(linhas)).not.toMatch(/PRIVATE KEY/);
+    const lista: any = await (await chamar('/api/certificados')).json();
+    expect(lista).toMatchObject({ configurado: true, certificados: [expect.objectContaining({ guardado_em: 'ponte' })] });
+  });
+
+  it('o mesmo certificado que estava no cofre da Cloudflare substitui o antigo; de novo, recusa', async () => {
+    const pfx = pfxSintetico('ISA CONTADORA:12345678909', 's', '424242');
+    const antigo = await repo.gravarCertificado({
+      nome: 'Isa', titular: 'ISA CONTADORA', documento: '12345678909', tipo: 'e-CPF', emissor: 'AC TESTE',
+      serial: '0679b2', validoDe: '2026-01-01T00:00:00Z', validoAte: '2099-01-01T00:00:00Z', cloudflareId: 'cf-velho',
+    });
+    // o serial que o forge grava é o hex do que foi pedido
+    db.consultar("UPDATE certificados SET serial = ? WHERE id = ?", forge.pki.certificateFromPem(
+      forge.pki.certificateToPem((forge.pkcs12.pkcs12FromAsn1(forge.asn1.fromDer(forge.util.binary.raw.encode(pfx)), 's')
+        .getBags({ bagType: forge.pki.oids.certBag! })[forge.pki.oids.certBag!]![0]!.cert)!)).serialNumber, antigo);
+    expect((await enviar(pfx, 's')).status).toBe(200);
+    const ativos = db.consultar<any>('SELECT guardado_em FROM certificados WHERE removido_em IS NULL');
+    expect(ativos).toEqual([{ guardado_em: 'ponte' }]);
+    expect((await enviar(pfx, 's')).status).toBe(409);
+  });
+
+  it('a busca passa pelo intermediário: descrição do serviço e consulta, com o certificado certo', async () => {
+    const j: any = await (await enviar(pfxSintetico('ISA CONTADORA:12345678909', 's'), 's')).json();
+    chamadas = [];
+    const r: any = await (await chamar(`/api/empresas/${empresaId}/sef/consultar`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ de: '2026-07-01', ate: '2026-07-31' }),
+    })).json();
+    expect(r.download).toMatchObject({ consultou: true, documentos: 1, erro: null });
+    expect(r.notas).toEqual([expect.objectContaining({ chave: CHAVE_ORIGINAL, noSistema: false })]);
+    expect(chamadas.map((c) => `${c.metodo} ${c.url}`)).toEqual([`GET ${PONTE}/sef/${j.id}?WSDL`, `POST ${PONTE}/sef/${j.id}`]);
+    expect(chamadas.every((c) => c.auth === `Bearer ${TOKEN}`)).toBe(true);
+    expect(chamadas[1]!.soap).toBe(`"${sefsc.NS_DIST}/NfeDownloadContab"`);
+    expect(String(chamadas[1]!.corpo)).toContain('<CNPJ>11222333000181</CNPJ>');
+    const teste: any = await (await chamar('/api/captura/testar', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ certificadoId: j.id }),
+    })).json();
+    expect(teste).toMatchObject({ ok: true });
+  });
+
+  it('remover apaga do intermediário', async () => {
+    const j: any = await (await enviar(pfxSintetico('ISA CONTADORA:12345678909', 's'), 's')).json();
+    const r = await chamar(`/api/certificados/${j.id}`, {
+      method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ minhaSenha: 'uma frase de senha longa' }),
+    });
+    expect(r.status).toBe(200);
+    expect(chamadas.at(-1)).toMatchObject({ metodo: 'DELETE', url: `${PONTE}/certificados/${j.id}`, auth: `Bearer ${TOKEN}` });
+  });
+
+  it('sem o token configurado, o certificado da ponte não busca e a tela diz o motivo', async () => {
+    const j: any = await (await enviar(pfxSintetico('ISA CONTADORA:12345678909', 's'), 's')).json();
+    chamadas = [];
+    const r: any = await (await chamar(`/api/empresas/${empresaId}/sef/consultar`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ de: '2026-07-01', ate: '2026-07-31' }),
+    }, { SEF_PONTE_TOKEN: undefined })).json();
+    expect(r.download.erro).toMatch(/intermediário da busca na SEF não está configurado/);
+    expect(chamadas).toHaveLength(0);
+    expect(j.id).toBeTruthy();
   });
 });

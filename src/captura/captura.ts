@@ -41,11 +41,64 @@ export function nomeDoBinding(cloudflareId: string): string {
   return `MTLS_${cloudflareId.replace(/-/g, '_')}`;
 }
 
-/** O fetch que sai com o certificado, ou null se o certificado ainda não foi ligado no wrangler.jsonc. */
-export function buscaComCertificado(env: AmbienteCaptura, cloudflareId: string): Busca | null {
-  const b = env[nomeDoBinding(cloudflareId)] as { fetch?: Busca } | undefined;
+/** O certificado como a busca precisa dele: onde está guardado e com que id. */
+export type CertParaBusca = { id: string; cloudflare_id: string; guardado_em?: string | null };
+
+/**
+ * O intermediário (01/10): serviço em Node na VPS da Planee que fala com a SEF.
+ * Existe porque a SEF pede o certificado por renegociação TLS, e o fetch da
+ * Cloudflare não renegocia. Configuração: SEF_PONTE_URL (variável) e
+ * SEF_PONTE_TOKEN (segredo). Código em relay/relay.mjs.
+ */
+export function ponteConfigurada(env: AmbienteCaptura): { url: string; token: string } | null {
+  const url = typeof env.SEF_PONTE_URL === 'string' ? env.SEF_PONTE_URL.replace(/\/+$/, '') : '';
+  const token = typeof env.SEF_PONTE_TOKEN === 'string' ? env.SEF_PONTE_TOKEN : '';
+  return url && token ? { url, token } : null;
+}
+
+/** O fetch que sai com o certificado, ou null se o certificado não está pronto para a busca. */
+export function buscaComCertificado(env: AmbienteCaptura, cert: CertParaBusca): Busca | null {
+  if (cert.guardado_em === 'ponte') {
+    const p = ponteConfigurada(env);
+    if (!p) return null;
+    return (input, init) => {
+      const headers = new Headers(init?.headers);
+      headers.set('authorization', `Bearer ${p.token}`);
+      // O intermediário só fala com a URL fixa da SEF; daqui vai só a consulta (?WSDL).
+      return fetch(`${p.url}/sef/${encodeURIComponent(cert.id)}${new URL(input).search}`, {
+        method: init?.method ?? 'GET', headers, body: init?.body,
+      });
+    };
+  }
+  const b = env[nomeDoBinding(cert.cloudflare_id)] as { fetch?: Busca } | undefined;
   if (!b || typeof b.fetch !== 'function') return null;
   return (input, init) => b.fetch!(input, init);
+}
+
+/** Manda certificado e chave (PEM) para o intermediário, que guarda cifrado. */
+export async function enviarParaPonte(env: AmbienteCaptura, id: string, pem: { certificados: string; chave: string }): Promise<void> {
+  const p = ponteConfigurada(env);
+  if (!p) throw new ErroSef('o intermediário da busca na SEF ainda não foi configurado');
+  let r: Response;
+  try {
+    r = await fetch(`${p.url}/certificados/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${p.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ cert: pem.certificados, key: pem.chave }),
+    });
+  } catch (e) {
+    throw new ErroSef(`não consegui falar com o intermediário: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!r.ok) throw new ErroSef(`o intermediário recusou o certificado (${r.status}): ${(await r.text()).slice(0, 200)}`);
+}
+
+export async function removerDaPonte(env: AmbienteCaptura, id: string): Promise<void> {
+  const p = ponteConfigurada(env);
+  if (!p) return;
+  const r = await fetch(`${p.url}/certificados/${encodeURIComponent(id)}`, {
+    method: 'DELETE', headers: { authorization: `Bearer ${p.token}` },
+  });
+  if (!r.ok) throw new ErroSef(`o intermediário não apagou o certificado (${r.status})`);
 }
 
 /** O WSDL é lido uma vez por instância do Worker. */
@@ -105,7 +158,7 @@ export type ResultadoDownload = {
  */
 export async function baixarDaSef(
   env: AmbienteCaptura, repo: Repo, empresa: { id: string; cnpj: string },
-  cert: { id: string; nome: string; cloudflare_id: string; valido_ate: string }, agora = new Date(),
+  cert: CertParaBusca & { nome: string; valido_ate: string }, agora = new Date(),
 ): Promise<ResultadoDownload> {
   const quando = agora.toISOString();
   const estado = await repo.estadoSef(empresa.id);
@@ -114,8 +167,10 @@ export async function baixarDaSef(
 
   // O que se resolve sem chamar a SEF vem antes, e não gasta a liberação.
   if (cert.valido_ate < quando) return semConsulta('', `O certificado ${cert.nome} venceu em ${cert.valido_ate.slice(0, 10).split('-').reverse().join('/')}. Envie o novo na tela Certificados.`);
-  const busca = buscaComCertificado(env, cert.cloudflare_id);
-  if (!busca) return semConsulta('', `O certificado ${cert.nome} está no cofre, mas ainda não foi ligado ao sistema. Fale com a Planee.`);
+  const busca = buscaComCertificado(env, cert);
+  if (!busca) return semConsulta('', cert.guardado_em === 'ponte'
+    ? 'O intermediário da busca na SEF não está configurado no sistema. Fale com a Planee.'
+    : `O certificado ${cert.nome} está no cofre da Cloudflare, que não serve para a SEF. Envie o .pfx de novo em Administração › Certificados.`);
   const doc = documentoLimpo(empresa.cnpj);
   if (!doc) return semConsulta('', 'O CNPJ desta empresa está inválido no cadastro.');
 
@@ -235,9 +290,9 @@ async function sondar(rotulo: string, chamar: () => Promise<Response>): Promise<
  * servidor caiu"): sem certificado na mesma página, sem certificado na raiz do site
  * e com certificado na raiz. Nenhum deles consulta empresa.
  */
-export async function testarConexao(env: AmbienteCaptura, cloudflareId: string): Promise<{ ok: boolean; detalhe: string; diagnostico?: string[] }> {
-  const busca = buscaComCertificado(env, cloudflareId);
-  if (!busca) return { ok: false, detalhe: 'Este certificado está no cofre, mas ainda não foi ligado ao sistema (falta publicar a ligação). Fale com a Planee.' };
+export async function testarConexao(env: AmbienteCaptura, cert: CertParaBusca): Promise<{ ok: boolean; detalhe: string; diagnostico?: string[] }> {
+  const busca = buscaComCertificado(env, cert);
+  if (!busca) return { ok: false, detalhe: cert.guardado_em === 'ponte' ? 'O intermediário da busca na SEF não está configurado no sistema. Fale com a Planee.' : 'Este certificado está no cofre da Cloudflare, que não serve para a SEF. Envie o .pfx de novo na tela Certificados.' };
   esquecerOperacao();
   try {
     const { operacao, doWsdl } = await descobrirOperacao(busca);

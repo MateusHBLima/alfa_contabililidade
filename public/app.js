@@ -3846,8 +3846,9 @@ let acaoModal = null;
 let aoDesistir = null;
 
 /* ---- Certificados A1 da captura no SAT (29/09) ----
-   O arquivo vai para o servidor, que lê, manda a chave para o cofre da Cloudflare
-   e guarda só titular, validade e o código no cofre. */
+   O arquivo vai para o servidor, que lê e manda a chave para o intermediário da busca
+   na SEF (01/10; antes ia para o cofre da Cloudflare, que não serve para a SEF). Aqui
+   fica só titular, validade e onde está guardado. */
 async function carregarCertificados() {
   const corpo = $('#tbl-certificados tbody');
   corpo.innerHTML = '<tr><td colspan="8" class="vazio">carregando…</td></tr>';
@@ -3858,7 +3859,7 @@ async function carregarCertificados() {
   }
   const aviso = $('#cert-aviso');
   aviso.classList.toggle('hidden', r.configurado);
-  aviso.innerHTML = r.configurado ? '' : '<b>O cofre ainda não foi ligado.</b> Falta a Planee configurar a chave da API da Cloudflare; até lá o envio fica bloqueado.';
+  aviso.innerHTML = r.configurado ? '' : '<b>O cofre ainda não foi ligado.</b> Falta a Planee configurar o servidor da busca na SEF; até lá o envio fica bloqueado.';
   $('#cert-enviar').disabled = !r.configurado;
   const dias = (d) => Math.floor((new Date(d).getTime() - Date.now()) / 86400000);
   const doc = (d) => !d ? '—' : d.length === 14 ? d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5') : d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
@@ -3869,7 +3870,7 @@ async function carregarCertificados() {
       <td><b>${esc(c.nome)}</b></td><td>${esc(c.titular)}</td><td>${esc(c.tipo)}</td><td class="mono">${esc(doc(c.documento))}</td>
       <td>${esc(dataCurta(c.valido_ate))} ${vence}</td>
       <td class="tiny">${esc(dataCurta(c.enviado_em))}${c.enviado_por_nome ? ` · ${esc(c.enviado_por_nome)}` : ''}</td>
-      <td class="mono tiny">${esc(c.cloudflare_id)}</td>
+      <td class="tiny">${c.guardado_em === 'ponte' ? 'servidor da busca na SEF' : '<span class="tag warn">cofre antigo: envie de novo</span>'}</td>
       <td><button type="button" class="btn sm perigo" data-remover-cert="${esc(c.id)}">Remover</button></td></tr>`;
   }).join('') : '<tr><td colspan="8" class="vazio">Nenhum certificado enviado ainda.</td></tr>';
 }
@@ -4013,7 +4014,7 @@ async function carregarCaptura() {
   const semLigacao = certs.filter((c) => !c.ligado);
   const msgs = [];
   if (!certs.length) msgs.push('<b>Nenhum certificado no cofre.</b> Envie o A1 na tela Certificados.');
-  if (semLigacao.length) msgs.push(`<b>${semLigacao.map((c) => esc(c.nome)).join(', ')}</b>: está no cofre, mas ainda não foi ligado ao sistema. Fale com a Planee.`);
+  if (semLigacao.length) msgs.push(`<b>${semLigacao.map((c) => esc(c.nome)).join(', ')}</b>: não está pronto para a busca. Envie o .pfx de novo em Administração › Certificados.`);
   $('#cap-aviso').innerHTML = msgs.join('<br>');
   $('#cap-aviso').classList.toggle('hidden', !msgs.length);
   $('#cap-cert-teste').innerHTML = certs.length

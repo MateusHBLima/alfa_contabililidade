@@ -24,7 +24,8 @@ import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, res
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
-import { baixarDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, type AmbienteCaptura } from './captura/captura';
+import { baixarDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
+import { ErroSef } from './captura/sefsc';
 import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 
@@ -53,6 +54,13 @@ type Env = {
    */
   CF_ACCOUNT_ID?: string;
   CF_API_TOKEN?: string;
+  /**
+   * Intermediário da busca na SEF (01/10): a SEF pede o certificado por renegociação
+   * TLS e o fetch da Cloudflare não renegocia. SEF_PONTE_URL é variável (wrangler.jsonc),
+   * SEF_PONTE_TOKEN é segredo (painel). Código do intermediário em relay/relay.mjs.
+   */
+  SEF_PONTE_URL?: string;
+  SEF_PONTE_TOKEN?: string;
   // Os certificados ligados no wrangler.jsonc (`mtls_certificates`) chegam como
   // MTLS_<id no cofre>. São lidos pelo nome em src/captura/captura.ts.
 };
@@ -1936,7 +1944,7 @@ app.put('/api/regras-icms/:cfop', async (c) => {
 app.get('/api/certificados', async (c) => {
   exigir(c.get('sessao'), 'certificados.gerenciar');
   return c.json({
-    configurado: !!(c.env.CF_ACCOUNT_ID && c.env.CF_API_TOKEN),
+    configurado: !!ponteConfigurada(c.env as unknown as AmbienteCaptura) || !!(c.env.CF_ACCOUNT_ID && c.env.CF_API_TOKEN),
     certificados: await c.get('repo').listarCertificados(),
   });
 });
@@ -1944,8 +1952,9 @@ app.get('/api/certificados', async (c) => {
 app.post('/api/certificados', async (c) => {
   const s = c.get('sessao');
   exigir(s, 'certificados.gerenciar');
-  if (!c.env.CF_ACCOUNT_ID || !c.env.CF_API_TOKEN) {
-    return c.json({ erro: 'O cofre de certificados ainda não foi ligado (falta a chave da API da Cloudflare). Fale com a Planee.' }, 503);
+  const ponte = ponteConfigurada(c.env as unknown as AmbienteCaptura);
+  if (!ponte && (!c.env.CF_ACCOUNT_ID || !c.env.CF_API_TOKEN)) {
+    return c.json({ erro: 'O cofre de certificados ainda não foi ligado. Fale com a Planee.' }, 503);
   }
   const form = await c.req.formData();
   const arquivo = form.get('arquivo') as unknown;
@@ -1972,24 +1981,43 @@ app.post('/api/certificados', async (c) => {
   if (new Date(cert.validoAte).getTime() < Date.now()) {
     return c.json({ erro: `Este certificado venceu em ${cert.validoAte.slice(0, 10).split('-').reverse().join('/')}.` }, 400);
   }
-  if (await repo.certificadoPorSerial(cert.serial)) return c.json({ erro: 'Este certificado já foi enviado.' }, 409);
+  // O mesmo certificado já enviado ao cofre da Cloudflare (29/09) pode ser enviado de
+  // novo para o intermediário: o antigo sai da lista, substituído (01/10).
+  const repetido = await repo.certificadoPorSerial(cert.serial);
+  if (repetido && (repetido.guardado_em === 'ponte' || !ponte)) return c.json({ erro: 'Este certificado já foi enviado.' }, 409);
 
   const rotulo = nome || cert.titular;
-  let cloudflareId: string;
-  try {
-    cloudflareId = await enviarParaCloudflare(
-      { contaId: c.env.CF_ACCOUNT_ID, token: c.env.CF_API_TOKEN },
-      `alfa-fiscal ${rotulo}`.slice(0, 100),
-      cert,
-    );
-  } catch (e) {
-    if (e instanceof ErroCertificado) return c.json({ erro: e.message }, 502);
-    throw e;
+  let cloudflareId = '';
+  let id: string;
+  if (ponte) {
+    id = repo.novoId();
+    try {
+      await enviarParaPonte(c.env as unknown as AmbienteCaptura, id, { certificados: cert.certificadosPem, chave: cert.chavePem });
+    } catch (e) {
+      if (e instanceof ErroSef) return c.json({ erro: e.message }, 502);
+      throw e;
+    }
+    await repo.gravarCertificado({
+      id, guardadoEm: 'ponte', nome: rotulo, titular: cert.titular, documento: cert.documento, tipo: cert.tipo,
+      emissor: cert.emissor, serial: cert.serial, validoDe: cert.validoDe, validoAte: cert.validoAte, cloudflareId: '',
+    });
+    if (repetido) await repo.removerCertificado(repetido.id);
+  } else {
+    try {
+      cloudflareId = await enviarParaCloudflare(
+        { contaId: c.env.CF_ACCOUNT_ID!, token: c.env.CF_API_TOKEN! },
+        `alfa-fiscal ${rotulo}`.slice(0, 100),
+        cert,
+      );
+    } catch (e) {
+      if (e instanceof ErroCertificado) return c.json({ erro: e.message }, 502);
+      throw e;
+    }
+    id = await repo.gravarCertificado({
+      nome: rotulo, titular: cert.titular, documento: cert.documento, tipo: cert.tipo, emissor: cert.emissor,
+      serial: cert.serial, validoDe: cert.validoDe, validoAte: cert.validoAte, cloudflareId,
+    });
   }
-  const id = await repo.gravarCertificado({
-    nome: rotulo, titular: cert.titular, documento: cert.documento, tipo: cert.tipo, emissor: cert.emissor,
-    serial: cert.serial, validoDe: cert.validoDe, validoAte: cert.validoAte, cloudflareId,
-  });
   // A chave privada não sai desta função: nem na resposta, nem em log.
   return c.json({
     ok: true, id, nome: rotulo, titular: cert.titular, documento: cert.documento, tipo: cert.tipo,
@@ -2007,7 +2035,14 @@ app.delete('/api/certificados/:id', async (c) => {
   const repo = c.get('repo');
   const cert = await repo.obterCertificado(c.req.param('id'));
   if (!cert) return c.json({ erro: 'certificado não encontrado' }, 404);
-  if (c.env.CF_ACCOUNT_ID && c.env.CF_API_TOKEN) {
+  if (cert.guardado_em === 'ponte') {
+    try {
+      await removerDaPonte(c.env as unknown as AmbienteCaptura, cert.id);
+    } catch (e) {
+      if (e instanceof ErroSef) return c.json({ erro: e.message }, 502);
+      throw e;
+    }
+  } else if (c.env.CF_ACCOUNT_ID && c.env.CF_API_TOKEN) {
     try {
       await removerDaCloudflare({ contaId: c.env.CF_ACCOUNT_ID, token: c.env.CF_API_TOKEN }, cert.cloudflare_id);
     } catch (e) {
@@ -2029,7 +2064,7 @@ app.delete('/api/certificados/:id', async (c) => {
 const certificadosDaBusca = async (repo: Repo, env: AmbienteCaptura) =>
   (await repo.listarCertificados()).map((x) => ({
     id: x.id, nome: x.nome, titular: x.titular, tipo: x.tipo, valido_ate: x.valido_ate,
-    ligado: !!buscaComCertificado(env, x.cloudflare_id),
+    ligado: !!buscaComCertificado(env, x),
   }));
 
 app.get('/api/empresas/:id/sef', async (c) => {
@@ -2064,7 +2099,8 @@ app.post('/api/empresas/:id/sef/consultar', async (c) => {
   const certs = await repo.listarCertificados();
   if (!certs.length) return c.json({ erro: 'Nenhum certificado no cofre. Envie o A1 em Administração › Certificados.' }, 400);
   const escolhido = corpo.certificadoId ?? (await repo.estadoSef(empresaId))?.certificado_id ?? (certs.length === 1 ? certs[0].id : null);
-  const cert = escolhido ? certs.find((x) => x.id === escolhido) : null;
+  // O certificado escolhido antes pode ter sido substituído; com um só, vale ele.
+  const cert = (escolhido ? certs.find((x) => x.id === escolhido) : null) ?? (certs.length === 1 ? certs[0] : null);
   if (!cert) return c.json({ erro: 'Escolha o certificado que vai buscar as notas desta empresa.' }, 400);
 
   const download = await baixarDaSef(env, repo, empresa, cert);
@@ -2102,7 +2138,7 @@ app.post('/api/captura/testar', async (c) => {
   const { certificadoId } = z.object({ certificadoId: z.string().min(1).max(64) }).parse(await c.req.json());
   const cert = await c.get('repo').obterCertificado(certificadoId);
   if (!cert) return c.json({ erro: 'certificado não encontrado' }, 404);
-  return c.json(await testarConexao(c.env as unknown as AmbienteCaptura, cert.cloudflare_id));
+  return c.json(await testarConexao(c.env as unknown as AmbienteCaptura, cert));
 });
 
 /** Marca/desmarca um produto do relatório como "não fechou" (28/09). */
