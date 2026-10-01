@@ -500,6 +500,7 @@ tr.rel-notas>td{background:#f6f9fd;padding:8px 10px 14px 26px}
 .espera-caixa{display:flex;align-items:center;gap:12px;background:var(--surface);border-radius:var(--radius);padding:16px 22px;box-shadow:var(--shadow);font-weight:600}
 .espera-roda{width:20px;height:20px;border-radius:50%;border:3px solid var(--primary-soft);border-top-color:var(--primary);animation:girar .8s linear infinite}
 @keyframes girar{to{transform:rotate(360deg)}}
+.espera-texto{white-space:pre-line}
 @media (prefers-reduced-motion: reduce){.espera-roda{animation:none;border-top-color:var(--primary-soft)}}
 
 /* Linha aberta a partir de uma busca: pisca uma vez para o olho achar. */
@@ -584,3 +585,10 @@ tr.nota-subtotal td b{font-weight:700}
 tr.nota-estorno td{background:#faf5ff}
 .cert-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px 14px;align-items:end}
 .cert-form .campo{margin:0}
+.cap-teste{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.cap-teste select{max-width:320px}
+.sef-barra{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
+.sef-painel{margin-top:12px;padding:12px 14px;border:1px solid var(--line);border-radius:10px}
+.sef-painel .toolbar{flex-wrap:wrap;gap:8px;align-items:center}
+.sef-lista{max-height:360px;overflow:auto;margin:8px 0}
+.sef-acoes{margin-top:8px}

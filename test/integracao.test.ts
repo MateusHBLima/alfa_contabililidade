@@ -90,7 +90,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(26); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020)
+    expect(tabelas.length).toBe(29); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(3);
   });
@@ -4286,5 +4286,302 @@ describe('29/09: certificados A1 da captura no SAT — a chave vai para o cofre 
     db.consultar("DELETE FROM papel_permissoes WHERE permissao = 'certificados.gerenciar'");
     const r = await app.fetch(new Request('http://x/api/certificados', { headers: { Cookie: ck } }), ambiente());
     expect(r.status).toBe(403);
+  });
+});
+
+describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
+  const { gzipSync } = await import('node:zlib');
+  const sefsc = await import('../src/captura/sefsc');
+  const { esquecerOperacao } = await import('../src/captura/captura');
+
+  const CF_ID = '7329489b-4f2c-488b-9ccc-ca85af32f441';
+  const BINDING = 'MTLS_7329489b_4f2c_488b_9ccc_ca85af32f441';
+  const H = 3600_000;
+
+  const WSDL = `<?xml version="1.0" encoding="utf-8"?><wsdl:definitions xmlns:s="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" targetNamespace="${sefsc.NS_DIST}">
+    <wsdl:types><s:schema elementFormDefault="qualified" targetNamespace="${sefsc.NS_DIST}">
+      <s:element name="NfeDownloadContab"><s:complexType><s:sequence><s:element minOccurs="0" maxOccurs="1" name="pXml"><s:complexType mixed="true"><s:sequence><s:any /></s:sequence></s:complexType></s:element></s:sequence></s:complexType></s:element>
+      <s:element name="NfeDownloadContabResponse"><s:complexType><s:sequence><s:element minOccurs="0" maxOccurs="1" name="NfeDownloadContabResult"><s:complexType mixed="true"><s:sequence><s:any /></s:sequence></s:complexType></s:element></s:sequence></s:complexType></s:element>
+    </s:schema></wsdl:types>
+    <wsdl:portType name="NfeDownloadSoap"><wsdl:operation name="NfeDownloadContab"><wsdl:input message="tns:x"/></wsdl:operation></wsdl:portType>
+    <wsdl:binding name="NfeDownloadSoap"><wsdl:operation name="NfeDownloadContab"><soap:operation soapAction="${sefsc.NS_DIST}/NfeDownloadContab" style="document" /></wsdl:operation></wsdl:binding>
+  </wsdl:definitions>`;
+
+  const semXmlDecl = (x: string) => x.replace(/^<\?xml[^>]*\?>\s*/, '').replace(/<!--[\s\S]*?-->\s*/g, '');
+  const NOTA = semXmlDecl(XML); // emitida em 14/07/2026
+  const NOTA_AGOSTO = semXmlDecl(outraNota(XML, '0099')); // 14/08/2026
+  const CHAVE_AGOSTO = CHAVE_ORIGINAL.slice(0, 40) + '0099';
+  const cancelamento = semXmlDecl(EVENTO).replaceAll('42260711222333000181550010000001231000000019', CHAVE_ORIGINAL);
+  const manifestacao = cancelamento.replaceAll('110111', '210200');
+
+  const lote = (docs: string[]) => `<loteDistNFeSC versao="2.00">${docs.join('')}</loteDistNFeSC>`;
+  function retorno(cStat: string, xMotivo: string, extra: { lote?: string; ult?: string; qt?: number } = {}): string {
+    const comp = extra.lote ? gzipSync(Buffer.from(extra.lote, 'utf8')).toString('base64') : '';
+    const ret = `<retDistNFeSC versao="2.00" xmlns="${sefsc.NS_DIST}"><tpAmb>1</tpAmb><cStat>${cStat}</cStat><xMotivo>${xMotivo}</xMotivo><dhResp>2026-10-01T09:00:00Z</dhResp>`
+      + (extra.ult ? `<ultNuNSURet>${extra.ult}</ultNuNSURet>` : '')
+      + (extra.qt !== undefined ? `<qtDfeRet>${extra.qt}</qtDfeRet>` : '')
+      + (comp ? `<loteDistComp>${comp}</loteDistComp>` : '') + '</retDistNFeSC>';
+    return `<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><NfeDownloadContabResponse xmlns="${sefsc.NS_DIST}"><NfeDownloadContabResult>${ret}</NfeDownloadContabResult></NfeDownloadContabResponse></soap:Body></soap:Envelope>`;
+  }
+
+  let chamadas: { metodo: string; url: string; corpo: string; soapAction: string | null }[];
+  let respostas: (() => Response | Promise<Response>)[];
+  let empresaId: string;
+  let certId: string;
+  let ck = '';
+  const binding = {
+    fetch: async (url: string, init?: RequestInit) => {
+      const metodo = init?.method ?? 'GET';
+      chamadas.push({ metodo, url, corpo: String(init?.body ?? ''), soapAction: new Headers(init?.headers).get('SOAPAction') });
+      if (metodo === 'GET') return new Response(WSDL, { status: 200 });
+      const prox = respostas.shift();
+      if (!prox) throw new Error('teste: chamada à SEF que não era esperada');
+      return prox();
+    },
+  };
+  const amb = (extra: Record<string, unknown> = {}) => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao', [BINDING]: binding, ...extra,
+  }) as never;
+  const chamar = (url: string, corpo?: unknown, extra?: Record<string, unknown>) => app.fetch(new Request(`http://x${url}`, {
+    method: corpo === undefined ? 'GET' : 'POST',
+    headers: { Cookie: ck, 'content-type': 'application/json' },
+    body: corpo === undefined ? undefined : JSON.stringify(corpo),
+  }), amb(extra));
+  const consultar = async (de: string, ate: string, extra?: Record<string, unknown>) =>
+    (await (await chamar(`/api/empresas/${empresaId}/sef/consultar`, { de, ate }, extra)).json()) as any;
+  const estado = () => db.consultar<any>('SELECT * FROM captura_empresas')[0];
+  const posts = () => chamadas.filter((c) => c.metodo === 'POST');
+  /** A SEF só é consultada de novo depois da liberação: o teste adianta o relógio mexendo na liberação. */
+  const liberar = () => db.consultar("UPDATE captura_empresas SET proxima_consulta = '2000-01-01T00:00:00Z'");
+
+  beforeEach(async () => {
+    esquecerOperacao();
+    chamadas = [];
+    respostas = [];
+    empresaId = await repo.criarEmpresa({ cnpj: '11.222.333/0001-81', razaoSocial: 'MERCADO PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    certId = await repo.gravarCertificado({
+      nome: 'Isa', titular: 'ISA CONTADORA', documento: '12345678909', tipo: 'e-CPF', emissor: 'AC TESTE', serial: 's1',
+      validoDe: '2026-04-15T00:00:00Z', validoAte: '2099-04-15T11:58:26Z', cloudflareId: CF_ID,
+    });
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), amb());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  });
+
+  it('o pedido segue o boletim: destinatário, NSU, sem espaço entre as tags', () => {
+    const p = sefsc.montarPedido(sefsc.documentoLimpo('11.222.333/0001-81')!, '0');
+    expect(p).toBe(`<distNFeSC versao="2.00" xmlns="${sefsc.NS_DIST}"><tpAmb>1</tpAmb><verAplic>AlfaFiscal 1.0</verAplic><cUF>42</cUF><CNPJ>11222333000181</CNPJ><solRel><indXML>1</indXML><indAtor>2</indAtor><ultNuNSU>0</ultNuNSU></solRel></distNFeSC>`);
+    expect(sefsc.documentoLimpo('123.456.789-09')).toEqual({ tag: 'CPF', valor: '12345678909' });
+    expect(sefsc.documentoLimpo('12.ABC.345/01DE-35')).toEqual({ tag: 'CNPJ', valor: '12ABC34501DE35' });
+    expect(sefsc.documentoLimpo('123')).toBeNull();
+  });
+
+  it('lê o WSDL: operação, SOAPAction e se o parâmetro é XML ou texto', () => {
+    expect(sefsc.lerWsdl(WSDL)).toEqual({
+      namespace: sefsc.NS_DIST, metodo: 'NfeDownloadContab', soapAction: `${sefsc.NS_DIST}/NfeDownloadContab`,
+      parametro: 'pXml', parametroTexto: false,
+    });
+    const texto = WSDL.replace(/name="pXml"><s:complexType mixed="true"><s:sequence><s:any \/><\/s:sequence><\/s:complexType><\/s:element>/, 'name="nfeDadosMsg" type="s:string" />');
+    expect(sefsc.lerWsdl(texto)).toMatchObject({ parametro: 'nfeDadosMsg', parametroTexto: true });
+    expect(sefsc.montarEnvelope(sefsc.lerWsdl(texto)!, '<a>1</a>')).toContain('<nfeDadosMsg>&lt;a&gt;1&lt;/a&gt;</nfeDadosMsg>');
+    expect(sefsc.lerWsdl('<html>erro</html>')).toBeNull();
+  });
+
+  it('lê o retorno dentro do envelope, escapado ou não, e explica a falha SOAP', () => {
+    expect(sefsc.lerRetorno(retorno('117', 'Nenhum DF-e localizado', { ult: '9' }))).toMatchObject({ cStat: '117', ultNuNSURet: '9', loteDistComp: null });
+    const escapado = retorno('657', 'Bloqueio').replace(/<retDistNFeSC[\s\S]*<\/retDistNFeSC>/, (m) => m.replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+    expect(sefsc.lerRetorno(escapado)).toMatchObject({ cStat: '657', xMotivo: 'Bloqueio' });
+    expect(() => sefsc.lerRetorno('<soap:Envelope><soap:Body><soap:Fault><faultstring>Server was unable to process request</faultstring></soap:Fault></soap:Body></soap:Envelope>'))
+      .toThrow(/a SEF recusou a chamada: Server was unable/);
+  });
+
+  it('as esperas da SEF: lote cheio segue, o resto espera 12 horas, reprocessamento 1 hora', () => {
+    expect(sefsc.esperaDepois('118', 50, 0).ms).toBe(0);
+    expect(sefsc.esperaDepois('118', 49, 0).ms).toBe(12 * H);
+    expect(sefsc.esperaDepois('117', 0, 0).ms).toBe(12 * H);
+    expect(sefsc.esperaDepois('110', 0, 0).ms).toBe(1 * H);
+    expect(sefsc.esperaDepois('657', 0, 0)).toEqual({ ms: 12 * H, erro: true });
+    expect(sefsc.esperaDepois('8002', 0, 0)).toEqual({ ms: 12 * H, erro: true });
+  });
+
+  it('consultar baixa para a caixa e mostra só o período; nada entra na lista de notas', async () => {
+    respostas.push(() => new Response(retorno('118', 'DF-e localizados', {
+      ult: '4', qt: 4,
+      lote: lote([
+        `<distNFeSC NSU="1" chAcesso="${CHAVE_ORIGINAL}">${NOTA}</distNFeSC>`,
+        `<distNFeSC NSU="2" chAcesso="${CHAVE_AGOSTO}">${NOTA_AGOSTO}</distNFeSC>`,
+        `<distNFeSC NSU="3">${cancelamento}</distNFeSC>`,
+        `<distNFeSC NSU="4">${manifestacao}</distNFeSC>`,
+      ]),
+    })));
+    const r = await consultar('2026-08-01', '2026-08-31');
+    expect(r.download).toMatchObject({ consultou: true, documentos: 4, erro: null, temMais: false });
+
+    // O pedido que saiu
+    expect(chamadas.map((c) => c.metodo)).toEqual(['GET', 'POST']);
+    expect(chamadas[0]!.url).toBe(`${sefsc.URL_SEF_SC}?WSDL`);
+    const p = posts()[0]!;
+    expect(p.soapAction).toBe(`"${sefsc.NS_DIST}/NfeDownloadContab"`);
+    expect(p.corpo).toContain('<NfeDownloadContab xmlns="http://www.satnfe.sef.sc.gov.br/ws/distribuicao-v2"><pXml><distNFeSC');
+    expect(p.corpo).toContain('<CNPJ>11222333000181</CNPJ>');
+    expect(p.corpo).toContain('<indAtor>2</indAtor><ultNuNSU>0</ultNuNSU>');
+    expect(p.corpo).not.toMatch(/>\s+</);
+
+    // Só agosto na lista; nada importado
+    expect(r.notas).toEqual([expect.objectContaining({ chave: CHAVE_AGOSTO, numero: '50470099', noSistema: false, cancelada: false })]);
+    expect(r.notas[0].fornecedor).toBeTruthy();
+    expect(r.notas[0].valor).toBeGreaterThan(0);
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
+    expect(db.consultar('SELECT * FROM captura_caixa')).toHaveLength(4);
+
+    // Ponteiro andou e a SEF só libera daqui a 12 horas
+    expect(estado()).toMatchObject({ ult_nsu: '4', ultimo_cstat: '118', ultimo_erro: null, certificado_id: certId });
+    expect(Date.parse(estado().proxima_consulta) - Date.now()).toBeGreaterThan(11.9 * H);
+  });
+
+  it('outro período dentro das 12 horas usa a caixa, sem chamar a SEF', async () => {
+    respostas.push(() => new Response(retorno('118', 'ok', { ult: '2', qt: 2, lote: lote([
+      `<distNFeSC NSU="1" chAcesso="${CHAVE_ORIGINAL}">${NOTA}</distNFeSC>`,
+      `<distNFeSC NSU="2" chAcesso="${CHAVE_AGOSTO}">${NOTA_AGOSTO}</distNFeSC>`,
+    ]) })));
+    await consultar('2026-08-01', '2026-08-31');
+    const r = await consultar('2026-07-01', '2026-07-31');
+    expect(posts()).toHaveLength(1);
+    expect(r.download).toMatchObject({ consultou: false, erro: null });
+    expect(r.download.frase).toMatch(/só libera uma nova consulta/);
+    expect(r.download.liberadaEm).toBe(estado().proxima_consulta);
+    expect(r.notas.map((n: any) => n.chave)).toEqual([CHAVE_ORIGINAL]);
+  });
+
+  it('importar as escolhidas: entram como envio da SEF, e o cancelamento que veio junto é aplicado', async () => {
+    respostas.push(() => new Response(retorno('118', 'ok', { ult: '3', qt: 3, lote: lote([
+      `<distNFeSC NSU="1" chAcesso="${CHAVE_ORIGINAL}">${NOTA}</distNFeSC>`,
+      `<distNFeSC NSU="2" chAcesso="${CHAVE_AGOSTO}">${NOTA_AGOSTO}</distNFeSC>`,
+      `<distNFeSC NSU="3">${cancelamento}</distNFeSC>`,
+    ]) })));
+    const r = await consultar('2026-07-01', '2026-08-31');
+    expect(r.notas.find((n: any) => n.chave === CHAVE_ORIGINAL).cancelada).toBe(true);
+
+    const imp: any = await (await chamar(`/api/empresas/${empresaId}/sef/importar`, { chaves: [CHAVE_ORIGINAL, CHAVE_AGOSTO], envio: 'envio-teste-1' })).json();
+    expect(imp).toMatchObject({ importadas: 2, recusadas: 0, canceladas: 1 });
+    const notas = db.consultar<any>('SELECT chave, cancelada_em FROM notas ORDER BY chave');
+    expect(notas).toHaveLength(2);
+    expect(notas.find((n) => n.chave === CHAVE_ORIGINAL).cancelada_em).toBeTruthy();
+    expect(notas.find((n) => n.chave === CHAVE_AGOSTO).cancelada_em).toBeNull();
+    const lotes = db.consultar<any>("SELECT * FROM lotes_importacao WHERE origem = 'sefaz'");
+    expect(lotes.some((l) => l.envio_id === 'envio-teste-1' && l.importadas === 2)).toBe(true);
+
+    // Na próxima consulta, as duas aparecem como já no sistema; importar de novo não duplica
+    const de2 = await consultar('2026-07-01', '2026-08-31');
+    expect(de2.notas.every((n: any) => n.noSistema)).toBe(true);
+    const outra: any = await (await chamar(`/api/empresas/${empresaId}/sef/importar`, { chaves: [CHAVE_AGOSTO] })).json();
+    expect(outra).toMatchObject({ importadas: 0, duplicadas: 1 });
+  });
+
+  it('cancelamento que chega depois é aplicado na nota que já estava no sistema', async () => {
+    respostas.push(() => new Response(retorno('118', 'ok', { ult: '1', qt: 1, lote: lote([`<distNFeSC NSU="1" chAcesso="${CHAVE_ORIGINAL}">${NOTA}</distNFeSC>`]) })));
+    await consultar('2026-07-01', '2026-07-31');
+    await chamar(`/api/empresas/${empresaId}/sef/importar`, { chaves: [CHAVE_ORIGINAL] });
+    liberar();
+    respostas.push(() => new Response(retorno('118', 'ok', { ult: '2', qt: 1, lote: lote([`<distNFeSC NSU="2">${cancelamento}</distNFeSC>`]) })));
+    const r = await consultar('2026-07-01', '2026-07-31');
+    expect(posts()[1]!.corpo).toContain('<ultNuNSU>1</ultNuNSU>');
+    expect(r.canceladasAplicadas).toBe(1);
+    expect(db.consultar<any>('SELECT cancelada_em FROM notas')[0].cancelada_em).toBeTruthy();
+    // Aplicado uma vez só
+    liberar();
+    respostas.push(() => new Response(retorno('117', 'nada', { ult: '2' })));
+    expect((await consultar('2026-07-01', '2026-07-31')).canceladasAplicadas).toBe(0);
+  });
+
+  it('lote cheio: cada requisição traz um lote e diz que tem mais; a seguinte continua na hora', async () => {
+    for (let k = 0; k < 3; k++) {
+      const docs = Array.from({ length: k < 2 ? 50 : 10 }, (_, i) => `<distNFeSC NSU="${k * 50 + i + 1}">${manifestacao}</distNFeSC>`);
+      respostas.push(() => new Response(retorno('118', 'ok', { ult: String(k * 50 + docs.length), qt: docs.length, lote: lote(docs) })));
+    }
+    const r1 = await consultar('2026-07-01', '2026-07-31');
+    expect(posts()).toHaveLength(1);
+    expect(r1.download).toMatchObject({ consultou: true, documentos: 50, temMais: true });
+    // Liberada na hora para continuar
+    expect(Date.parse(estado().proxima_consulta)).toBeLessThanOrEqual(Date.now());
+    const r2 = await consultar('2026-07-01', '2026-07-31');
+    expect(posts()[1]!.corpo).toContain('<ultNuNSU>50</ultNuNSU>');
+    expect(r2.download).toMatchObject({ documentos: 50, temMais: true });
+    const r3 = await consultar('2026-07-01', '2026-07-31');
+    expect(r3.download).toMatchObject({ documentos: 10, temMais: false });
+    expect(estado().ult_nsu).toBe('110');
+    expect(Date.parse(estado().proxima_consulta) - Date.now()).toBeGreaterThan(11.9 * H);
+    expect(db.consultar('SELECT * FROM captura_caixa')).toHaveLength(110);
+  });
+
+  it('certificado que não está ligado ao Worker: não chama a SEF, não gasta a liberação e diz o que falta', async () => {
+    const r = await consultar('2026-07-01', '2026-07-31', { [BINDING]: undefined });
+    expect(chamadas).toHaveLength(0);
+    expect(r.download).toMatchObject({ consultou: false, erro: expect.stringMatching(/ainda não foi ligado ao sistema/) });
+    expect(estado()).toBeUndefined();
+  });
+
+  it('rejeição da SEF (contabilista sem vínculo) espera 12 horas e diz o motivo', async () => {
+    respostas.push(() => new Response(retorno('8002', 'Rejeição: Requisitante não é Contabilista do CNPJ/CPF informado')));
+    const r = await consultar('2026-07-01', '2026-07-31');
+    expect(r.download.erro).toMatch(/não está cadastrado na SEF como contabilista/);
+    expect(estado()).toMatchObject({ ultimo_cstat: '8002', ult_nsu: '0' });
+    expect(Date.parse(estado().proxima_consulta) - Date.now()).toBeGreaterThan(11.9 * H);
+  });
+
+  it('sem conexão (TLS): libera de novo em 10 minutos', async () => {
+    const caiu = { fetch: async () => { throw new Error('TLS handshake failed'); } };
+    const r = await consultar('2026-07-01', '2026-07-31', { [BINDING]: caiu });
+    expect(r.download.erro).toMatch(/não consegui conectar na SEF: TLS handshake failed/);
+    const espera = Date.parse(estado().proxima_consulta) - Date.now();
+    expect(espera).toBeGreaterThan(9 * 60_000);
+    expect(espera).toBeLessThan(11 * 60_000);
+  });
+
+  it('dois cliques ao mesmo tempo consultam a SEF uma vez só', async () => {
+    respostas.push(() => new Response(retorno('117', 'nada')));
+    await Promise.all([consultar('2026-07-01', '2026-07-31'), consultar('2026-07-01', '2026-07-31')]);
+    expect(posts()).toHaveLength(1);
+  });
+
+  it('pede o certificado quando há mais de um e ainda não foi escolhido', async () => {
+    await repo.gravarCertificado({
+      nome: 'Alfa', titular: 'ALFA', documento: '12345678000195', tipo: 'e-CNPJ', emissor: 'AC', serial: 's2',
+      validoDe: '2026-01-01T00:00:00Z', validoAte: '2099-01-01T00:00:00Z', cloudflareId: 'outro-id',
+    });
+    const r = await chamar(`/api/empresas/${empresaId}/sef/consultar`, { de: '2026-07-01', ate: '2026-07-31' });
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as any).erro).toMatch(/Escolha o certificado/);
+    const info: any = await (await chamar(`/api/empresas/${empresaId}/sef`)).json();
+    expect(info.certificados.map((c: any) => [c.nome, c.ligado])).toEqual(expect.arrayContaining([['Isa', true], ['Alfa', false]]));
+    expect(JSON.stringify(info)).not.toMatch(/cloudflare_id|7329489b/);
+  });
+
+  it('permissões: buscar é de quem importa; testar e histórico, do administrador', async () => {
+    const ok: any = await (await chamar('/api/captura/testar', { certificadoId: certId })).json();
+    expect(ok).toMatchObject({ ok: true, detalhe: expect.stringMatching(/Conectou na SEF.*NfeDownloadContab/) });
+    expect(chamadas.map((c) => c.metodo)).toEqual(['GET']);
+    const recusado: any = await (await chamar('/api/captura/testar', { certificadoId: certId }, {
+      [BINDING]: { fetch: async () => new Response('<html>403 - Forbidden: Access is denied.</html>', { status: 403 }) },
+    })).json();
+    expect(recusado).toMatchObject({ ok: false, detalhe: expect.stringMatching(/respondeu 403.*Access is denied/) });
+
+    db.consultar("DELETE FROM papel_permissoes WHERE permissao = 'captura.gerenciar'");
+    expect((await chamar('/api/captura')).status).toBe(403);
+    expect((await chamar(`/api/empresas/${empresaId}/sef`)).status).toBe(200);
+    db.consultar("DELETE FROM papel_permissoes WHERE permissao = 'notas.importar'");
+    expect((await chamar(`/api/empresas/${empresaId}/sef/consultar`, { de: '2026-07-01', ate: '2026-07-31' })).status).toBe(403);
+    expect(chamadas.filter((c) => c.metodo === 'POST')).toHaveLength(0);
+  });
+
+  it('o histórico mostra quem consultou e o resultado', async () => {
+    respostas.push(() => new Response(retorno('117', 'nada', { ult: '0' })));
+    await consultar('2026-07-01', '2026-07-31');
+    const h: any = await (await chamar('/api/captura')).json();
+    expect(h.buscas).toEqual([expect.objectContaining({ razao_social: 'MERCADO PILOTO LTDA', usuario_nome: 'Contadora', cstat: '117', documentos: 0 })]);
   });
 });

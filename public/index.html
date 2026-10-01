@@ -184,6 +184,7 @@
         <button data-view="vUsuarios"><span class="num">U</span><span>Usuários<span class="sub">quem entra e o que pode</span></span></button>
         <button data-view="vPapeis"><span class="num">P</span><span>Papéis<span class="sub">conjuntos de permissões</span></span></button>
         <button data-view="vCertificados"><span class="num">C</span><span>Certificados<span class="sub">A1 para buscar notas no SAT</span></span></button>
+        <button data-view="vCaptura"><span class="num">S</span><span>Busca na SEF<span class="sub">teste e histórico</span></span></button>
       </div>
     </nav>
     <div class="side-foot">
@@ -226,8 +227,8 @@
       <!-- ------------------------------------------------ AMBIENTE 1 -->
       <section id="v1">
         <h1>Notas emitidas contra o cliente</h1>
-        <p class="page-desc">Suba os XML das notas que os fornecedores emitiram contra esta empresa.
-          A busca automática na SEFAZ entra na fase 2 do projeto.</p>
+        <p class="page-desc">Suba os XML das notas que os fornecedores emitiram contra esta empresa, ou busque direto na SEF
+          pelo certificado.</p>
 
         <div id="estornos-notas" class="hidden"></div>
         <div class="kpis" id="kpis-notas"></div>
@@ -240,6 +241,21 @@
               <span class="tiny">ou clique para escolher · NF-e modelo 55</span>
             </div>
             <input type="file" id="arquivo-xml" accept=".xml,text/xml" multiple hidden>
+            <div class="sef-barra">
+              <button class="btn" type="button" id="btn-sef">Buscar na SEF</button>
+              <span class="tiny">puxa pelo certificado as notas que a empresa recebeu, escolhendo o período</span>
+            </div>
+            <div id="painel-sef" class="sef-painel hidden">
+              <form class="toolbar" id="form-sef" style="padding:0">
+                <label class="tiny" for="sef-de">Emitidas de</label><input type="date" id="sef-de">
+                <label class="tiny" for="sef-ate">até</label><input type="date" id="sef-ate">
+                <select id="sef-cert" class="hidden"></select>
+                <button class="btn sm primary" type="submit" id="sef-consultar">Consultar</button>
+                <button class="btn sm" type="button" id="sef-fechar">Fechar</button>
+              </form>
+              <p class="tiny" id="sef-info" style="margin:6px 0 0"></p>
+              <div id="sef-resultado"></div>
+            </div>
             <div id="log-import" class="log hidden" style="margin-top:12px"></div>
           </div>
         </div>
@@ -622,6 +638,34 @@
           <div class="body tight">
             <div class="scroll"><table id="tbl-certificados">
               <thead><tr><th>Nome</th><th>Titular</th><th>Tipo</th><th>CNPJ/CPF</th><th>Válido até</th><th>Enviado</th><th>Código no cofre</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------- CAPTURA SEF -->
+      <section id="vCaptura" class="hidden">
+        <h1>Busca na SEF</h1>
+        <p class="page-desc">A busca é feita em Notas recebidas, empresa por empresa, com o botão "Buscar na SEF". A SEF não
+          filtra por data: entrega tudo o que tem da empresa (mês atual e os dois anteriores), e depois exige 12 horas até a
+          próxima consulta. O que ela manda fica guardado à parte e só entra no sistema o que for escolhido.</p>
+        <div id="cap-aviso" class="aviso hidden" style="margin-bottom:12px"></div>
+        <div class="card">
+          <header><h2>Testar a conexão</h2><span class="hint">só confere se a SEF aceita o certificado · não consulta nenhuma empresa</span></header>
+          <div class="body">
+            <div class="cap-teste">
+              <select id="cap-cert-teste"></select>
+              <button class="btn" type="button" id="cap-testar">Testar conexão</button>
+              <span id="cap-teste-resultado" class="tiny"></span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <header><h2>Últimas consultas à SEF</h2></header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-captura-buscas">
+              <thead><tr><th>Quando</th><th>Empresa</th><th>Quem</th><th>Resultado</th><th class="num">Documentos</th></tr></thead>
               <tbody></tbody>
             </table></div>
           </div>

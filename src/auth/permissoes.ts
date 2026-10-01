@@ -80,6 +80,7 @@ export const PERMISSOES = {
   'auditoria.visualizar': { grupo: 'Administração', descricao: 'Consultar a trilha de alterações' },
   // Enviar o A1 é entregar o acesso do escritório à SEF: só o administrador.
   'certificados.gerenciar': { grupo: 'Administração', descricao: 'Enviar e remover os certificados digitais da captura no SAT' },
+  'captura.gerenciar': { grupo: 'Administração', descricao: 'Testar a conexão com a SEF e ver o histórico das buscas' },
 } as const;
 
 export type Permissao = keyof typeof PERMISSOES;

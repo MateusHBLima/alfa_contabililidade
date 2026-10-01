@@ -411,7 +411,7 @@ describe('tela: reunião 25/09', () => {
   it('menu: Empresas primeiro, Relatórios dentro da Escrituração, Administração por último', () => {
     const ordem = [...HTML.matchAll(/data-view="(\w+)"/g)].map((m) => m[1]);
     expect(ordem.slice(0, 5)).toEqual(['vEmpresas', 'v1', 'v2', 'v3', 'vRelatorios']);
-    expect(ordem.slice(-3)).toEqual(['vUsuarios', 'vPapeis', 'vCertificados']);
+    expect(ordem.slice(-4)).toEqual(['vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura']);
     expect(HTML.match(/class="nav-grupo/g)).toHaveLength(5); // + Regras de impostos (28/09)
   });
   it('trocar de empresa pede OK e a empresa aberta aparece grande', () => {
@@ -589,5 +589,28 @@ describe('tela: certificados A1 (29/09)', () => {
     expect(APP).toContain("['vCertificados', 'certificados.gerenciar']");
     expect(APP).toMatch(/async function carregarCertificados\(\)/);
     expect(APP).toContain("$('#cert-senha').value = '';");
+  });
+});
+
+describe('tela: busca na SEF (30/09)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  it('buscar fica em Notas recebidas, por período, e só importa depois de confirmar', () => {
+    expect(HTML).toContain('id="btn-sef"');
+    expect(HTML).toContain('id="sef-de"');
+    expect(HTML).toContain('id="sef-ate"');
+    expect(APP).toContain('/sef/consultar');
+    expect(APP).toContain("id=\"sef-importar\"");
+    expect(APP).toContain('/sef/importar');
+  });
+  it('consultar e importar mostram a roda girando, o tempo e a contagem', () => {
+    expect(APP).toContain('Consultando a SEF… ${seg} s');
+    expect(APP).toMatch(/while \(r\.download\.temMais && !r\.download\.erro && rodadas < SEF_RODADAS_MAX\)/);
+    expect(APP).toContain('Importando da SEF…');
+  });
+  it('a tela do administrador só testa e mostra o histórico, sem ligar busca automática', () => {
+    expect(HTML).toContain('<section id="vCaptura"');
+    expect(HTML).toContain('id="cap-testar"');
+    expect(APP).toContain("['vCaptura', 'captura.gerenciar']");
+    expect(HTML + APP).not.toMatch(/data-cap-ligar|busca automática das notas/);
   });
 });

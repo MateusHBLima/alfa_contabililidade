@@ -24,6 +24,7 @@ import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, res
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
+import { baixarDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, type AmbienteCaptura } from './captura/captura';
 import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 
@@ -52,6 +53,8 @@ type Env = {
    */
   CF_ACCOUNT_ID?: string;
   CF_API_TOKEN?: string;
+  // Os certificados ligados no wrangler.jsonc (`mtls_certificates`) chegam como
+  // MTLS_<id no cofre>. São lidos pelo nome em src/captura/captura.ts.
 };
 
 type Vars = { repo: Repo; sessao: Sessao };
@@ -2014,6 +2017,92 @@ app.delete('/api/certificados/:id', async (c) => {
   }
   await repo.removerCertificado(cert.id);
   return c.json({ ok: true });
+});
+
+// ------------------------------------------------------------------ busca na SEF
+
+/**
+ * Busca de notas na SEF/SC, manual e por período (30/09). Ver src/captura/captura.ts.
+ * Buscar e importar usam a permissão de importar; testar a conexão e ver o
+ * histórico, a do administrador.
+ */
+const certificadosDaBusca = async (repo: Repo, env: AmbienteCaptura) =>
+  (await repo.listarCertificados()).map((x) => ({
+    id: x.id, nome: x.nome, titular: x.titular, tipo: x.tipo, valido_ate: x.valido_ate,
+    ligado: !!buscaComCertificado(env, x.cloudflare_id),
+  }));
+
+app.get('/api/empresas/:id/sef', async (c) => {
+  exigir(c.get('sessao'), 'notas.importar');
+  const repo = c.get('repo');
+  const empresaId = c.req.param('id');
+  if (!(await repo.obterEmpresa(empresaId))) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const e = await repo.estadoSef(empresaId);
+  return c.json({
+    certificados: await certificadosDaBusca(repo, c.env as unknown as AmbienteCaptura),
+    estado: e ? {
+      certificadoId: e.certificado_id, liberadaEm: e.proxima_consulta, ultimaConsulta: e.ultima_consulta,
+      ultimoMotivo: e.ultimo_motivo, ultimoErro: e.ultimo_erro, naCaixa: e.na_caixa,
+    } : null,
+  });
+});
+
+app.post('/api/empresas/:id/sef/consultar', async (c) => {
+  exigir(c.get('sessao'), 'notas.importar');
+  const corpo = z.object({
+    de: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    ate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    certificadoId: z.string().min(1).max(64).nullable().optional(),
+  }).parse(await c.req.json());
+  if (corpo.de > corpo.ate) return c.json({ erro: 'a data inicial é depois da final' }, 400);
+  const repo = c.get('repo');
+  const env = c.env as unknown as AmbienteCaptura;
+  const empresaId = c.req.param('id');
+  const empresa = await repo.obterEmpresa(empresaId);
+  if (!empresa) return c.json({ erro: 'empresa não encontrada' }, 404);
+
+  const certs = await repo.listarCertificados();
+  if (!certs.length) return c.json({ erro: 'Nenhum certificado no cofre. Envie o A1 em Administração › Certificados.' }, 400);
+  const escolhido = corpo.certificadoId ?? (await repo.estadoSef(empresaId))?.certificado_id ?? (certs.length === 1 ? certs[0].id : null);
+  const cert = escolhido ? certs.find((x) => x.id === escolhido) : null;
+  if (!cert) return c.json({ erro: 'Escolha o certificado que vai buscar as notas desta empresa.' }, 400);
+
+  const download = await baixarDaSef(env, repo, empresa, cert);
+  const canceladas = await aplicarEventosDaCaixa(env, repo, empresaId);
+  const notas = (await repo.notasDaCaixa(empresaId, { de: corpo.de, ate: corpo.ate })).map((n) => ({
+    chave: n.chave, numero: n.numero, fornecedor: n.emit_nome, cnpj: n.emit_cnpj, emissao: n.dh_emi, valor: n.valor,
+    noSistema: !!n.nota_id, cancelada: !!n.cancelada,
+  }));
+  return c.json({ download, canceladasAplicadas: canceladas, notas });
+});
+
+app.post('/api/empresas/:id/sef/importar', async (c) => {
+  exigir(c.get('sessao'), 'notas.importar');
+  const corpo = z.object({
+    chaves: z.array(z.string().regex(/^[0-9A-Z]{44}$/)).min(1).max(20),
+    envio: z.string().regex(/^[A-Za-z0-9-]{8,64}$/).nullable().optional(),
+  }).parse(await c.req.json());
+  const repo = c.get('repo');
+  const empresaId = c.req.param('id');
+  if (!(await repo.obterEmpresa(empresaId))) return c.json({ erro: 'empresa não encontrada' }, 404);
+  return c.json(await importarDaCaixa(c.env as unknown as AmbienteCaptura, repo, empresaId, corpo.chaves, corpo.envio ?? null));
+});
+
+app.get('/api/captura', async (c) => {
+  exigir(c.get('sessao'), 'captura.gerenciar');
+  const repo = c.get('repo');
+  return c.json({
+    certificados: await certificadosDaBusca(repo, c.env as unknown as AmbienteCaptura),
+    buscas: await repo.historicoSef(),
+  });
+});
+
+app.post('/api/captura/testar', async (c) => {
+  exigir(c.get('sessao'), 'captura.gerenciar');
+  const { certificadoId } = z.object({ certificadoId: z.string().min(1).max(64) }).parse(await c.req.json());
+  const cert = await c.get('repo').obterCertificado(certificadoId);
+  if (!cert) return c.json({ erro: 'certificado não encontrado' }, 404);
+  return c.json(await testarConexao(c.env as unknown as AmbienteCaptura, cert.cloudflare_id));
 });
 
 /** Marca/desmarca um produto do relatório como "não fechou" (28/09). */
