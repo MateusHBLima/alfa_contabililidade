@@ -613,8 +613,8 @@
       <section id="vCertificados" class="hidden">
         <h1>Certificados digitais</h1>
         <p class="page-desc">O certificado A1 (arquivo .pfx) do escritório ou da contadora responsável, para o sistema
-          buscar sozinho as notas das empresas no SAT. O arquivo é lido uma vez e a chave vai direto para o cofre de
-          certificados da Cloudflare: ninguém consegue baixar de volta, nem daqui, nem a Planee.</p>
+          buscar as notas das empresas na SEF. O arquivo é lido uma vez e a chave fica guardada cifrada no servidor que
+          conversa com a SEF: ninguém consegue baixar de volta pela tela. Nunca mande o arquivo ou a senha por WhatsApp.</p>
         <div id="cert-aviso" class="aviso hidden" style="margin-bottom:12px"></div>
         <div class="card">
           <header><h2>Enviar certificado</h2><span class="hint">A1 (.pfx ou .p12) · e-CNPJ ou e-CPF ICP-Brasil</span></header>
@@ -637,7 +637,7 @@
           <header><h2>Guardados</h2></header>
           <div class="body tight">
             <div class="scroll"><table id="tbl-certificados">
-              <thead><tr><th>Nome</th><th>Titular</th><th>Tipo</th><th>CNPJ/CPF</th><th>Válido até</th><th>Enviado</th><th>Código no cofre</th><th></th></tr></thead>
+              <thead><tr><th>Nome</th><th>Titular</th><th>Tipo</th><th>CNPJ/CPF</th><th>Válido até</th><th>Enviado</th><th>Guardado em</th><th></th></tr></thead>
               <tbody></tbody>
             </table></div>
           </div>
