@@ -50,7 +50,11 @@
     // por renegociação TLS, que o fetch da Cloudflare não faz. O token é segredo:
     // SEF_PONTE_TOKEN, cadastrado no painel. Código em relay/relay.mjs.
     "SEF_PONTE_URL": "https://sef-alfa.planeelabia.com"
-  }
+  },
+
+  // Busca automática na SEF (01/10): a cada 15 minutos, uma empresa por vez.
+  // Ver executarBuscaAutomatica em src/captura/captura.ts.
+  "triggers": { "crons": ["*/15 * * * *"] }
 
   // Segredos (wrangler secret put):
   //   SESSION_SECRET  - assinatura do cookie de sessao
