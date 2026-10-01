@@ -46,6 +46,8 @@ export type ResultadoArquivo = {
   motivo?: string;
   /** Nota de estorno: veio como ENTRADA (tpNF 0) de terceiro. Não soma nas entradas. */
   estorno?: boolean;
+  /** Só em `recusada` por ser de outra empresa (01/10): de quem ela é, para a tela avisar em destaque. */
+  outraEmpresa?: { cnpj: string; nome: string | null; cadastrada: string | null };
 };
 
 export type ResultadoLote = {
@@ -201,6 +203,7 @@ async function importarUma(
       arquivo: arq.nome,
       status: 'recusada',
       chave: nota.chave,
+      outraEmpresa: { cnpj: doc(nota.dest.cnpj), nome: nota.dest.nome ?? null, cadastrada: outra?.razao_social ?? null },
       motivo:
         `NF ${nota.numero ?? ''} não é desta empresa: o destinatário é ${nota.dest.cnpj}` +
         (nota.dest.nome ? ` (${nota.dest.nome})` : '') + '. ' +
