@@ -4646,6 +4646,79 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     const h: any = await (await chamar('/api/captura')).json();
     expect(h.buscas).toEqual([expect.objectContaining({ razao_social: 'MERCADO PILOTO LTDA', usuario_nome: 'Contadora', cstat: '117', documentos: 0 })]);
   });
+
+  // ---------------------------------------------------------------- busca automática (01/10)
+  const automatica = (corpo: unknown) => chamar(`/api/empresas/${empresaId}/sef/automatica`, corpo);
+  const rodar = async () => (await import('../src/captura/captura')).executarBuscaAutomatica(amb() as any);
+
+  it('busca automática: baixa quando a SEF libera e importa sozinha só as notas a partir da data, em nome de quem ligou', async () => {
+    expect((await automatica({ ligada: true })).status).toBe(400);
+    expect((await automatica({ ligada: true, desde: '2026-08-01' })).status).toBe(200);
+
+    respostas.push(() => new Response(retorno('118', 'ok', { ult: '2', qt: 2, lote: lote([
+      `<distNFeSC NSU="1" chAcesso="${CHAVE_ORIGINAL}">${NOTA}</distNFeSC>`,
+      `<distNFeSC NSU="2" chAcesso="${CHAVE_AGOSTO}">${NOTA_AGOSTO}</distNFeSC>`,
+    ]) })));
+    // 1ª rodada: a SEF está liberada, então só baixa para a caixa.
+    expect((await rodar())?.resultado).toMatch(/A SEF mandou 2 documento/);
+    expect(posts()).toHaveLength(1);
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
+
+    // 2ª rodada: a SEF só libera daqui a 12 h; importa o que é de 01/08 em diante.
+    expect((await rodar())?.resultado).toMatch(/Importou 1 nota/);
+    expect(posts()).toHaveLength(1);
+    const notas = db.consultar<any>('SELECT chave, origem, criado_por FROM notas');
+    expect(notas).toEqual([expect.objectContaining({ chave: CHAVE_AGOSTO, origem: 'sefaz-auto' })]);
+    const contadora = db.consultar<any>("SELECT id FROM usuarios WHERE email = 'contadora@alfacontabil.net'")[0].id;
+    expect(notas[0].criado_por).toBe(contadora);
+    expect(db.consultar<any>("SELECT envio_id FROM lotes_importacao WHERE origem = 'sefaz-auto'")[0].envio_id).toMatch(/^auto-\d{4}-\d{2}-\d{2}-/);
+
+    // 3ª rodada: nada a fazer. A nota de julho segue na caixa para a busca manual.
+    expect(await rodar()).toBeNull();
+    expect(posts()).toHaveLength(1);
+    const manual = await consultar('2026-07-01', '2026-07-31');
+    expect(manual.notas).toEqual([expect.objectContaining({ chave: CHAVE_ORIGINAL, noSistema: false })]);
+
+    const info: any = await (await chamar(`/api/empresas/${empresaId}/sef`)).json();
+    expect(info.automatica).toMatchObject({ ligada: true, desde: '2026-08-01', ligadaPor: 'Contadora' });
+    expect(info.automatica.resultado).toMatch(/Importou 1 nota/);
+    const imp: any = await (await chamar(`/api/empresas/${empresaId}/importacoes`)).json();
+    expect(JSON.stringify(imp)).toContain('sefaz-auto');
+  });
+
+  it('busca automática: cancelada e emitida pela própria empresa ficam na caixa, sem tentar de novo', async () => {
+    await automatica({ ligada: true, desde: '2026-07-01' });
+    const cancelaAgosto = semXmlDecl(EVENTO).replaceAll('42260711222333000181550010000001231000000019', CHAVE_AGOSTO);
+    respostas.push(() => new Response(retorno('118', 'ok', { ult: '3', qt: 3, lote: lote([
+      `<distNFeSC NSU="1" chAcesso="${CHAVE_ORIGINAL}">${NOTA}</distNFeSC>`,
+      `<distNFeSC NSU="2" chAcesso="${CHAVE_AGOSTO}">${NOTA_AGOSTO}</distNFeSC>`,
+      `<distNFeSC NSU="3">${cancelaAgosto}</distNFeSC>`,
+    ]) })));
+    await rodar();
+    // Uma nota "emitida pela empresa" (saída): o índice da caixa diz quem emitiu.
+    db.consultar(`UPDATE captura_caixa SET emit_cnpj = '11222333000181' WHERE chave = '${CHAVE_ORIGINAL}' AND tipo = 'nota'`);
+    expect((await rodar())?.resultado).toMatch(/2 ficaram na caixa/);
+    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
+    const caixa = db.consultar<any>("SELECT chave, auto_recusada FROM captura_caixa WHERE tipo = 'nota' ORDER BY chave");
+    expect(Object.fromEntries(caixa.map((c) => [c.chave, c.auto_recusada]))).toEqual({
+      [CHAVE_ORIGINAL]: 'emitida pela própria empresa', [CHAVE_AGOSTO]: 'cancelada na SEF',
+    });
+    expect(await rodar()).toBeNull();
+  });
+
+  it('busca automática: desligada, ou com quem ligou desativado, não consulta a SEF', async () => {
+    expect(await rodar()).toBeNull(); // nunca ligada
+    await automatica({ ligada: true, desde: '2026-10-01' });
+    await automatica({ ligada: false });
+    expect(await rodar()).toBeNull();
+    expect((await (await chamar(`/api/empresas/${empresaId}/sef`)).json() as any).automatica).toMatchObject({ ligada: false, desde: '2026-10-01' });
+
+    await automatica({ ligada: true, desde: '2026-10-01' });
+    db.consultar("UPDATE usuarios SET ativo = 0 WHERE email = 'contadora@alfacontabil.net'");
+    expect((await rodar())?.resultado).toMatch(/Parada: quem ligou/);
+    expect(posts()).toHaveLength(0);
+    db.consultar("UPDATE usuarios SET ativo = 1 WHERE email = 'contadora@alfacontabil.net'");
+  });
 });
 
 describe('01/10: intermediário da busca na SEF (a Cloudflare não renegocia TLS)', async () => {
