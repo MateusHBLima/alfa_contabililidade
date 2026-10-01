@@ -593,3 +593,22 @@ tr.nota-estorno td{background:#faf5ff}
 .sef-painel .toolbar{flex-wrap:wrap;gap:8px;align-items:center}
 .sef-lista{max-height:360px;overflow:auto;margin:8px 0}
 .sef-acoes{margin-top:8px}
+/* Campo de data dd/mm/aaaa com calendário em português (01/10) */
+.data-br{display:inline-flex;align-items:center;gap:2px;position:relative}
+.data-br input[type=text]{width:108px;font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);font-variant-numeric:tabular-nums}
+.data-br input[type=text].invalida{border-color:var(--danger);background:var(--danger-soft)}
+.data-br-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--primary);cursor:pointer}
+.data-br-btn:hover{background:var(--surface-2)}
+.cal-pop{position:absolute;z-index:90;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:10px;width:252px;font-size:13px}
+.cal-topo{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.cal-topo button,.cal-rodape button{border:0;background:none;color:var(--primary);cursor:pointer;font:inherit;font-size:16px;padding:2px 8px;border-radius:6px}
+.cal-rodape{display:flex;justify-content:space-between;margin-top:6px}
+.cal-rodape button{font-size:12px}
+.cal-topo button:hover,.cal-rodape button:hover{background:var(--surface-2)}
+.cal-grade{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;text-align:center}
+.cal-dia-sem{font-size:11px;color:var(--muted, #6b7a90);padding:2px 0}
+.cal-grade button{border:0;background:none;padding:6px 0;border-radius:6px;cursor:pointer;font:inherit;color:inherit}
+.cal-grade button:hover:not(:disabled){background:var(--surface-2)}
+.cal-grade button.hoje{outline:1px solid var(--primary-soft);font-weight:600}
+.cal-grade button.sel{background:var(--primary);color:#fff}
+.cal-grade button:disabled{opacity:.35;cursor:default}
