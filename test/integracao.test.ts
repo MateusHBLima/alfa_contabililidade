@@ -4548,14 +4548,11 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     expect(posts()).toHaveLength(1);
   });
 
-  it('pede o certificado quando há mais de um e ainda não foi escolhido', async () => {
+  it('com mais de um certificado, a tela recebe a lista e se cada um está pronto para a busca', async () => {
     await repo.gravarCertificado({
       nome: 'Alfa', titular: 'ALFA', documento: '12345678000195', tipo: 'e-CNPJ', emissor: 'AC', serial: 's2',
       validoDe: '2026-01-01T00:00:00Z', validoAte: '2099-01-01T00:00:00Z', cloudflareId: 'outro-id',
     });
-    const r = await chamar(`/api/empresas/${empresaId}/sef/consultar`, { de: '2026-07-01', ate: '2026-07-31' });
-    expect(r.status).toBe(400);
-    expect(((await r.json()) as any).erro).toMatch(/Escolha o certificado/);
     const info: any = await (await chamar(`/api/empresas/${empresaId}/sef`)).json();
     expect(info.certificados.map((c: any) => [c.nome, c.ligado])).toEqual(expect.arrayContaining([['Isa', true], ['Alfa', false]]));
     expect(JSON.stringify(info)).not.toMatch(/cloudflare_id|7329489b/);
@@ -4584,6 +4581,57 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     db.consultar("DELETE FROM papel_permissoes WHERE permissao = 'notas.importar'");
     expect((await chamar(`/api/empresas/${empresaId}/sef/consultar`, { de: '2026-07-01', ate: '2026-07-31' })).status).toBe(403);
     expect(chamadas.filter((c) => c.metodo === 'POST')).toHaveLength(0);
+  });
+
+  it('com dois certificados, descobre qual a SEF aceita para a empresa e grava', async () => {
+    // Alfa (e-CNPJ) vem primeiro na lista (vale mais), mas não é contabilista desta empresa.
+    const ALFA_CF = 'alfa-cf-id';
+    const alfaId = await repo.gravarCertificado({
+      nome: 'Alfa', titular: 'ALFA CONTABILIDADE', documento: '12345678000195', tipo: 'e-CNPJ', emissor: 'AC', serial: 's-alfa',
+      validoDe: '2026-01-01T00:00:00Z', validoAte: '2099-12-31T00:00:00Z', cloudflareId: ALFA_CF,
+    });
+    const quem: string[] = [];
+    const bindingAlfa = {
+      fetch: async (url: string, init?: RequestInit) => {
+        if ((init?.method ?? 'GET') === 'GET') return new Response(WSDL, { status: 200 });
+        quem.push('Alfa');
+        return new Response(retorno('8002', 'Rejeição: Requisitante não é Contabilista do CNPJ/CPF informado'));
+      },
+    };
+    const extra = { MTLS_alfa_cf_id: bindingAlfa };
+    respostas.push(() => { quem.push('Isa'); return new Response(retorno('117', 'nada', { ult: '0' })); });
+    const r = await consultar('2026-07-01', '2026-07-31', extra);
+    expect(quem).toEqual(['Alfa', 'Isa']);
+    expect(r.download).toMatchObject({ consultou: true, erro: null, certificado: 'Isa' });
+    expect(estado()).toMatchObject({ certificado_id: certId, ultimo_cstat: '117' });
+    expect(estado().certificado_confirmado_em).toBeTruthy();
+    const info: any = await (await chamar(`/api/empresas/${empresaId}/sef`)).json();
+    expect(info.estado.certificadoConfirmado).toBe(certId);
+
+    // Da próxima vez, vai direto no da Isa.
+    liberar();
+    respostas.push(() => { quem.push('Isa'); return new Response(retorno('117', 'nada', { ult: '0' })); });
+    await consultar('2026-07-01', '2026-07-31', extra);
+    expect(quem).toEqual(['Alfa', 'Isa', 'Isa']);
+
+    // Escolhido à mão: só ele, sem tentar o outro.
+    liberar();
+    const soAlfa = await chamar(`/api/empresas/${empresaId}/sef/consultar`, { de: '2026-07-01', ate: '2026-07-31', certificadoId: alfaId }, extra);
+    expect(((await soAlfa.json()) as any).download.erro).toMatch(/não está cadastrado na SEF como contabilista/);
+    expect(quem).toEqual(['Alfa', 'Isa', 'Isa', 'Alfa']);
+  });
+
+  it('se nenhum certificado for aceito, diz isso e a empresa fica sem certificado confirmado', async () => {
+    await repo.gravarCertificado({
+      nome: 'Alfa', titular: 'ALFA', documento: '12345678000195', tipo: 'e-CNPJ', emissor: 'AC', serial: 's-alfa2',
+      validoDe: '2026-01-01T00:00:00Z', validoAte: '2099-12-31T00:00:00Z', cloudflareId: 'alfa-cf-id',
+    });
+    const recusa = { fetch: async (_u: string, init?: RequestInit) => (init?.method ?? 'GET') === 'GET'
+      ? new Response(WSDL) : new Response(retorno('8002', 'Rejeição: Requisitante não é Contabilista')) };
+    respostas.push(() => new Response(retorno('8002', 'Rejeição: Requisitante não é Contabilista')));
+    const r = await consultar('2026-07-01', '2026-07-31', { MTLS_alfa_cf_id: recusa });
+    expect(r.download.erro).toMatch(/Nenhum dos certificados guardados \(.*Isa.*\) está cadastrado na SEF como contabilista desta empresa/);
+    expect(estado().certificado_confirmado_em).toBeNull();
   });
 
   it('o histórico mostra quem consultou e o resultado', async () => {
