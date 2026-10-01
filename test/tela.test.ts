@@ -603,8 +603,9 @@ describe('tela: busca na SEF (30/09)', () => {
     expect(APP).toContain('/sef/importar');
   });
   it('consultar e importar mostram a roda girando, o tempo e a contagem', () => {
-    expect(APP).toContain('Consultando a SEF… ${seg} s');
-    expect(APP).toMatch(/while \(r\.download\.temMais && !r\.download\.erro && rodadas < SEF_RODADAS_MAX\)/);
+    expect(APP).toContain('Consultando a SEF… ${tempo}');
+    expect(APP).toMatch(/while \(r\.download\.temMais && !r\.download\.erro && rodadas < SEF_RODADAS_MAX && !parou\)/);
+    expect(APP).toContain("rotuloParar: 'Parar e ver o que já veio'");
     expect(APP).toContain('Importando da SEF…');
   });
   it('a tela do administrador só testa e mostra o histórico, sem ligar busca automática', () => {
