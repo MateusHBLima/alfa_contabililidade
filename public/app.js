@@ -2211,7 +2211,7 @@ document.addEventListener('click', async (ev) => {
  * fazendo e impede clique duplo. Pedido de 23/09 ("animacao de carregando ate que
  * finalize"). Quem prefere menos movimento ve so o texto.
  */
-function mostrarEspera(texto) {
+function mostrarEspera(texto, opcoes = {}) {
   let el = $('#espera');
   if (!el) {
     el = document.createElement('div');
@@ -2219,15 +2219,37 @@ function mostrarEspera(texto) {
     el.className = 'espera';
     el.setAttribute('role', 'status');
     el.setAttribute('aria-live', 'polite');
-    el.innerHTML = '<div class="espera-caixa"><span class="espera-roda" aria-hidden="true"></span><span class="espera-texto"></span></div>';
+    el.innerHTML = '<div class="espera-caixa"><span class="espera-roda" aria-hidden="true"></span><span class="espera-texto"></span>'
+      + '<button type="button" class="btn sm espera-parar hidden"></button></div>';
     document.body.appendChild(el);
+    el.querySelector('.espera-parar').addEventListener('click', (ev) => {
+      const b = ev.currentTarget;
+      b.disabled = true;
+      b.textContent = 'parando depois deste lote…';
+      b._aoParar?.();
+    });
   }
   el.querySelector('.espera-texto').textContent = texto;
+  // Botão opcional de parar (01/10, busca na SEF): só aparece para quem passar `parar`.
+  const parar = el.querySelector('.espera-parar');
+  if ('parar' in opcoes) {
+    parar.classList.toggle('hidden', !opcoes.parar);
+    if (opcoes.parar && parar._aoParar !== opcoes.parar) {
+      parar._aoParar = opcoes.parar;
+      parar.disabled = false;
+      parar.textContent = opcoes.rotuloParar || 'Parar';
+    }
+  }
   el.classList.remove('hidden');
 }
 
 function esconderEspera() {
-  $('#espera')?.classList.add('hidden');
+  const el = $('#espera');
+  if (!el) return;
+  el.classList.add('hidden');
+  const parar = el.querySelector('.espera-parar');
+  parar.classList.add('hidden');
+  parar._aoParar = null;
 }
 
 // ------------------------------------------------------------------ nota cancelada
@@ -4082,8 +4104,8 @@ async function abrirPainelSef() {
 $('#btn-sef').addEventListener('click', abrirPainelSef);
 $('#sef-fechar').addEventListener('click', () => $('#painel-sef').classList.add('hidden'));
 
-/** Mais que isso num clique só, a tela para e pede para consultar de novo (12 × 50 = 600 documentos). */
-const SEF_RODADAS_MAX = 12;
+/** Mais que isso num clique só, a tela para e pede para consultar de novo (40 × 50 = 2.000 documentos). */
+const SEF_RODADAS_MAX = 40;
 
 $('#form-sef').addEventListener('submit', async (ev) => {
   ev.preventDefault();
@@ -4093,16 +4115,24 @@ $('#form-sef').addEventListener('submit', async (ev) => {
   const saida = $('#sef-resultado');
   saida.innerHTML = '';
   $('#sef-consultar').disabled = true;
-  // A SEF pode levar alguns segundos por lote. A roda gira, o relógio anda e a
-  // contagem de documentos sobe: ninguém acha que travou e clica de novo.
+  // A SEF pode levar alguns segundos por lote e não diz quantos faltam. A roda gira,
+  // o relógio anda, e a tela conta os lotes, os documentos e as notas do período que
+  // já apareceram. "Parar" encerra depois do lote em andamento e mostra o que já veio
+  // (o resto continua na SEF e vem na próxima consulta).
   const inicio = Date.now();
   let recebidos = 0;
+  let lotes = 0;
+  let doPeriodo = 0;
+  let parou = false;
   const texto = () => {
     const seg = Math.round((Date.now() - inicio) / 1000);
-    return `Consultando a SEF… ${seg} s` + (recebidos ? ` · ${recebidos} documento(s) recebido(s)` : '') +
-      '\nNão feche a tela: a SEF entrega em lotes de 50.';
+    const tempo = seg >= 60 ? `${Math.floor(seg / 60)} min ${String(seg % 60).padStart(2, '0')} s` : `${seg} s`;
+    if (!lotes) return `Consultando a SEF… ${tempo}\nConectando e pedindo o primeiro lote.`;
+    return `Consultando a SEF… ${tempo}\n${lotes} lote(s) recebido(s) · ${recebidos} documento(s), entre notas e eventos\n`
+      + `${doPeriodo} nota(s) emitidas no período até agora\nA SEF entrega de 50 em 50 e não avisa quantos faltam.`;
   };
-  mostrarEspera(texto());
+  const parar = () => { parou = true; };
+  mostrarEspera(texto(), { parar, rotuloParar: 'Parar e ver o que já veio' });
   const relogio = setInterval(() => mostrarEspera(texto()), 1000);
   try {
     const certificadoId = $('#sef-cert').classList.contains('hidden') ? null : $('#sef-cert').value || null;
@@ -4114,10 +4144,12 @@ $('#form-sef').addEventListener('submit', async (ev) => {
       r = await api(`/api/empresas/${estado.empresaId}/sef/consultar`, { method: 'POST', body: JSON.stringify({ de, ate, certificadoId }) });
       rodadas++;
       consultou = consultou || r.download.consultou;
+      if (r.download.consultou) lotes++;
       recebidos += r.download.documentos;
+      doPeriodo = r.notas.length;
       canceladas += r.canceladasAplicadas || 0;
       mostrarEspera(texto());
-    } while (r.download.temMais && !r.download.erro && rodadas < SEF_RODADAS_MAX);
+    } while (r.download.temMais && !r.download.erro && rodadas < SEF_RODADAS_MAX && !parou);
     sefNotas = r.notas;
     const d = r.download;
     const avisos = [];
@@ -4125,7 +4157,7 @@ $('#form-sef').addEventListener('submit', async (ev) => {
     if (consultou && !d.erro) {
       const quanto = recebidos ? `A SEF mandou ${recebidos} documento(s) novo(s).` : 'Nada novo na SEF desde a última consulta.';
       const depois = d.temMais
-        ? ' Ainda tem mais na SEF: aperte Consultar de novo para baixar o resto.'
+        ? (parou ? ' Você parou a busca: o resto continua na SEF e vem quando apertar Consultar de novo.' : ' Ainda tem mais na SEF: aperte Consultar de novo para baixar o resto.')
         : (d.liberadaEm ? ` Próxima consulta à SEF liberada a partir de ${dataHora(d.liberadaEm)}.` : '');
       const cert = d.certificado ? ` Certificado aceito pela SEF para esta empresa: ${d.certificado}.` : '';
       avisos.push(`<p class="tiny">${esc(quanto + depois + cert)} (${Math.round((Date.now() - inicio) / 1000)} s)</p>`);

@@ -500,7 +500,8 @@ tr.rel-notas>td{background:#f6f9fd;padding:8px 10px 14px 26px}
 .espera-caixa{display:flex;align-items:center;gap:12px;background:var(--surface);border-radius:var(--radius);padding:16px 22px;box-shadow:var(--shadow);font-weight:600}
 .espera-roda{width:20px;height:20px;border-radius:50%;border:3px solid var(--primary-soft);border-top-color:var(--primary);animation:girar .8s linear infinite}
 @keyframes girar{to{transform:rotate(360deg)}}
-.espera-texto{white-space:pre-line}
+.espera-texto{white-space:pre-line;line-height:1.5}
+.espera-caixa .espera-parar{margin-left:10px;align-self:center;font-weight:500}
 @media (prefers-reduced-motion: reduce){.espera-roda{animation:none;border-top-color:var(--primary-soft)}}
 
 /* Linha aberta a partir de uma busca: pisca uma vez para o olho achar. */
