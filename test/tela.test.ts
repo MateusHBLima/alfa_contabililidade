@@ -614,3 +614,16 @@ describe('tela: busca na SEF (30/09)', () => {
     expect(HTML + APP).not.toMatch(/data-cap-ligar|busca automática das notas/);
   });
 });
+
+describe('tela: datas no formato brasileiro (01/10)', () => {
+  it('todo campo de data vira dd/mm/aaaa com calendário em português', () => {
+    expect(APP).toContain("document.querySelectorAll('input[type=\"date\"]').forEach(campoDataBr);");
+    expect(APP).toContain("txt.placeholder = 'dd/mm/aaaa';");
+    expect(APP).toContain("const MESES_BR = ['janeiro'");
+    expect(APP).toContain("const DIAS_BR = ['Dom', 'Seg'");
+  });
+  it('a busca na SEF já vem do dia 1º do mês anterior e descobre o certificado sozinha', () => {
+    expect(APP).toContain('new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1)');
+    expect(APP).toContain('certificado: descobrir sozinho');
+  });
+});

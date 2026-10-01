@@ -1512,14 +1512,22 @@ export class Repo {
   async registrarConsultaSef(empresaId: string, c: {
     quando: string; proxima: string; cStat: string | null; motivo: string; erro: string | null;
     ultNsu: string | null; nsuDe: string | null; documentos: number;
+    /** O certificado que a SEF aceitou para esta empresa (fica gravado como o dela). */
+    certificadoAceito?: string | null;
+    /** A SEF recusou todos por vínculo: a empresa deixa de ter certificado confirmado. */
+    nenhumVinculado?: boolean;
   }): Promise<void> {
     this.exigirEmpresa(empresaId);
     await this.db.batch([
       this.db.prepare(
         `UPDATE captura_empresas SET proxima_consulta = ?, ultima_consulta = ?, ultimo_cstat = ?, ultimo_motivo = ?,
-            ultimo_erro = ?, ult_nsu = COALESCE(?, ult_nsu), atualizado_em = ?
+            ultimo_erro = ?, ult_nsu = COALESCE(?, ult_nsu), atualizado_em = ?,
+            certificado_id = COALESCE(?, certificado_id),
+            certificado_confirmado_em = CASE WHEN ? IS NOT NULL THEN ? WHEN ? = 1 THEN NULL ELSE certificado_confirmado_em END
           WHERE tenant_id = ? AND empresa_id = ?`,
-      ).bind(c.proxima, c.quando, c.cStat, c.motivo, c.erro, c.ultNsu, c.quando, this.tenant, empresaId),
+      ).bind(c.proxima, c.quando, c.cStat, c.motivo, c.erro, c.ultNsu, c.quando,
+        c.certificadoAceito ?? null, c.certificadoAceito ?? null, c.quando, c.nenhumVinculado ? 1 : 0,
+        this.tenant, empresaId),
       this.db.prepare(
         `INSERT INTO captura_buscas (id, tenant_id, empresa_id, usuario_id, quando, cstat, motivo, nsu_de, nsu_ate, documentos, erro)
          VALUES (?,?,?,?,?,?,?,?,?,?,?)`,

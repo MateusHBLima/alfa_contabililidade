@@ -2076,7 +2076,8 @@ app.get('/api/empresas/:id/sef', async (c) => {
   return c.json({
     certificados: await certificadosDaBusca(repo, c.env as unknown as AmbienteCaptura),
     estado: e ? {
-      certificadoId: e.certificado_id, liberadaEm: e.proxima_consulta, ultimaConsulta: e.ultima_consulta,
+      certificadoId: e.certificado_id, certificadoConfirmado: e.certificado_confirmado_em ? e.certificado_id : null,
+      liberadaEm: e.proxima_consulta, ultimaConsulta: e.ultima_consulta,
       ultimoMotivo: e.ultimo_motivo, ultimoErro: e.ultimo_erro, naCaixa: e.na_caixa,
     } : null,
   });
@@ -2098,12 +2099,18 @@ app.post('/api/empresas/:id/sef/consultar', async (c) => {
 
   const certs = await repo.listarCertificados();
   if (!certs.length) return c.json({ erro: 'Nenhum certificado no cofre. Envie o A1 em Administração › Certificados.' }, 400);
-  const escolhido = corpo.certificadoId ?? (await repo.estadoSef(empresaId))?.certificado_id ?? (certs.length === 1 ? certs[0].id : null);
-  // O certificado escolhido antes pode ter sido substituído; com um só, vale ele.
-  const cert = (escolhido ? certs.find((x) => x.id === escolhido) : null) ?? (certs.length === 1 ? certs[0] : null);
-  if (!cert) return c.json({ erro: 'Escolha o certificado que vai buscar as notas desta empresa.' }, 400);
+  // Escolhido à mão: só ele. Sem escolha: todos, o que já funcionou para a empresa primeiro.
+  let candidatos = certs;
+  if (corpo.certificadoId) {
+    const escolhido = certs.find((x) => x.id === corpo.certificadoId);
+    if (!escolhido) return c.json({ erro: 'Certificado não encontrado.' }, 400);
+    candidatos = [escolhido];
+  } else {
+    const preferido = (await repo.estadoSef(empresaId))?.certificado_id;
+    candidatos = [...certs].sort((a, b) => Number(b.id === preferido) - Number(a.id === preferido));
+  }
 
-  const download = await baixarDaSef(env, repo, empresa, cert);
+  const download = await baixarDaSef(env, repo, empresa, candidatos);
   const canceladas = await aplicarEventosDaCaixa(env, repo, empresaId);
   const notas = (await repo.notasDaCaixa(empresaId, { de: corpo.de, ate: corpo.ate })).map((n) => ({
     chave: n.chave, numero: n.numero, fornecedor: n.emit_nome, cnpj: n.emit_cnpj, emissao: n.dh_emi, valor: n.valor,

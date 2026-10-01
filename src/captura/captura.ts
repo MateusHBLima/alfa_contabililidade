@@ -150,15 +150,23 @@ export type ResultadoDownload = {
   /** Parou no limite de lotes por clique: tem mais esperando na SEF. */
   temMais: boolean;
   liberadaEm: string | null;
+  /** O certificado que a SEF aceitou nesta consulta (e que fica gravado para a empresa). */
+  certificado?: string | null;
 };
+
+export type CertCandidato = CertParaBusca & { nome: string; valido_ate: string };
 
 /**
  * Baixa da SEF o que houver de novo para a empresa e guarda na caixa.
  * Não importa nada. Quem chama já conferiu a permissão de importar.
+ *
+ * `certs` vem em ordem de preferência: o que já funcionou para esta empresa primeiro.
+ * Se a SEF recusar um por vínculo (8002: o titular não é contabilista desta empresa),
+ * tenta o próximo na mesma hora. Uma recusa por vínculo não é consulta repetida.
  */
 export async function baixarDaSef(
   env: AmbienteCaptura, repo: Repo, empresa: { id: string; cnpj: string },
-  cert: CertParaBusca & { nome: string; valido_ate: string }, agora = new Date(),
+  certs: CertCandidato[], agora = new Date(),
 ): Promise<ResultadoDownload> {
   const quando = agora.toISOString();
   const estado = await repo.estadoSef(empresa.id);
@@ -166,15 +174,22 @@ export async function baixarDaSef(
     ({ consultou: false, documentos: 0, frase, erro, temMais: false, liberadaEm: estado?.proxima_consulta ?? null });
 
   // O que se resolve sem chamar a SEF vem antes, e não gasta a liberação.
-  if (cert.valido_ate < quando) return semConsulta('', `O certificado ${cert.nome} venceu em ${cert.valido_ate.slice(0, 10).split('-').reverse().join('/')}. Envie o novo na tela Certificados.`);
-  const busca = buscaComCertificado(env, cert);
-  if (!busca) return semConsulta('', cert.guardado_em === 'ponte'
-    ? 'O intermediário da busca na SEF não está configurado no sistema. Fale com a Planee.'
-    : `O certificado ${cert.nome} está no cofre da Cloudflare, que não serve para a SEF. Envie o .pfx de novo em Administração › Certificados.`);
+  const prontos: { cert: CertCandidato; busca: Busca }[] = [];
+  let motivo = '';
+  for (const cert of certs) {
+    const busca = buscaComCertificado(env, cert);
+    if (cert.valido_ate < quando) motivo ||= `O certificado ${cert.nome} venceu em ${cert.valido_ate.slice(0, 10).split('-').reverse().join('/')}. Envie o novo na tela Certificados.`;
+    else if (!busca) {
+      motivo ||= cert.guardado_em === 'ponte'
+        ? 'O intermediário da busca na SEF não está configurado no sistema. Fale com a Planee.'
+        : `O certificado ${cert.nome} está no cofre da Cloudflare, que não serve para a SEF. Envie o .pfx de novo em Administração › Certificados.`;
+    } else prontos.push({ cert, busca });
+  }
+  if (!prontos.length) return semConsulta('', motivo || 'Nenhum certificado no cofre. Envie o A1 em Administração › Certificados.');
   const doc = documentoLimpo(empresa.cnpj);
   if (!doc) return semConsulta('', 'O CNPJ desta empresa está inválido no cadastro.');
 
-  if (!(await repo.reservarConsultaSef(empresa.id, cert.id, quando))) {
+  if (!(await repo.reservarConsultaSef(empresa.id, prontos[0]!.cert.id, quando))) {
     const depois = await repo.estadoSef(empresa.id);
     return { ...semConsulta('A SEF só libera uma nova consulta desta empresa depois do horário abaixo. Mostrando o que já foi baixado.'), liberadaEm: depois?.proxima_consulta ?? null };
   }
@@ -184,15 +199,29 @@ export async function baixarDaSef(
   let documentos = 0;
   let ultimo: { cStat: string; xMotivo: string; qtd: number } | null = null;
   let erro: string | null = null;
+  let aceito: CertCandidato | null = null;
+  const recusados: string[] = [];
   try {
-    const { operacao } = await descobrirOperacao(busca);
     for (let lote = 0; lote < LOTES_POR_CONSULTA; lote++) {
-      const ret = await consultarSef(busca, operacao, montarPedido(doc, nsu));
+      let ret: Awaited<ReturnType<typeof consultarSef>> | null = null;
+      // No primeiro lote, procura o certificado que a SEF aceita para esta empresa.
+      const aceitoId: string | null = aceito ? (aceito as CertCandidato).id : null;
+      const tentar: { cert: CertCandidato; busca: Busca }[] = aceitoId ? prontos.filter((x) => x.cert.id === aceitoId) : prontos;
+      for (const p of tentar) {
+        const { operacao } = await descobrirOperacao(p.busca);
+        ret = await consultarSef(p.busca, operacao, montarPedido(doc, nsu));
+        if (ret.cStat === '8002' && !aceito) { recusados.push(p.cert.nome); continue; }
+        if (ret.cStat === '118' || ret.cStat === '117') aceito = p.cert;
+        break;
+      }
+      if (!ret) break;
       if (ret.cStat !== '118' && ret.cStat !== '117') {
         ultimo = { cStat: ret.cStat, xMotivo: ret.xMotivo, qtd: 0 };
         // NSU fora da janela de 3 meses: na próxima, volta ao começo do que a SEF tem.
         if (ret.cStat === '632' || ret.cStat === '589') nsu = '0';
-        erro = explicarCStat(ret.cStat, ret.xMotivo);
+        erro = ret.cStat === '8002' && recusados.length > 1
+          ? `Nenhum dos certificados guardados (${recusados.join(', ')}) está cadastrado na SEF como contabilista desta empresa.`
+          : explicarCStat(ret.cStat, ret.xMotivo);
         break;
       }
       const docs = ret.cStat === '118' && ret.loteDistComp ? abrirLote(await descompactar(ret.loteDistComp)) : [];
@@ -221,11 +250,10 @@ export async function baixarDaSef(
   await repo.registrarConsultaSef(empresa.id, {
     quando, proxima, cStat: ultimo?.cStat ?? null, motivo: frase, erro,
     ultNsu: nsu, nsuDe, documentos,
+    certificadoAceito: aceito?.id ?? null,
+    nenhumVinculado: !aceito && ultimo?.cStat === '8002' && recusados.length === prontos.length,
   });
-  return {
-    consultou: true, documentos, erro, temMais, liberadaEm: proxima,
-    frase,
-  };
+  return { consultou: true, documentos, erro, temMais, liberadaEm: proxima, frase, certificado: aceito?.nome ?? null };
 }
 
 async function lerDaCaixa(env: AmbienteCaptura, r2Chave: string): Promise<string | null> {

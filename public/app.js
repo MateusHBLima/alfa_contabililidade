@@ -4044,8 +4044,9 @@ async function abrirPainelSef() {
   painel.classList.remove('hidden');
   $('#sef-resultado').innerHTML = '';
   if (!$('#sef-de').value) {
+    // Do dia 1º do mês anterior até hoje: no começo do mês, o mês que fechou é o que ela quer.
     const hoje = new Date();
-    $('#sef-de').value = isoLocal(new Date(hoje.getFullYear(), hoje.getMonth(), 1));
+    $('#sef-de').value = isoLocal(new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1));
     $('#sef-ate').value = isoLocal(hoje);
   }
   // A SEF guarda o mês atual e os dois anteriores.
@@ -4054,12 +4055,19 @@ async function abrirPainelSef() {
   $('#sef-info').textContent = 'carregando…';
   try {
     const r = await api(`/api/empresas/${estado.empresaId}/sef`);
+    // Com mais de um certificado, o padrão é o sistema descobrir qual a SEF aceita para a
+    // empresa (e gravar). Escolher um na lista força só aquele.
     const sel = $('#sef-cert');
-    sel.innerHTML = r.certificados.map((c) => `<option value="${esc(c.id)}"${r.estado?.certificadoId === c.id ? ' selected' : ''}>certificado ${esc(c.nome)}${c.ligado ? '' : ' (não ligado)'}</option>`).join('');
+    const confirmado = r.certificados.find((c) => c.id === r.estado?.certificadoConfirmado);
+    sel.innerHTML = '<option value="">certificado: descobrir sozinho</option>' +
+      r.certificados.map((c) => `<option value="${esc(c.id)}">só o certificado ${esc(c.nome)}${c.ligado ? '' : ' (não ligado)'}</option>`).join('');
+    sel.value = '';
     sel.classList.toggle('hidden', r.certificados.length < 2);
     const partes = [];
     if (!r.certificados.length) partes.push('Nenhum certificado no cofre: envie o A1 em Administração › Certificados.');
+    else if (confirmado) partes.push(`Certificado desta empresa na SEF: ${confirmado.nome}.`);
     else if (r.certificados.length === 1) partes.push(`Certificado: ${r.certificados[0].nome}.`);
+    else partes.push('O sistema vai descobrir qual certificado a SEF aceita para esta empresa e guardar.');
     if (r.estado?.ultimaConsulta) partes.push(`Última consulta à SEF: ${dataHora(r.estado.ultimaConsulta)}.`);
     if (r.estado?.liberadaEm && new Date(r.estado.liberadaEm) > new Date()) {
       partes.push(`Nova consulta liberada pela SEF a partir de ${dataHora(r.estado.liberadaEm)}; até lá, a busca usa o que já foi baixado.`);
@@ -4119,7 +4127,8 @@ $('#form-sef').addEventListener('submit', async (ev) => {
       const depois = d.temMais
         ? ' Ainda tem mais na SEF: aperte Consultar de novo para baixar o resto.'
         : (d.liberadaEm ? ` Próxima consulta à SEF liberada a partir de ${dataHora(d.liberadaEm)}.` : '');
-      avisos.push(`<p class="tiny">${esc(quanto + depois)} (${Math.round((Date.now() - inicio) / 1000)} s)</p>`);
+      const cert = d.certificado ? ` Certificado aceito pela SEF para esta empresa: ${d.certificado}.` : '';
+      avisos.push(`<p class="tiny">${esc(quanto + depois + cert)} (${Math.round((Date.now() - inicio) / 1000)} s)</p>`);
     } else if (!consultou && !d.erro) {
       avisos.push(`<p class="tiny">${esc(d.frase)}${d.liberadaEm ? ` Liberada a partir de ${esc(dataHora(d.liberadaEm))}.` : ''}</p>`);
     }
@@ -4209,3 +4218,149 @@ $('#cap-testar').addEventListener('click', async () => {
     $('#cap-testar').disabled = false;
   }
 });
+
+/* ---- Campo de data no formato brasileiro (01/10) ----
+   O <input type="date"> mostra o formato e o calendário no idioma do Chrome de quem
+   usa: no Chrome em inglês aparecia mm/dd/aaaa e os meses em inglês. Aqui cada campo
+   de data ganha uma caixa de texto dd/mm/aaaa (digita só os números) e um calendário
+   em português. O campo original continua existindo, escondido, com o valor em
+   AAAA-MM-DD: o resto do código lê e escreve nele como sempre, e recebe o 'change'. */
+const MESES_BR = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+const DIAS_BR = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+const valorNativo = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+
+function isoParaBr(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+}
+function brParaIso(br) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(br || '');
+  if (!m) return null;
+  const d = new Date(+m[3], +m[2] - 1, +m[1]);
+  if (d.getFullYear() !== +m[3] || d.getMonth() !== +m[2] - 1 || d.getDate() !== +m[1]) return null;
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+let calAberto = null;
+function fecharCalendario() {
+  calAberto?.remove();
+  calAberto = null;
+}
+document.addEventListener('mousedown', (ev) => {
+  if (calAberto && !calAberto.contains(ev.target) && !ev.target.closest('.data-br-btn')) fecharCalendario();
+});
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') fecharCalendario(); });
+
+function campoDataBr(orig) {
+  if (orig.dataset.dataBr) return;
+  orig.dataset.dataBr = '1';
+  const caixa = document.createElement('span');
+  caixa.className = 'data-br';
+  const txt = document.createElement('input');
+  txt.type = 'text';
+  txt.inputMode = 'numeric';
+  txt.placeholder = 'dd/mm/aaaa';
+  txt.maxLength = 10;
+  txt.autocomplete = 'off';
+  txt.style.cssText = orig.style.cssText;
+  txt.setAttribute('aria-label', document.querySelector(`label[for="${orig.id}"]`)?.textContent?.trim() || 'data');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'data-br-btn';
+  btn.title = 'Abrir o calendário';
+  btn.setAttribute('aria-label', 'Abrir o calendário');
+  btn.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="12" rx="2" fill="none" stroke="currentColor"/><path d="M1.5 6h13M5 1v3M11 1v3" stroke="currentColor"/></svg>';
+  orig.parentNode.insertBefore(caixa, orig);
+  caixa.append(txt, btn, orig);
+  orig.style.display = 'none';
+  // O rótulo "for" aponta para o campo escondido: clicar nele foca a caixa de texto.
+  document.querySelector(`label[for="${orig.id}"]`)?.addEventListener('click', (ev) => { ev.preventDefault(); txt.focus(); });
+
+  // Quem escreve no campo original (limpar datas, período padrão) atualiza a caixa.
+  Object.defineProperty(orig, 'value', {
+    configurable: true,
+    get() { return valorNativo.get.call(orig); },
+    set(v) { valorNativo.set.call(orig, v); txt.value = isoParaBr(valorNativo.get.call(orig)); txt.classList.remove('invalida'); },
+  });
+  txt.value = isoParaBr(orig.value);
+
+  const gravar = (iso) => {
+    txt.classList.remove('invalida');
+    if (iso === valorNativo.get.call(orig)) { txt.value = isoParaBr(iso); return; }
+    valorNativo.set.call(orig, iso);
+    txt.value = isoParaBr(iso);
+    orig.dispatchEvent(new Event('input', { bubbles: true }));
+    orig.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const confirmar = () => {
+    const t = txt.value.trim();
+    if (!t) return gravar('');
+    const iso = brParaIso(t);
+    if (!iso) { txt.classList.add('invalida'); txt.title = 'Data inválida: use dd/mm/aaaa'; return; }
+    txt.title = '';
+    gravar(iso);
+  };
+  txt.addEventListener('input', () => {
+    // Só números; as barras entram sozinhas: 01092026 → 01/09/2026.
+    const n = txt.value.replace(/\D/g, '').slice(0, 8);
+    txt.value = n.length > 4 ? `${n.slice(0, 2)}/${n.slice(2, 4)}/${n.slice(4)}` : n.length > 2 ? `${n.slice(0, 2)}/${n.slice(2)}` : n;
+    txt.classList.remove('invalida');
+    if (n.length === 8) confirmar();
+  });
+  txt.addEventListener('blur', confirmar);
+  txt.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') confirmar(); });
+
+  btn.addEventListener('click', () => {
+    if (calAberto && calAberto.dataset.dono === orig.id) return fecharCalendario();
+    fecharCalendario();
+    const atual = valorNativo.get.call(orig);
+    const base = atual ? new Date(atual + 'T12:00:00') : new Date();
+    let ano = base.getFullYear(), mes = base.getMonth();
+    const pop = document.createElement('div');
+    pop.className = 'cal-pop';
+    pop.dataset.dono = orig.id;
+    const desenhar = () => {
+      const hoje = isoLocalData(new Date());
+      const sel = valorNativo.get.call(orig);
+      const min = orig.min || '';
+      const max = orig.max || '';
+      const primeiro = new Date(ano, mes, 1).getDay();
+      const dias = new Date(ano, mes + 1, 0).getDate();
+      let h = `<div class="cal-topo"><button type="button" data-cal="-1" aria-label="Mês anterior">‹</button>
+        <b>${MESES_BR[mes][0].toUpperCase() + MESES_BR[mes].slice(1)} de ${ano}</b><button type="button" data-cal="1" aria-label="Próximo mês">›</button></div>
+        <div class="cal-grade">${DIAS_BR.map((d) => `<span class="cal-dia-sem">${d}</span>`).join('')}`;
+      for (let i = 0; i < primeiro; i++) h += '<span></span>';
+      for (let d = 1; d <= dias; d++) {
+        const iso = `${ano}-${String(mes + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        const fora = (min && iso < min) || (max && iso > max);
+        h += `<button type="button" data-dia="${iso}" class="${iso === sel ? 'sel' : ''}${iso === hoje ? ' hoje' : ''}"${fora ? ' disabled' : ''}>${d}</button>`;
+      }
+      h += '</div><div class="cal-rodape"><button type="button" data-cal="hoje">Hoje</button><button type="button" data-cal="limpar">Limpar</button></div>';
+      pop.innerHTML = h;
+    };
+    pop.addEventListener('click', (ev) => {
+      const b = ev.target.closest('button');
+      if (!b || b.disabled) return;
+      if (b.dataset.dia) { gravar(b.dataset.dia); fecharCalendario(); txt.focus(); return; }
+      if (b.dataset.cal === 'hoje') { gravar(isoLocalData(new Date())); fecharCalendario(); return; }
+      if (b.dataset.cal === 'limpar') { gravar(''); fecharCalendario(); return; }
+      mes += Number(b.dataset.cal);
+      if (mes < 0) { mes = 11; ano--; }
+      if (mes > 11) { mes = 0; ano++; }
+      desenhar();
+    });
+    desenhar();
+    document.body.appendChild(pop);
+    const r = txt.getBoundingClientRect();
+    const largura = pop.offsetWidth;
+    pop.style.top = `${r.bottom + window.scrollY + 4}px`;
+    pop.style.left = `${Math.max(8, Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - largura - 8))}px`;
+    calAberto = pop;
+  });
+}
+
+function isoLocalData(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+document.querySelectorAll('input[type="date"]').forEach(campoDataBr);
