@@ -40,7 +40,12 @@ export type ContextoRequisicao = {
   sessao: Sessao;
   ip: string | null;
   requestId: string;
+  /** Feito pela busca automática (cron), em nome de quem a ligou. Nos registros aparece como "Busca automática". */
+  automatica?: boolean;
 };
+
+/** Como a busca automática aparece na trilha, no histórico e nas importações. */
+export const NOME_BUSCA_AUTOMATICA = 'Busca automática';
 
 /** O que a tela precisa saber sobre a regra que preencheu um item. */
 export type FichaRegra = {
@@ -73,7 +78,7 @@ export class Repo {
       ...p,
       tenantId: this.tenant,
       usuarioId: this.ctx.sessao.usuarioId,
-      usuarioEmail: this.ctx.sessao.email,
+      usuarioEmail: this.quemNaTrilha,
       ip: this.ctx.ip,
       requestId: this.ctx.requestId,
     };
@@ -1529,10 +1534,10 @@ export class Repo {
         c.certificadoAceito ?? null, c.certificadoAceito ?? null, c.quando, c.nenhumVinculado ? 1 : 0,
         this.tenant, empresaId),
       this.db.prepare(
-        `INSERT INTO captura_buscas (id, tenant_id, empresa_id, usuario_id, quando, cstat, motivo, nsu_de, nsu_ate, documentos, erro)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO captura_buscas (id, tenant_id, empresa_id, usuario_id, quando, cstat, motivo, nsu_de, nsu_ate, documentos, erro, automatica)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).bind(this.novoId(), this.tenant, empresaId, this.ctx.sessao.usuarioId, c.quando, c.cStat, c.motivo,
-        c.nsuDe, c.ultNsu, c.documentos, c.erro),
+        c.nsuDe, c.ultNsu, c.documentos, c.erro, this.ctx.automatica ? 1 : 0),
     ]);
   }
 
@@ -1667,7 +1672,8 @@ export class Repo {
   async historicoSef(): Promise<any[]> {
     const { results } = await this.db
       .prepare(
-        `SELECT b.*, e.razao_social, u.nome AS usuario_nome FROM captura_buscas b
+        `SELECT b.*, e.razao_social,
+                CASE WHEN b.automatica = 1 THEN '${NOME_BUSCA_AUTOMATICA}' ELSE u.nome END AS usuario_nome FROM captura_buscas b
            JOIN empresas e ON e.id = b.empresa_id LEFT JOIN usuarios u ON u.id = b.usuario_id
           WHERE b.tenant_id = ? ORDER BY b.quando DESC LIMIT 40`,
       )
@@ -1868,6 +1874,11 @@ export class Repo {
 
   get contexto(): ContextoRequisicao {
     return this.ctx;
+  }
+
+  /** O nome que vai na trilha: o e-mail de quem fez, ou "Busca automática". */
+  get quemNaTrilha(): string {
+    return this.ctx.automatica ? NOME_BUSCA_AUTOMATICA : this.ctx.sessao.email;
   }
 }
 
