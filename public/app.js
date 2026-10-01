@@ -4200,7 +4200,8 @@ $('#cap-testar').addEventListener('click', async () => {
   $('#cap-testar').disabled = true;
   try {
     const r = await api('/api/captura/testar', { method: 'POST', body: JSON.stringify({ certificadoId }) });
-    saida.innerHTML = `${r.ok ? '<span class="tag ok">OK</span>' : '<span class="tag dan">não conectou</span>'} ${esc(r.detalhe)}`;
+    saida.innerHTML = `${r.ok ? '<span class="tag ok">OK</span>' : '<span class="tag dan">não conectou</span>'} ${esc(r.detalhe)}`
+      + (r.diagnostico?.length ? `<pre class="cap-diag">${esc(r.diagnostico.join('\n'))}</pre>` : '');
   } catch (e) {
     saida.innerHTML = `<span class="tag dan">erro</span> ${esc(e.message)}`;
   } finally {
