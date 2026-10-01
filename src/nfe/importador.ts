@@ -127,7 +127,7 @@ export async function importarArquivos(
   await repo.auditoria().registrar({
     tenantId: repo.contexto.sessao.tenantId,
     usuarioId: repo.contexto.sessao.usuarioId,
-    usuarioEmail: repo.contexto.sessao.email,
+    usuarioEmail: repo.quemNaTrilha,
     acao: 'criar',
     entidade: 'lote_importacao',
     entidadeId: loteId,
