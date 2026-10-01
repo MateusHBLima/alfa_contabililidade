@@ -30,8 +30,12 @@ export type AmbienteCaptura = {
   [binding: string]: unknown;
 };
 
-/** Até 6 lotes de 50 por clique: cabe folgado nos limites de uma requisição do Worker. */
-export const LOTES_POR_CONSULTA = 6;
+/**
+ * Um lote (até 50 documentos) por requisição. Se a SEF disser que tem mais, a tela
+ * chama de novo na hora e mostra quantos já vieram: cada requisição fica curta e a
+ * pessoa vê a contagem andando em vez de uma espera muda.
+ */
+export const LOTES_POR_CONSULTA = 1;
 
 export function nomeDoBinding(cloudflareId: string): string {
   return `MTLS_${cloudflareId.replace(/-/g, '_')}`;
@@ -137,12 +141,12 @@ export async function baixarDaSef(
         break;
       }
       const docs = ret.cStat === '118' && ret.loteDistComp ? abrirLote(await descompactar(ret.loteDistComp)) : [];
-      const guardar = [];
-      for (const d of docs) {
-        const r2Chave = `sef/${repo.contexto.sessao.tenantId}/${empresa.id}/${d.nsu}.xml`;
-        await env.XML_TRABALHO.put(r2Chave, d.xml);
-        guardar.push({ nsu: d.nsu, tipo: d.tipo, tpEvento: d.tpEvento, r2Chave, ...indiceDoDocumento(d) });
-      }
+      // Os 50 arquivos vão para o R2 ao mesmo tempo: um atrás do outro eram ~50 idas e voltas.
+      const guardar = docs.map((d) => ({
+        nsu: d.nsu, tipo: d.tipo, tpEvento: d.tpEvento,
+        r2Chave: `sef/${repo.contexto.sessao.tenantId}/${empresa.id}/${d.nsu}.xml`, ...indiceDoDocumento(d),
+      }));
+      await Promise.all(docs.map((d, i) => env.XML_TRABALHO.put(guardar[i]!.r2Chave, d.xml)));
       await repo.guardarNaCaixa(empresa.id, guardar);
       documentos += docs.length;
       nsu = ret.ultNuNSURet || (docs.length ? docs[docs.length - 1]!.nsu : nsu);
@@ -165,7 +169,7 @@ export async function baixarDaSef(
   });
   return {
     consultou: true, documentos, erro, temMais, liberadaEm: proxima,
-    frase: temMais ? `${frase} Ainda tem mais na SEF: consulte de novo para baixar o resto.` : frase,
+    frase,
   };
 }
 
