@@ -1750,6 +1750,29 @@ export class Repo {
     return results;
   }
 
+  /**
+   * Os itens do mês para a conferência com o Questor (02/10): um por linha, com o nome
+   * da nota e o padronizado, a nota e o fornecedor. Mesmo recorte do relatório por
+   * produto (sem canceladas e sem estornos), para os totais baterem com ele.
+   */
+  async itensParaConferencia(empresaId: string, competencia: string): Promise<any[]> {
+    this.exigirEmpresa(empresaId);
+    const r = this.recorteCompetencia(competencia);
+    const { results } = await this.db
+      .prepare(
+        `SELECT i.x_prod_original AS original, COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), '') AS padronizado,
+                UPPER(TRIM(COALESCE(i.unidade, ''))) AS unidade, COALESCE(i.ncm, '') AS ncm,
+                COALESCE(i.quantidade, 0) AS quantidade, COALESCE(i.valor_total, 0) AS valor,
+                n.numero AS nota, COALESCE(n.emit_nome, '') AS fornecedor
+           FROM itens i JOIN notas n ON n.id = i.nota_id
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0 ${r.sql}
+          LIMIT 50000`,
+      )
+      .bind(this.tenant, empresaId, ...r.binds)
+      .all<any>();
+    return results;
+  }
+
   async relatorioProdutos(empresaId: string, competencia?: string, periodo?: Periodo): Promise<any[]> {
     this.exigirEmpresa(empresaId);
     const r = this.recorteCompetencia(competencia, periodo);
