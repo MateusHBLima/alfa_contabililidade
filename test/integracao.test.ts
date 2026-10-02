@@ -4865,3 +4865,66 @@ describe('01/10: intermediário da busca na SEF (a Cloudflare não renegocia TLS
     expect(j.id).toBeTruthy();
   });
 });
+
+describe('02/10: conferência do relatório por produto com o Questor', async () => {
+  const { relatorioQuestorSintetico, paginasDoPdf } = await import('./pdf-sintetico');
+  let empresaId: string;
+  let ck = '';
+  const amb = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  const enviar = async (pdf: Uint8Array, id = empresaId) => {
+    const r = await app.fetch(new Request(`http://x/api/empresas/${id}/relatorios/produtos/questor`, {
+      method: 'POST', headers: { Cookie: ck, 'content-type': 'application/json' },
+      body: JSON.stringify({ paginas: await paginasDoPdf(pdf) }),
+    }), amb());
+    return { status: r.status, corpo: (await r.json()) as any };
+  };
+  const pdf = (o: Partial<Parameters<typeof relatorioQuestorSintetico>[0]> = {}) => relatorioQuestorSintetico({
+    empresa: 'MERCADO PILOTO LTDA', cnpj: '11.222.333/0001-81', de: '01/07/2026', ate: '31/07/2026',
+    produtos: [
+      ['1', '1806.90.00', 'CHOC AO LEITE PT 200G', '10,00', '85,00'],
+      ['2', '2202.10.00', 'REFRIG COLA 2L', '12,00', '140,00'],
+      ['3', '3402.20.00', 'DET LIQ NEUTRO 500ML', '24,00', '64,00'],
+    ],
+    total: '289,00',
+    ...o,
+  });
+
+  beforeEach(async () => {
+    empresaId = await repo.criarEmpresa({ cnpj: '11.222.333/0001-81', razaoSocial: 'MERCADO PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'nota.xml', conteudo: XML }]);
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), amb());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  });
+
+  it('lê o PDF, compara com o mês do PDF e aponta a diferença e a pista', async () => {
+    const { status, corpo } = await enviar(pdf());
+    expect(status).toBe(200);
+    expect(corpo.competencia).toBe('2026-07');
+    expect(corpo.questor).toMatchObject({ cnpj: '11222333000181', produtos: 3, total: 289 });
+    expect(corpo.totais).toMatchObject({ questor: 289, nosso: 289, diferenca: 0, ok: 1, diferencas: 2, soQuestor: 0, soAlfa: 0 });
+    const difs = corpo.grupos.filter((g: any) => g.situacao === 'diferenca').map((g: any) => [g.nossos[0].descricao, g.diferenca]);
+    expect(difs).toEqual([['DET LIQ NEUTRO 500ML', 25.6], ['REFRIG COLA 2L', -25.6]]);
+    expect(corpo.pistas[0]).toMatch(/DET LIQ NEUTRO 500ML está R\$ 25,60 a mais no Questor e REFRIG COLA 2L R\$ 25,60 a menos/);
+    // Nada fica guardado: nem o PDF, nem a conferência.
+    expect(db.consultar("SELECT * FROM auditoria WHERE entidade LIKE '%questor%'")).toHaveLength(0);
+  });
+
+  it('recusa relatório de outra empresa, de período que não é o mês fechado, e mês sem notas', async () => {
+    const outra = await enviar(pdf({ cnpj: '49.721.215/0001-90', empresa: 'OUTRA EMPRESA LTDA' }));
+    expect(outra.status).toBe(400);
+    expect(outra.corpo.erro).toMatch(/é de outra empresa \(CNPJ 49\.721\.215\/0001-90, OUTRA EMPRESA LTDA -Matriz\), não de MERCADO PILOTO LTDA/);
+    const meio = await enviar(pdf({ de: '01/07/2026', ate: '20/07/2026' }));
+    expect(meio.corpo.erro).toMatch(/de 01\/07\/2026 a 20\/07\/2026\. A conferência é por mês fechado/);
+    const vazio = await enviar(pdf({ de: '01/08/2026', ate: '31/08/2026' }));
+    expect(vazio.corpo.erro).toMatch(/Não há notas de 08\/2026/);
+    const soma = await enviar(pdf({ total: '300,00' }));
+    expect(soma.corpo.erro).toMatch(/A leitura não fechou/);
+  });
+});
