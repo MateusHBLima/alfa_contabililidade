@@ -28,6 +28,7 @@ import { baixarDaSef, executarBuscaAutomatica, importarDaCaixa, aplicarEventosDa
 import { ErroSef } from './captura/sefsc';
 import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
+import { lerPaginasQuestor, conferirComQuestor, ErroQuestor } from './relatorios/questor';
 
 type Env = {
   DB: D1Database;
@@ -2170,6 +2171,67 @@ app.post('/api/captura/testar', async (c) => {
   const cert = await c.get('repo').obterCertificado(certificadoId);
   if (!cert) return c.json({ erro: 'certificado não encontrado' }, 404);
   return c.json(await testarConexao(c.env as unknown as AmbienteCaptura, cert));
+});
+
+/**
+ * Conferência com o Questor (02/10, pedido da Taís): ela sobe o PDF do relatório
+ * "Totais ICMS por Produto" do Questor e o sistema aponta, produto por produto, o
+ * que não bate com o nosso relatório por produto. O PDF é aberto no navegador; aqui
+ * chega o texto dele. Nada é guardado. Ver src/relatorios/questor.ts.
+ */
+app.post('/api/empresas/:id/relatorios/produtos/questor', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const repo = c.get('repo');
+  const empresaId = c.req.param('id');
+  const empresa = await repo.obterEmpresa(empresaId);
+  if (!empresa) return c.json({ erro: 'empresa não encontrada' }, 404);
+  // O navegador abre o PDF e manda os pedaços de texto com a posição (ver lerPaginasQuestor).
+  const corpo = z.object({
+    paginas: z.array(z.array(z.object({
+      str: z.string().max(2000), x: z.number(), y: z.number(), largura: z.number().optional(),
+    })).max(20000)).min(1).max(300),
+  }).safeParse(await c.req.json().catch(() => null));
+  if (!corpo.success) return c.json({ erro: 'Não consegui ler o PDF do Questor. Escolha o arquivo de novo.' }, 400);
+
+  let q;
+  try {
+    q = lerPaginasQuestor(corpo.data.paginas);
+  } catch (e) {
+    if (e instanceof ErroQuestor) return c.json({ erro: e.message }, 400);
+    throw e;
+  }
+  const doc = (v: unknown) => String(v ?? '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+  if (q.cnpj && doc(empresa.cnpj) && q.cnpj !== doc(empresa.cnpj)) {
+    const outra = await repo.empresaPorCnpj(q.cnpj);
+    return c.json({
+      erro: `Este relatório do Questor é de outra empresa (CNPJ ${q.cnpj.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5')}`
+        + `${outra ? `, ${outra.razao_social}` : q.empresa ? `, ${q.empresa}` : ''}), não de ${empresa.razao_social}. `
+        + (outra ? 'Troque a empresa no topo e suba de novo.' : 'Confira o arquivo.'),
+    }, 400);
+  }
+  // Mês inteiro: é assim que o nosso relatório por produto é tirado.
+  const ultimoDia = (iso: string) => new Date(Date.UTC(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)), 0)).toISOString().slice(0, 10);
+  if (!q.de.endsWith('-01') || q.ate !== ultimoDia(q.de)) {
+    const br = (d: string) => d.split('-').reverse().join('/');
+    return c.json({
+      erro: `O relatório do Questor é de ${br(q.de)} a ${br(q.ate)}. A conferência é por mês fechado: `
+        + 'tire o relatório do dia 1º ao último dia do mês.',
+    }, 400);
+  }
+  const competencia = q.de.slice(0, 7);
+  const itens = (await repo.itensParaConferencia(empresaId, competencia)).map((i: any) => ({
+    original: String(i.original ?? ''), padronizado: String(i.padronizado ?? ''), unidade: String(i.unidade ?? ''),
+    ncm: String(i.ncm ?? ''), quantidade: Number(i.quantidade ?? 0), valor: Number(i.valor ?? 0),
+    nota: String(i.nota ?? ''), fornecedor: String(i.fornecedor ?? ''),
+  }));
+  if (!itens.length) {
+    return c.json({ erro: `Não há notas de ${competencia.slice(5)}/${competencia.slice(0, 4)} desta empresa no Alfa Fiscal para comparar.` }, 400);
+  }
+  return c.json({
+    competencia,
+    questor: { empresa: q.empresa, cnpj: q.cnpj, de: q.de, ate: q.ate, total: q.total, produtos: q.linhas.length },
+    ...conferirComQuestor(q.linhas, itens),
+  });
 });
 
 /** Marca/desmarca um produto do relatório como "não fechou" (28/09). */

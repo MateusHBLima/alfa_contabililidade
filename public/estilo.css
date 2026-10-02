@@ -617,3 +617,19 @@ tr.nota-estorno td{background:#faf5ff}
 .cal-grade button.hoje{outline:1px solid var(--primary-soft);font-weight:600}
 .cal-grade button.sel{background:var(--primary);color:#fff}
 .cal-grade button:disabled{opacity:.35;cursor:default}
+
+/* Conferência com o Questor (02/10) */
+.questor-caixa{margin:0 14px 12px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg-soft,#fafafa)}
+.questor-topo{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+.questor-topo .acoes{display:flex;gap:8px;flex-wrap:wrap}
+.questor-placar{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+.questor-placar span{padding:3px 9px;border-radius:999px;border:1px solid var(--line);font-size:12px;background:#fff}
+.questor-placar .ok{color:var(--ok);border-color:var(--ok)}
+.questor-placar .ruim{color:#b42318;border-color:#f1b0a9;background:#fff5f4}
+.questor-pistas{margin:6px 0 10px;padding-left:18px}
+.questor-pistas li{margin:4px 0}
+.questor-tabela td,.questor-tabela th{vertical-align:top}
+.questor-tabela tr.q-diferenca td.num.dif{color:#b42318;font-weight:600}
+.questor-tabela tr.q-so td.num.dif{color:#a35a07;font-weight:600}
+.questor-tabela tr.q-ok td{color:var(--muted,#666)}
+.questor-tabela .q-ver{cursor:pointer;text-decoration:underline dotted}

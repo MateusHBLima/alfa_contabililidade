@@ -3225,7 +3225,7 @@ $('#btn-novo-usuario').addEventListener('click', () => editarUsuario(null).catch
 // medicao do projeto. A conta e do servidor; a tela so desenha, e a planilha
 // baixada sai da MESMA rota (formato=csv), para tela e arquivo nunca discordarem.
 
-const rel = { qual: 'cfop', competencia: '', filtro: '', ultimo: null, soNaoFechou: false, de: '', ate: '' };
+const rel = { qual: 'cfop', competencia: '', filtro: '', ultimo: null, soNaoFechou: false, de: '', ate: '', questor: null };
 
 /* Período de emissão nos relatórios (29/09, pedido da Taís): "do dia 1 ao dia 20",
    e a data tem que aparecer no print e no PDF para saber de que período era. */
@@ -3729,6 +3729,8 @@ function atualizarBotaoNaoFechou() {
   const b = $('#rel-so-nf');
   if (!b) return;
   const produtos = rel.qual === 'produtos' && rel.ultimo?.qual === 'produtos';
+  $('#rel-questor')?.classList.toggle('hidden', !produtos);
+  desenharConferenciaQuestor();
   b.classList.toggle('hidden', !produtos);
   const n = produtos ? rel.ultimo.linhas.filter((l) => l.naoFechou).length : 0;
   b.textContent = `✗ Só os que não fecharam (${n})`;
@@ -3762,6 +3764,187 @@ $('#rel-so-nf')?.addEventListener('click', () => {
   rel.soNaoFechou = !rel.soNaoFechou;
   desenharRelatorio();
 });
+
+/* ---- Conferência com o Questor (02/10, pedido da Taís) ----
+   Ela sobe o PDF do "Totais ICMS por Produto" do Questor; o servidor lê, compara com
+   os itens do mês e devolve os grupos (o que bate, valor diferente, só de um lado) e
+   as pistas. O resultado fica em memória enquanto ela está na tela: abrir uma nota e
+   voltar não perde a conferência. */
+const NOME_SITUACAO = { diferenca: 'Valor diferente', so_questor: 'Só no Questor', so_alfa: 'Só no Alfa Fiscal', ok: 'Bate' };
+
+$('#rel-questor')?.addEventListener('click', () => {
+  if (!estado.empresaId) return alerta('Escolha a empresa no topo.');
+  $('#questor-arquivo').value = '';
+  $('#questor-arquivo').click();
+});
+
+$('#questor-arquivo')?.addEventListener('change', async (ev) => {
+  const arq = ev.target.files?.[0];
+  if (!arq) return;
+  const empresaId = estado.empresaId;
+  mostrarEspera('Lendo o relatório do Questor e comparando produto por produto…');
+  try {
+    const paginas = await textoDoPdf(arq);
+    const r = await api(`/api/empresas/${empresaId}/relatorios/produtos/questor`, {
+      method: 'POST', body: JSON.stringify({ paginas }),
+    });
+    rel.questor = { ...r, empresaId, verOk: false, arquivo: arq.name };
+    if (r.competencia !== rel.competencia) {
+      // O mês da conferência é o do PDF: a tela vai para ele.
+      rel.competencia = r.competencia;
+      if ([...$('#rel-competencia').options].some((o) => o.value === r.competencia)) $('#rel-competencia').value = r.competencia;
+      await carregarRelatorio();
+    } else {
+      desenharConferenciaQuestor();
+    }
+    $('#rel-questor-resultado').scrollIntoView({ block: 'start', behavior: 'smooth' });
+  } catch (e) {
+    alerta(e.message);
+  } finally {
+    esconderEspera();
+  }
+});
+
+/**
+ * Abre o PDF aqui no navegador e devolve os pedaços de texto com a posição; o servidor
+ * monta as linhas e lê o relatório. O pdf.js não roda no Worker da Cloudflare.
+ * public/pdfjs.mjs é o pdf.js "serverless" do pacote unpdf (dist/pdfjs.mjs),
+ * carregado só quando ela usa a conferência.
+ */
+async function textoDoPdf(arq) {
+  const dados = new Uint8Array(await arq.arrayBuffer());
+  if (!(dados[0] === 0x25 && dados[1] === 0x50 && dados[2] === 0x44 && dados[3] === 0x46)) {
+    throw new Error('O arquivo não é um PDF. No Questor, salve o relatório em PDF e suba de novo.');
+  }
+  let doc;
+  try {
+    const pdfjs = await import('/pdfjs.mjs');
+    doc = await pdfjs.getDocument({ data: dados, isEvalSupported: false, useSystemFonts: true }).promise;
+  } catch (e) {
+    throw new Error(`Não consegui abrir o PDF: ${e.message}`);
+  }
+  if (doc.numPages > 300) throw new Error('O PDF tem páginas demais para o relatório de um mês.');
+  const paginas = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const tc = await (await doc.getPage(i)).getTextContent();
+    paginas.push(tc.items.filter((it) => typeof it.str === 'string')
+      .map((it) => ({ str: it.str, x: it.transform[4], y: it.transform[5], largura: it.width })));
+  }
+  return paginas;
+}
+
+function desenharConferenciaQuestor() {
+  const caixa = $('#rel-questor-resultado');
+  if (!caixa) return;
+  const c = rel.questor;
+  const visivel = c && c.empresaId === estado.empresaId && rel.qual === 'produtos' && c.competencia === rel.competencia;
+  caixa.classList.toggle('hidden', !visivel);
+  if (!visivel) return;
+  const t = c.totais;
+  const mes = `${MESES[Number(c.competencia.slice(5)) - 1] ?? c.competencia.slice(5)} de ${c.competencia.slice(0, 4)}`;
+  const ruins = c.grupos.filter((g) => g.situacao !== 'ok');
+  const oks = c.grupos.filter((g) => g.situacao === 'ok');
+  const linha = (g, i) => {
+    const q = g.questor.map((x) => `${esc(x.descricao)}<span class="porque">cód. ${esc(x.codigo)} · NCM ${esc(x.ncm)} · ${qtdTela(x.quantidade)}</span>`).join('<br>') || '<span class="tiny">—</span>';
+    const n = g.nossos.map((x) => `<span class="q-ver" data-q-produto="${esc(x.descricao)}" data-q-unidade="${esc(x.unidade)}" title="Ver as notas deste produto">${esc(x.descricao)}</span>`
+      + `<span class="porque">${qtdTela(x.quantidade)} ${esc(x.unidade)} · ${x.itens} item(ns)${x.originais.length && x.originais.some((o) => o !== x.descricao) ? ` · na nota: ${esc(x.originais.join(' / '))}` : ''}</span>`).join('<br>') || '<span class="tiny">—</span>';
+    const classe = g.situacao === 'ok' ? 'q-ok' : g.situacao === 'diferenca' ? 'q-diferenca' : 'q-so';
+    return `<tr class="${classe}" data-q-grupo="${i}">
+      <td>${NOME_SITUACAO[g.situacao]}${g.parecido ? ' <span class="tag mut" title="Juntei pelo nome parecido, não igual. Confira se é o mesmo produto.">nome parecido</span>' : ''}</td>
+      <td>${q}</td><td class="num">${g.questor.length ? moeda(g.valorQuestor) : ''}</td>
+      <td>${n}</td><td class="num">${g.nossos.length ? moeda(g.valorNosso) : ''}</td>
+      <td class="num dif">${g.situacao === 'ok' ? '' : moeda(g.diferenca)}</td></tr>`;
+  };
+  const chip = (texto, ruim) => `<span class="${ruim ? 'ruim' : 'ok'}">${texto}</span>`;
+  caixa.innerHTML = `
+    <div class="questor-topo">
+      <div><b>Conferência com o Questor — ${esc(mes)}</b>
+        <span class="tiny">· ${c.questor.produtos} produtos no PDF${c.arquivo ? ` (${esc(c.arquivo)})` : ''}</span></div>
+      <div class="acoes">
+        <button type="button" class="btn sm" data-q-baixar>⇩ Baixar a conferência</button>
+        <button type="button" class="btn sm sutil" data-q-fechar>Fechar</button>
+      </div>
+    </div>
+    <div class="questor-placar">
+      <span>Questor <b>R$ ${moeda(t.questor)}</b></span>
+      <span>Alfa Fiscal <b>R$ ${moeda(t.nosso)}</b></span>
+      ${chip(`Diferença no total <b>R$ ${moeda(t.diferenca)}</b>`, Math.abs(t.diferenca) >= 0.005)}
+      ${chip(`✓ ${t.ok} batem`, false)}
+      ${chip(`${t.diferencas} com valor diferente`, t.diferencas > 0)}
+      ${chip(`${t.soQuestor} só no Questor`, t.soQuestor > 0)}
+      ${chip(`${t.soAlfa} só no Alfa Fiscal`, t.soAlfa > 0)}
+    </div>
+    ${c.pistas.length ? `<ul class="questor-pistas">${c.pistas.map((p) => `<li>💡 ${esc(p)}</li>`).join('')}</ul>` : ''}
+    ${ruins.length ? '' : '<p><b>Tudo bate:</b> todos os produtos do Questor estão aqui com o mesmo valor.</p>'}
+    <div class="scroll"><table class="questor-tabela">
+      <thead><tr><th>Situação</th><th>No Questor</th><th class="num">Valor Questor</th><th>No Alfa Fiscal <span class="tiny">(clique para ver as notas)</span></th><th class="num">Valor Alfa Fiscal</th><th class="num">Diferença</th></tr></thead>
+      <tbody>${ruins.map((g) => linha(g, c.grupos.indexOf(g))).join('')}
+        ${c.verOk ? oks.map((g) => linha(g, c.grupos.indexOf(g))).join('') : ''}</tbody>
+    </table></div>
+    ${oks.length ? `<button type="button" class="btn sm sutil" data-q-ver-ok style="margin-top:8px">${c.verOk ? 'Esconder' : 'Mostrar'} os ${oks.length} que batem</button>` : ''}`;
+}
+
+$('#rel-questor-resultado')?.addEventListener('click', async (ev) => {
+  const c = rel.questor;
+  if (!c) return;
+  if (ev.target.closest('[data-q-fechar]')) { rel.questor = null; return desenharConferenciaQuestor(); }
+  if (ev.target.closest('[data-q-ver-ok]')) { c.verOk = !c.verOk; return desenharConferenciaQuestor(); }
+  if (ev.target.closest('[data-q-baixar]')) return baixarConferenciaQuestor();
+  const ab = ev.target.closest('[data-abrir-item]');
+  if (ab) return abrirNotaDoRelatorio(ab.dataset.abrirItem, ab.dataset.item, ab);
+  if (ev.target.closest('[data-fechar-busca]')) return ev.target.closest('tr.rel-notas')?.remove();
+  const ver = ev.target.closest('[data-q-produto]');
+  if (!ver) return;
+  // As notas do produto, logo abaixo da linha (o mesmo do relatório por produto).
+  const tr = ver.closest('tr');
+  const aberto = tr.nextElementSibling?.classList.contains('rel-notas') && tr.nextElementSibling.dataset.qDe === ver.dataset.qProduto;
+  tr.nextElementSibling?.classList.contains('rel-notas') && tr.nextElementSibling.remove();
+  if (aberto) return;
+  const sub = document.createElement('tr');
+  sub.className = 'rel-notas';
+  sub.dataset.qDe = ver.dataset.qProduto;
+  sub.innerHTML = '<td colspan="6" class="vazio">carregando as notas…</td>';
+  tr.after(sub);
+  // abrirNotaDoRelatorio lê o produto da linha de cima para saber para onde voltar.
+  tr.dataset.relProduto = ver.dataset.qProduto;
+  tr.dataset.relUnidade = ver.dataset.qUnidade;
+  try {
+    const q = new URLSearchParams({ produto: ver.dataset.qProduto, unidade: ver.dataset.qUnidade, competencia: c.competencia });
+    const r = await api(`/api/empresas/${estado.empresaId}/busca-itens?${q}`);
+    sub.innerHTML = `<td colspan="6">${tabelaDeItensAchados(r.itens, `${r.itens.length} item(ns) de ${esc(ver.dataset.qProduto)}`)}</td>`;
+    pintarVistas(sub);
+  } catch (e) {
+    sub.innerHTML = `<td colspan="6" class="vazio">Não consegui listar: ${esc(e.message)}</td>`;
+  }
+});
+
+function baixarConferenciaQuestor() {
+  const c = rel.questor;
+  if (!c) return;
+  const num = (v) => Number(v ?? 0).toFixed(2).replace('.', ',');
+  const cel = (v) => { const t = String(v ?? ''); return /[;"\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const linhas = [['Situação', 'Produto no Questor', 'Código Questor', 'NCM', 'Valor Questor', 'Produto no Alfa Fiscal', 'Unidade', 'Descrição na nota', 'Valor Alfa Fiscal', 'Diferença (Questor - Alfa Fiscal)', 'Nome parecido']];
+  for (const g of c.grupos) {
+    linhas.push([
+      NOME_SITUACAO[g.situacao],
+      g.questor.map((q) => q.descricao).join(' + '), g.questor.map((q) => q.codigo).join(' + '), g.questor.map((q) => q.ncm).join(' + '),
+      g.questor.length ? num(g.valorQuestor) : '',
+      g.nossos.map((n) => n.descricao).join(' + '), g.nossos.map((n) => n.unidade).join(' + '),
+      g.nossos.flatMap((n) => n.originais).join(' / '),
+      g.nossos.length ? num(g.valorNosso) : '',
+      g.situacao === 'ok' ? '' : num(g.diferenca), g.parecido ? 'sim' : '',
+    ]);
+  }
+  linhas.push(['TOTAL', '', '', '', num(c.totais.questor), '', '', '', num(c.totais.nosso), num(c.totais.diferenca), '']);
+  for (const p of c.pistas) linhas.push(['Pista', p]);
+  const texto = '﻿' + linhas.map((l) => l.map(cel).join(';')).join('\r\n') + '\r\n';
+  const emp = (estado.empresas || []).find((x) => x.id === estado.empresaId);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([texto], { type: 'text/csv;charset=utf-8' }));
+  a.download = `conferencia-questor-${String(emp?.cnpj ?? 'empresa').replace(/\D/g, '') || 'empresa'}-${c.competencia}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
 
 
 /* ---- Regras de ICMS por CFOP (28/09, planilha da Taís) ----

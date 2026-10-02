@@ -520,6 +520,8 @@
             <button type="button" class="btn sm sutil hidden" id="rel-limpar-datas">limpar datas</button>
             <input type="search" id="rel-busca" placeholder="Procurar no relatório: produto, código, CFOP ou valor" style="font-size:12px;width:300px" autocomplete="off">
             <button type="button" class="btn sm hidden" id="rel-so-nf" title="Mostra só os produtos marcados com ✗ (não fecharam com o outro sistema). A planilha baixada também vem só com eles.">✗ Só os que não fecharam (0)</button>
+            <button type="button" class="btn sm hidden" id="rel-questor" title="Suba o PDF do relatório “Totais ICMS por Produto” do Questor: o sistema compara produto por produto e aponta o que não bate">⇪ Conferir com o Questor</button>
+            <input type="file" id="questor-arquivo" accept="application/pdf,.pdf" class="hidden">
             <div class="sep"></div>
             <button class="btn sm primary" id="rel-baixar" title="O relatório que está na tela">⇩ Baixar planilha</button>
             <button class="btn sm" id="rel-baixar-analitico" title="Um item por linha, com a nota, o CFOP e os impostos — para filtrar e bater no Excel">⇩ Planilha analítica (item a item)</button>
@@ -529,6 +531,7 @@
           <div id="rel-periodo" class="rel-periodo hidden"></div>
           <div id="rel-estornos" class="hidden" style="margin:0 14px 8px"></div>
           <div id="rel-aviso" class="placar sutil hidden" style="margin:0 14px 8px"></div>
+          <div id="rel-questor-resultado" class="questor-caixa hidden"></div>
           <div class="body tight">
             <div class="scroll"><table id="tbl-relatorio"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>
           </div>
