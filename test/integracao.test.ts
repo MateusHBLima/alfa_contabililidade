@@ -90,7 +90,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(29); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021)
+    expect(tabelas.length).toBe(30); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(3);
   });
@@ -4926,5 +4926,101 @@ describe('02/10: conferência do relatório por produto com o Questor', async ()
     expect(vazio.corpo.erro).toMatch(/Não há notas de 08\/2026/);
     const soma = await enviar(pdf({ total: '300,00' }));
     expect(soma.corpo.erro).toMatch(/A leitura não fechou/);
+  });
+});
+
+describe('09/10: antecipação e DIFAL — lista, marca e relatório para o cliente', async () => {
+  let empresaId: string;
+  let ck = '';
+  const amb = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  const chamar = (url: string, metodo = 'GET', corpo?: unknown) => app.fetch(new Request(`http://x${url}`, {
+    method: metodo, headers: { Cookie: ck, 'content-type': 'application/json' },
+    body: corpo === undefined ? undefined : JSON.stringify(corpo),
+  }), amb());
+  const lista = async (tipo: string) => (await (await chamar(`/api/empresas/${empresaId}/apuracao/${tipo}?competencia=2026-07`)).json()) as any;
+  const itens = () => db.consultar<any>('SELECT id, n_item FROM itens ORDER BY n_item');
+
+  beforeEach(async () => {
+    empresaId = await repo.criarEmpresa({ cnpj: '11.222.333/0001-81', razaoSocial: 'MERCADO PILOTO LTDA', uf: 'SC', perfil: 'revenda', regime: 'simples_integral' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'nota.xml', conteudo: XML }]);
+    // Valores fiscais sintéticos: item 1 a 4% em 1102, item 2 a 12% em 1102, item 3 a 12% em 2556.
+    const [i1, i2, i3] = itens();
+    const fixar = (id: string, cfop: string, base: number, icms: number) => db.consultar(
+      'UPDATE itens SET cfop_novo = ?, v_bc_icms = ?, v_icms = ?, valor_contabil = ?, valores_lidos = 1 WHERE id = ?', cfop, base, icms, base, id);
+    fixar(i1.id, '1102', 85, 3.4); fixar(i2.id, '1102', 165.6, 19.87); fixar(i3.id, '2556', 38.4, 4.61);
+    const l = await app.fetch(new Request('http://x/api/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+    }), amb());
+    ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  });
+
+  it('separa as candidatas, guarda a marca (com trilha) e o relatório leva o resumo e o PDF de cada nota que fica', async () => {
+    const ant = await lista('antecipacao');
+    expect(ant.aviso).toBeNull();
+    expect(ant.notas).toHaveLength(1);
+    expect(ant.notas[0]).toMatchObject({ numero: '504767', situacao: 'conferir', foraPelaAliquota: 1, valorContabil: 85, icms: 3.4, aliquotas: [4] });
+    const notaId = ant.notas[0].notaId;
+
+    const dif = await lista('difal');
+    expect(dif.notas.map((n: any) => [n.cfops, n.aliquotas, n.valorContabil])).toEqual([[['2556'], [12], 38.4]]);
+
+    // Relatório sem nada marcado: só o resumo dizendo que não tem nota.
+    let html = await (await chamar(`/api/empresas/${empresaId}/apuracao/antecipacao/relatorio?competencia=2026-07`)).text();
+    expect(html).toContain('Nenhuma nota marcada');
+
+    expect((await chamar(`/api/empresas/${empresaId}/apuracao/antecipacao/${notaId}`, 'PUT', { situacao: 'fica' })).status).toBe(200);
+    const depois = await lista('antecipacao');
+    expect(depois.notas[0]).toMatchObject({ situacao: 'fica', marcadoPor: 'Contadora' });
+    expect(depois.totais).toMatchObject({ fica: 1, conferir: 0, valorContabilFica: 85, icmsFica: 3.4 });
+    // A marca de um tipo não vale para o outro.
+    expect((await lista('difal')).notas[0].situacao).toBe('conferir');
+    expect(db.consultar("SELECT valor_antes, valor_depois FROM auditoria WHERE entidade = 'apuracao'"))
+      .toEqual([{ valor_antes: 'nota 504767: a conferir', valor_depois: 'nota 504767: fica' }]);
+
+    html = await (await chamar(`/api/empresas/${empresaId}/apuracao/antecipacao/relatorio?competencia=2026-07`)).text();
+    expect(html).toContain('Antecipação de ICMS — julho de 2026');
+    expect(html).toContain('MERCADO PILOTO LTDA · CNPJ 11.222.333/0001-81');
+    expect(html).toMatch(/Total · 1 nota\(s\)<\/td><td class="n">85,00<\/td><td class="n">85,00<\/td><td class="n">3,40/);
+    expect(html.match(/<h1>DANFE<\/h1>/g)).toHaveLength(1);
+    expect(html).not.toContain('window.print(); }, 400');
+
+    // Desmarcar volta para "a conferir".
+    await chamar(`/api/empresas/${empresaId}/apuracao/antecipacao/${notaId}`, 'PUT', { situacao: null });
+    expect((await lista('antecipacao')).notas[0].situacao).toBe('conferir');
+  });
+
+  it('antecipação só para o Simples; sem regime, avisa e mostra', async () => {
+    db.consultar("UPDATE empresas SET regime = 'presumido'");
+    const pres = await lista('antecipacao');
+    expect(pres.aviso).toMatch(/não é do Simples/);
+    expect(pres.notas).toHaveLength(0);
+    expect((await lista('difal')).notas).toHaveLength(1); // DIFAL não depende do regime
+
+    db.consultar('UPDATE empresas SET regime = NULL');
+    const sem = await lista('antecipacao');
+    expect(sem.aviso).toMatch(/regime tributário desta empresa não está preenchido/);
+    expect(sem.notas).toHaveLength(1);
+  });
+
+  it('apagar a nota leva a marca junto; nota cancelada não aparece', async () => {
+    const notaId = (await lista('antecipacao')).notas[0].notaId;
+    await chamar(`/api/empresas/${empresaId}/apuracao/antecipacao/${notaId}`, 'PUT', { situacao: 'sai' });
+    db.consultar("UPDATE notas SET cancelada_em = '2026-07-20T00:00:00Z'");
+    expect((await lista('antecipacao')).notas).toHaveLength(0);
+    expect((await chamar(`/api/notas/${notaId}`, 'DELETE')).status).toBe(200);
+    expect(db.consultar('SELECT * FROM apuracao_marcas')).toHaveLength(0);
+  });
+
+  it('DANFE ao lado na tela não abre a impressão', async () => {
+    const notaId = (await lista('antecipacao')).notas[0].notaId;
+    const ao = await (await chamar(`/api/notas/${notaId}/danfe?imprimir=0`)).text();
+    expect(ao).toContain('<h1>DANFE</h1>');
+    expect(ao).not.toContain('window.print(); }, 400');
+    expect(await (await chamar(`/api/notas/${notaId}/danfe`)).text()).toContain('window.print(); }, 400');
   });
 });
