@@ -32,31 +32,8 @@ const dataBr = (iso: string | null) => {
 const campo = (rotulo: string, valor: string, classe = '') =>
   `<div class="c ${classe}"><span class="r">${esc(rotulo)}</span><span class="v">${valor || '&nbsp;'}</span></div>`;
 
-export function danfeHtml(n: NotaOriginal, opcoes: { cancelada?: boolean } = {}): string {
-  const chave = n.chave ?? '';
-  const chaveFmt = chave.replace(/(\d{4})(?=\d)/g, '$1 ');
-  const barras = /^\d{44}$/.test(chave) ? code128cSvg(chave, 44, 1) : '';
-  const e = n.emit;
-  const d = n.dest;
-  const t = n.totais;
-  const tpNF = n.tipo === 'Entrada' ? '0' : n.tipo === 'Saída' ? '1' : '';
-
-  const itens = n.itens.map((i) => `<tr>
-    <td>${esc(i.cProd)}</td>
-    <td class="desc">${esc(i.xProd)}${i.infAdProd ? `<div class="obs">${esc(i.infAdProd)}</div>` : ''}</td>
-    <td>${esc(i.NCM)}</td><td>${esc(i.cst)}</td><td>${esc(i.CFOP)}</td><td>${esc(i.uCom)}</td>
-    <td class="n">${moeda(i.qCom, 4)}</td><td class="n">${moeda(i.vUnCom, 4)}</td><td class="n">${moeda(i.vProd)}</td>
-    <td class="n">${moeda(i.vBC)}</td><td class="n">${moeda(i.vICMS)}</td><td class="n">${moeda(i.vIPI)}</td>
-    <td class="n">${moeda(i.pICMS)}</td><td class="n">${moeda(i.pIPI)}</td>
-  </tr>`).join('');
-
-  const titulo = `NF-e ${n.numero ?? ''} - ${e.nome ?? ''}`.trim();
-  const adicionais = [n.infAdFisco, n.infCpl].filter(Boolean).join('\n\n');
-
-  return `<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8">
-<title>${esc(titulo)}</title>
-<style>
+/** O estilo das folhas do DANFE, para a página de uma nota ou de várias. */
+export const DANFE_CSS = `
   @page { size: A4 portrait; margin: 8mm; }
   * { box-sizing: border-box; }
   body { margin: 0; font: 9px/1.25 Arial, Helvetica, sans-serif; color: #000; background: #e9edf2; }
@@ -96,13 +73,31 @@ export function danfeHtml(n: NotaOriginal, opcoes: { cancelada?: boolean } = {})
     thead { display: table-header-group; }
     tr { break-inside: avoid; }
   }
-</style></head>
-<body>
-<div class="barra">
-  <button type="button" onclick="window.print()">Salvar em PDF / imprimir</button>
-  <span>Na janela que abrir, escolha <b>“Salvar como PDF”</b> como impressora.</span>
-</div>
-<div class="folha">
+  @media print { .folha + .folha, .quebra { break-before: page; } }
+`;
+
+/** A folha do DANFE (sem a página em volta): o relatório da antecipação/DIFAL junta várias. */
+export function danfeFolha(n: NotaOriginal, opcoes: { cancelada?: boolean } = {}): string {
+  const chave = n.chave ?? '';
+  const chaveFmt = chave.replace(/(\d{4})(?=\d)/g, '$1 ');
+  const barras = /^\d{44}$/.test(chave) ? code128cSvg(chave, 44, 1) : '';
+  const e = n.emit;
+  const d = n.dest;
+  const t = n.totais;
+  const tpNF = n.tipo === 'Entrada' ? '0' : n.tipo === 'Saída' ? '1' : '';
+
+  const itens = n.itens.map((i) => `<tr>
+    <td>${esc(i.cProd)}</td>
+    <td class="desc">${esc(i.xProd)}${i.infAdProd ? `<div class="obs">${esc(i.infAdProd)}</div>` : ''}</td>
+    <td>${esc(i.NCM)}</td><td>${esc(i.cst)}</td><td>${esc(i.CFOP)}</td><td>${esc(i.uCom)}</td>
+    <td class="n">${moeda(i.qCom, 4)}</td><td class="n">${moeda(i.vUnCom, 4)}</td><td class="n">${moeda(i.vProd)}</td>
+    <td class="n">${moeda(i.vBC)}</td><td class="n">${moeda(i.vICMS)}</td><td class="n">${moeda(i.vIPI)}</td>
+    <td class="n">${moeda(i.pICMS)}</td><td class="n">${moeda(i.pIPI)}</td>
+  </tr>`).join('');
+
+  const adicionais = [n.infAdFisco, n.infCpl].filter(Boolean).join('\n\n');
+
+  return `<div class="folha">
   ${opcoes.cancelada ? '<div class="carimbo">NOTA CANCELADA</div>' : ''}
   <div class="topo">
     <div class="emit">
@@ -172,7 +167,24 @@ export function danfeHtml(n: NotaOriginal, opcoes: { cancelada?: boolean } = {})
   <div class="sec">Dados adicionais</div>
   <div class="adic">${esc(adicionais)}</div>
   <div class="rodape">Representação da NF-e gerada a partir do XML autorizado guardado no Alfa Fiscal, sem alteração.</div>
+</div>`;
+}
+
+export function danfeHtml(n: NotaOriginal, opcoes: { cancelada?: boolean; imprimir?: boolean } = {}): string {
+  const titulo = `NF-e ${n.numero ?? ''} - ${n.emit.nome ?? ''}`.trim();
+  return `<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>${esc(titulo)}</title>
+<style>${DANFE_CSS}</style></head>
+<body>
+<div class="barra">
+  <button type="button" onclick="window.print()">Salvar em PDF / imprimir</button>
+  <span>Na janela que abrir, escolha <b>“Salvar como PDF”</b> como impressora.</span>
 </div>
-<script>window.addEventListener('load', function () { setTimeout(function () { window.print(); }, 400); });</script>
+${danfeFolha(n, opcoes)}
+${opcoes.imprimir === false
+    // Ao lado da lista (tela da antecipação/DIFAL): a folha encolhe para caber na largura.
+    ? "<script>function caber(){var f=document.querySelector('.folha');if(!f)return;document.body.style.zoom='';var z=Math.min(1,(window.innerWidth-16)/f.offsetWidth);document.body.style.zoom=String(z);}window.addEventListener('load',caber);window.addEventListener('resize',caber);</script>"
+    : "<script>window.addEventListener('load', function () { setTimeout(function () { window.print(); }, 400); });</script>"}
 </body></html>`;
 }

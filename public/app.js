@@ -478,13 +478,13 @@ function marcarEscopo() {
   if ($('#sel-empresa') && estado.empresaId && $('#sel-empresa').value !== estado.empresaId && !$('#sel-empresa').classList.contains('pendente')) {
     $('#sel-empresa').value = estado.empresaId;
   }
-  for (const id of ['#escopo-fornecedores', '#escopo-regras', '#escopo-relatorios', '#escopo-xml']) {
+  for (const id of ['#escopo-fornecedores', '#escopo-regras', '#escopo-relatorios', '#escopo-xml', '#escopo-apuracao']) {
     const el = $(id);
     if (el) el.textContent = nome ? `de ${nome}` : 'nenhuma empresa selecionada';
   }
 }
 
-const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vRegrasIcms', 'vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura'];
+const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vApuracao', 'vRegrasIcms', 'vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura'];
 
 function telaAtual() {
   return TELAS.find((v) => !$('#' + v).classList.contains('hidden')) ?? 'v1';
@@ -528,6 +528,7 @@ function irPara(view) {
   if (view === 'vRegras') carregarRegras();
   if (view === 'v3') abrirXmlCorrigido();
   if (view === 'vRelatorios') return abrirRelatorios();
+  if (view === 'vApuracao') return abrirApuracao();
   if (view === 'vRegrasIcms') carregarRegrasIcms();
   if (view === 'vUsuarios') carregarUsuarios();
   if (view === 'vPapeis') carregarPapeis();
@@ -581,8 +582,9 @@ async function trocarEmpresa(empresaId) {
     estado.notas = notas;
     renderNotas();
     // Trocar de empresa nao pode deixar na tela a lista da empresa anterior.
-    const aberta = ['vFornecedores', 'vRegras', 'vRelatorios', 'v3']
+    const aberta = ['vFornecedores', 'vRegras', 'vRelatorios', 'v3', 'vApuracao']
       .find((v) => !$('#' + v).classList.contains('hidden'));
+    if (aberta === 'vApuracao') await abrirApuracao();
     if (aberta === 'vFornecedores') await carregarFornecedores();
     if (aberta === 'vRegras') await carregarRegras();
     if (aberta === 'vRelatorios') await abrirRelatorios();
@@ -4662,3 +4664,159 @@ function isoLocalData(d) {
 }
 
 document.querySelectorAll('input[type="date"]').forEach(campoDataBr);
+
+
+/* ---- Antecipação e DIFAL (09/10, combinado na reunião de 25/09) ----
+   O sistema separa as notas candidatas do mês; ela abre o PDF ao lado, marca se fica
+   ou não fica, e tira o relatório para o cliente (resumo + PDF de cada nota que fica).
+   Sem cálculo de guia por enquanto. */
+const ap = { tipo: 'antecipacao', competencia: '', ultimo: null, notaAberta: null };
+
+async function abrirApuracao() {
+  if (!estado.empresaId) return;
+  if (!estado.competencias.length) await carregarCompetencias();
+  const comps = estado.competencias.map((c) => c.competencia);
+  if (!comps.includes(ap.competencia)) {
+    // O mês que se fecha é o anterior: é ele que vem primeiro, se tiver nota.
+    const h = new Date();
+    const anterior = `${new Date(h.getFullYear(), h.getMonth() - 1, 1).getFullYear()}-${String(new Date(h.getFullYear(), h.getMonth() - 1, 1).getMonth() + 1).padStart(2, '0')}`;
+    ap.competencia = comps.includes(anterior) ? anterior : (comps[0] ?? '');
+  }
+  $('#ap-competencia').innerHTML = comps.length
+    ? comps.map((c) => `<option value="${c}">${MESES[Number(c.slice(5)) - 1] ?? c.slice(5)} de ${c.slice(0, 4)}</option>`).join('')
+    : '<option value="">nenhuma nota importada</option>';
+  $('#ap-competencia').value = ap.competencia;
+  ap.notaAberta = null;
+  mostrarPdfApuracao(null);
+  await carregarApuracao();
+}
+
+async function carregarApuracao() {
+  const corpo = $('#tbl-apuracao tbody');
+  const [cab, pe] = [$('#tbl-apuracao thead'), $('#tbl-apuracao tfoot')];
+  if (!estado.empresaId || !ap.competencia) {
+    cab.innerHTML = pe.innerHTML = '';
+    corpo.innerHTML = '<tr><td class="vazio">Importe notas desta empresa para usar esta tela.</td></tr>';
+    return;
+  }
+  corpo.innerHTML = '<tr><td class="vazio">procurando as notas…</td></tr>';
+  const pedido = `${estado.empresaId}|${ap.tipo}|${ap.competencia}`;
+  ap.pedido = pedido;
+  try {
+    const r = await api(`/api/empresas/${estado.empresaId}/apuracao/${ap.tipo}?competencia=${ap.competencia}`);
+    if (ap.pedido !== pedido) return;
+    ap.ultimo = r;
+    desenharApuracao();
+  } catch (e) {
+    corpo.innerHTML = `<tr><td class="vazio">Não consegui montar a lista (${esc(e.message)}).</td></tr>`;
+  }
+}
+
+function desenharApuracao() {
+  const r = ap.ultimo;
+  if (!r) return;
+  const [cab, corpo, pe] = [$('#tbl-apuracao thead'), $('#tbl-apuracao tbody'), $('#tbl-apuracao tfoot')];
+  $('#ap-criterio').innerHTML = `<b>Quais notas aparecem:</b> ${esc(r.criterio.descricao)}. Conta o CFOP de entrada que você deu ao item.`;
+  $('#ap-aviso').classList.toggle('hidden', !r.aviso);
+  $('#ap-aviso').textContent = r.aviso ? `⚠ ${r.aviso}` : '';
+  const t = r.totais;
+  const chip = (texto, ruim) => `<span class="${ruim ? 'ruim' : 'ok'}">${texto}</span>`;
+  $('#ap-placar').innerHTML = t.notas ? [
+    `<span>${t.notas} nota(s) candidata(s)</span>`,
+    chip(`✓ ${t.fica} ficam`, false), `<span>✗ ${t.sai} não ficam</span>`, chip(`${t.conferir} a conferir`, t.conferir > 0),
+    `<span>Das que ficam: valor contábil <b>R$ ${moeda(t.valorContabilFica)}</b> · ICMS da nota <b>R$ ${moeda(t.icmsFica)}</b></span>`,
+  ].join('') : '';
+  if (!r.notas.length) {
+    cab.innerHTML = pe.innerHTML = '';
+    corpo.innerHTML = `<tr><td class="vazio">${r.aviso && r.totais.notas === 0 && /não é do Simples/.test(r.aviso) ? 'Sem antecipação para esta empresa.' : 'Nenhuma nota do mês se enquadra.'}</td></tr>`;
+    return;
+  }
+  const podeMarcar = pode('notas.editar_escrituracao');
+  cab.innerHTML = '<tr><th>Nota</th><th>Fornecedor</th><th class="num">Alíq.</th><th class="num">Valor contábil</th><th class="num">ICMS da nota</th><th>Fica?</th></tr>';
+  corpo.innerHTML = r.notas.map((n) => `<tr data-ap-nota="${esc(n.notaId)}" class="${n.situacao === 'fica' ? 'ap-fica' : n.situacao === 'sai' ? 'ap-sai' : ''}${ap.notaAberta === n.notaId ? ' ap-aberta' : ''}">
+      <td class="mono">${esc(n.numero)}<span class="porque">${esc(dataCurta(n.emissao))}</span></td>
+      <td class="ap-forn">${esc(n.fornecedor ?? '')}<span class="porque">${esc(n.uf ?? '')} · CFOP ${esc(n.cfops.join(', '))} · ${n.itens.length} item(ns) entram${n.foraPelaAliquota ? ` · ${n.foraPelaAliquota} com outra alíquota ficam de fora` : ''}</span></td>
+      <td class="num">${esc(n.aliquotas.map((a) => a + '%').join(', '))}</td>
+      <td class="num">${moeda(n.valorContabil)}</td>
+      <td class="num">${moeda(n.icms)}</td>
+      <td class="ap-acoes">
+        <button type="button" class="btn sm${n.situacao === 'fica' ? ' on' : ''}" data-ap-marcar="fica" ${podeMarcar ? '' : 'disabled'} title="Esta nota entra">✓ Fica</button>
+        <button type="button" class="btn sm${n.situacao === 'sai' ? ' on nao' : ''}" data-ap-marcar="sai" ${podeMarcar ? '' : 'disabled'} title="Esta nota não entra">✗ Não</button>
+        ${n.marcadoPor ? `<span class="porque">${esc(n.marcadoPor)}</span>` : ''}
+      </td></tr>`).join('');
+  pe.innerHTML = `<tr><th colspan="3">Total · ${t.notas} nota(s)</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.icms)}</th><th></th></tr>`;
+}
+
+function mostrarPdfApuracao(notaId) {
+  const fr = $('#ap-iframe');
+  $('#ap-pdf-vazio').classList.toggle('hidden', !!notaId);
+  fr.classList.toggle('hidden', !notaId);
+  if (notaId) fr.src = `/api/notas/${encodeURIComponent(notaId)}/danfe?imprimir=0`;
+  else fr.removeAttribute('src');
+}
+
+$('#tbl-apuracao')?.addEventListener('click', async (ev) => {
+  const tr = ev.target.closest('tr[data-ap-nota]');
+  if (!tr) return;
+  const id = tr.dataset.apNota;
+  const b = ev.target.closest('[data-ap-marcar]');
+  if (b) {
+    const n = ap.ultimo.notas.find((x) => x.notaId === id);
+    // Clicar de novo no que já está marcado volta para "a conferir".
+    const situacao = n.situacao === b.dataset.apMarcar ? null : b.dataset.apMarcar;
+    try {
+      await api(`/api/empresas/${estado.empresaId}/apuracao/${ap.tipo}/${id}`, { method: 'PUT', body: JSON.stringify({ situacao }) });
+    } catch (e) {
+      return alerta(`Não consegui marcar: ${e.message}`);
+    }
+    n.situacao = situacao ?? 'conferir';
+    n.marcadoPor = situacao ? (estado.eu?.nome ?? null) : null;
+    const t = ap.ultimo.totais;
+    const fica = ap.ultimo.notas.filter((x) => x.situacao === 'fica');
+    t.fica = fica.length;
+    t.sai = ap.ultimo.notas.filter((x) => x.situacao === 'sai').length;
+    t.conferir = ap.ultimo.notas.filter((x) => x.situacao === 'conferir').length;
+    t.valorContabilFica = Math.round(fica.reduce((s, x) => s + x.valorContabil, 0) * 100) / 100;
+    t.icmsFica = Math.round(fica.reduce((s, x) => s + x.icms, 0) * 100) / 100;
+    // Marcou: abre a próxima a conferir, para seguir o fluxo sem procurar.
+    if (situacao) {
+      const prox = ap.ultimo.notas.find((x) => x.situacao === 'conferir');
+      if (prox) { ap.notaAberta = prox.notaId; mostrarPdfApuracao(prox.notaId); }
+    }
+    desenharApuracao();
+    return;
+  }
+  ap.notaAberta = id;
+  mostrarPdfApuracao(id);
+  desenharApuracao();
+});
+
+$$('#ap-tipo button').forEach((b) => b.addEventListener('click', () => {
+  ap.tipo = b.dataset.ap;
+  $$('#ap-tipo button').forEach((x) => x.classList.toggle('on', x === b));
+  ap.notaAberta = null;
+  mostrarPdfApuracao(null);
+  carregarApuracao();
+}));
+
+$('#ap-competencia')?.addEventListener('change', (ev) => {
+  ap.competencia = ev.target.value;
+  ap.notaAberta = null;
+  mostrarPdfApuracao(null);
+  carregarApuracao();
+});
+
+$('#ap-relatorio')?.addEventListener('click', async () => {
+  const r = ap.ultimo;
+  if (!estado.empresaId || !ap.competencia || !r) return alerta('Escolha a empresa e o mês.');
+  if (!r.totais.fica) return alerta('Nenhuma nota marcada com “✓ Fica” neste mês. Marque as notas que entram e tire o relatório.');
+  if (r.totais.conferir) {
+    const ok = await confirmar({
+      titulo: 'Ainda tem nota a conferir',
+      corpo: `<p class="dialogo-texto">${r.totais.conferir} nota(s) ainda não foram marcadas. O relatório sai só com as ${r.totais.fica} que ficam.</p>`,
+      ok: 'Tirar o relatório assim mesmo',
+    });
+    if (!ok) return;
+  }
+  window.open(`/api/empresas/${estado.empresaId}/apuracao/${ap.tipo}/relatorio?competencia=${ap.competencia}`, '_blank', 'noopener');
+});
