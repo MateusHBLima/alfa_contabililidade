@@ -16,7 +16,8 @@ import { analisarCnaes } from './empresas/cnae';
 import { gerarXmlCorrigido, verificarInvariantes } from './nfe/serializer';
 import { ErroParserNFe } from './nfe/tipos';
 import { lerNotaOriginal, compararComApp } from './nfe/visao';
-import { danfeHtml } from './nfe/danfe';
+import { danfeHtml, danfeFolha, DANFE_CSS } from './nfe/danfe';
+import { CRITERIOS, ehTipoApuracao, ehSimples, montarCandidatas, type TipoApuracao } from './relatorios/apuracao';
 import { montarZip } from './nfe/zip';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
 import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
@@ -2234,6 +2235,117 @@ app.post('/api/empresas/:id/relatorios/produtos/questor', async (c) => {
   });
 });
 
+// ------------------------------------------------------------------ antecipação e DIFAL
+
+/**
+ * Antecipação de ICMS e DIFAL, primeira parte (09/10): as notas candidatas do mês, a
+ * marca da contadora (fica / não fica) e o relatório para o cliente com os PDFs.
+ * Sem cálculo de guia ainda. Ver src/relatorios/apuracao.ts.
+ */
+async function candidatasDaApuracao(c: any, empresaId: string, tipo: TipoApuracao, competencia: string) {
+  const repo = c.get('repo') as Repo;
+  const empresa = await repo.obterEmpresa(empresaId);
+  if (!empresa) return null;
+  const crit = CRITERIOS[tipo];
+  let aviso: string | null = null;
+  let bloqueada = false;
+  if (tipo === 'antecipacao') {
+    if (!empresa.regime) aviso = 'O regime tributário desta empresa não está preenchido. A antecipação só vale para empresas do Simples: confira o cadastro.';
+    else if (!ehSimples(empresa.regime)) { aviso = 'Esta empresa não é do Simples Nacional: não tem antecipação.'; bloqueada = true; }
+  }
+  await garantirValoresFiscais(c, empresaId, competencia);
+  const itens = bloqueada ? [] : await repo.itensParaApuracao(empresaId, competencia, crit.cfops);
+  const r = montarCandidatas(tipo, itens, await repo.marcasApuracao(empresaId, tipo, competencia));
+  return { empresa, criterio: crit, aviso, ...r };
+}
+
+const competenciaValida = (v: string | undefined) => !!v && /^\d{4}-\d{2}$/.test(v);
+
+app.get('/api/empresas/:id/apuracao/:tipo', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const tipo = c.req.param('tipo');
+  if (!ehTipoApuracao(tipo)) return c.json({ erro: 'tipo desconhecido' }, 404);
+  const competencia = c.req.query('competencia');
+  if (!competenciaValida(competencia)) return c.json({ erro: 'escolha o mês (AAAA-MM)' }, 400);
+  const r = await candidatasDaApuracao(c, c.req.param('id'), tipo, competencia!);
+  if (!r) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const { empresa, ...resto } = r;
+  return c.json({ tipo, competencia, regime: empresa.regime ?? null, ...resto });
+});
+
+app.put('/api/empresas/:id/apuracao/:tipo/:notaId', async (c) => {
+  // Decidir se a nota entra na antecipação/DIFAL é decisão fiscal: a mesma permissão da escrituração.
+  exigir(c.get('sessao'), 'notas.editar_escrituracao');
+  const tipo = c.req.param('tipo');
+  if (!ehTipoApuracao(tipo)) return c.json({ erro: 'tipo desconhecido' }, 404);
+  const { situacao } = z.object({ situacao: z.enum(['fica', 'sai']).nullable() }).parse(await c.req.json());
+  const ok = await c.get('repo').marcarApuracao(c.req.param('id'), tipo, c.req.param('notaId'), situacao);
+  if (!ok) return c.json({ erro: 'nota não encontrada nesta empresa' }, 404);
+  return c.json({ ok: true });
+});
+
+/**
+ * O relatório para o cliente: uma folha de resumo com as notas que ficam e, depois,
+ * o DANFE de cada uma. Página pronta para "Salvar como PDF" — um arquivo só.
+ */
+app.get('/api/empresas/:id/apuracao/:tipo/relatorio', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const tipo = c.req.param('tipo');
+  if (!ehTipoApuracao(tipo)) return c.text('Tipo desconhecido.', 404);
+  const competencia = c.req.query('competencia');
+  if (!competenciaValida(competencia)) return c.text('Escolha o mês.', 400);
+  const r = await candidatasDaApuracao(c, c.req.param('id'), tipo, competencia!);
+  if (!r) return c.text('Empresa não encontrada.', 404);
+  const fica = r.notas.filter((n) => n.situacao === 'fica');
+  const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, (x) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[x]!);
+  const moeda = (v: number) => Number(v ?? 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const data = (iso: string) => (iso ?? '').slice(0, 10).split('-').reverse().join('/');
+  const cnpj = (d: string) => String(d ?? '').replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+  const MESES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+  const mes = `${MESES[Number(competencia!.slice(5)) - 1]} de ${competencia!.slice(0, 4)}`;
+
+  const folhas: string[] = [];
+  const semXml: string[] = [];
+  for (const n of fica) {
+    const nota = await c.get('repo').obterNotaComItens(n.notaId);
+    const obj = nota?.nota.r2_original ? await c.env.XML_ORIGINAL.get(nota.nota.r2_original) : null;
+    if (!obj) { semXml.push(n.numero); continue; }
+    folhas.push(danfeFolha(lerNotaOriginal(await obj.text())));
+  }
+  const linhas = fica.map((n) => `<tr><td>${esc(n.numero)}</td><td>${esc(data(n.emissao))}</td><td>${esc(n.fornecedor)}<br><small>${esc(cnpj(n.cnpj ?? ''))}</small></td>
+    <td>${esc(n.uf)}</td><td>${esc(n.cfops.join(', '))}</td><td>${esc(n.aliquotas.map((a) => a + '%').join(', '))}</td>
+    <td class="n">${moeda(n.valorContabil)}</td><td class="n">${moeda(n.base)}</td><td class="n">${moeda(n.icms)}</td></tr>`).join('');
+  const t = { vc: fica.reduce((s, n) => s + n.valorContabil, 0), b: fica.reduce((s, n) => s + n.base, 0), i: fica.reduce((s, n) => s + n.icms, 0) };
+  const html = `<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>${esc(r.criterio.nome)} - ${esc(r.empresa.razao_social)} - ${esc(competencia)}</title>
+<style>${DANFE_CSS}
+  .resumo { font: 11px/1.4 Arial, Helvetica, sans-serif; padding: 6mm 4mm; }
+  .resumo h1 { font-size: 17px; margin: 0 0 2px; }
+  .resumo h2 { font-size: 13px; margin: 0 0 10px; font-weight: normal; }
+  .resumo table th, .resumo table td { font-size: 9.5px; padding: 3px 4px; }
+  .resumo tfoot td { font-weight: bold; }
+  .resumo .nota-rodape { margin-top: 10px; font-size: 9px; color: #444; }
+</style></head>
+<body>
+<div class="barra">
+  <button type="button" onclick="window.print()">Salvar em PDF / imprimir</button>
+  <span>Resumo + ${folhas.length} nota(s). Na janela que abrir, escolha <b>“Salvar como PDF”</b>.</span>
+</div>
+<div class="folha resumo">
+  <h1>${esc(r.criterio.nome)} — ${esc(mes)}</h1>
+  <h2>${esc(r.empresa.razao_social)} · CNPJ ${esc(cnpj(r.empresa.cnpj))}</h2>
+  ${fica.length ? `<table><thead><tr><th>Nota</th><th>Emissão</th><th>Fornecedor</th><th>UF</th><th>CFOP</th><th>Alíq. ICMS</th>
+    <th>Valor contábil</th><th>Base ICMS</th><th>ICMS da nota</th></tr></thead><tbody>${linhas}</tbody>
+    <tfoot><tr><td colspan="6">Total · ${fica.length} nota(s)</td><td class="n">${moeda(t.vc)}</td><td class="n">${moeda(t.b)}</td><td class="n">${moeda(t.i)}</td></tr></tfoot></table>`
+    : '<p>Nenhuma nota marcada para este mês.</p>'}
+  <p class="nota-rodape">Valores somente dos itens que entram (${esc(r.criterio.descricao)}).${semXml.length ? ` Sem o XML guardado (PDF não incluído): nota(s) ${esc(semXml.join(', '))}.` : ''}</p>
+</div>
+${folhas.join('\n')}
+</body></html>`;
+  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+});
+
 /** Marca/desmarca um produto do relatório como "não fechou" (28/09). */
 app.put('/api/empresas/:id/relatorios/produtos/marca', async (c) => {
   // Anotação de conferência, não dado fiscal: quem vê o relatório pode marcar.
@@ -2671,6 +2783,7 @@ app.delete('/api/notas/:id', async (c) => {
 
   await c.env.DB.batch([
     c.env.DB.prepare('DELETE FROM itens WHERE tenant_id = ? AND nota_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM apuracao_marcas WHERE tenant_id = ? AND nota_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM notas WHERE tenant_id = ? AND id = ?').bind(s.tenantId, id),
   ]);
 
@@ -2730,6 +2843,7 @@ app.delete('/api/empresas/:id', async (c) => {
     c.env.DB.prepare('DELETE FROM fornecedores WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM lotes_importacao WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM produtos_nao_fecharam WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM apuracao_marcas WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM usuario_empresas WHERE empresa_id = ?').bind(id),
     c.env.DB.prepare('DELETE FROM empresas WHERE tenant_id = ? AND id = ?').bind(s.tenantId, id),
   ]);
@@ -2801,7 +2915,8 @@ app.get('/api/notas/:id/danfe', async (c) => {
   if (!r) return c.text('Nota não encontrada.', 404);
   const obj = r.nota.r2_original ? await c.env.XML_ORIGINAL.get(r.nota.r2_original) : null;
   if (!obj) return c.text('XML original não encontrado no arquivo.', 404);
-  const html = danfeHtml(lerNotaOriginal(await obj.text()), { cancelada: !!r.nota.cancelada_em });
+  // ?imprimir=0: a tela da antecipação/DIFAL mostra o DANFE ao lado, sem abrir a impressão.
+  const html = danfeHtml(lerNotaOriginal(await obj.text()), { cancelada: !!r.nota.cancelada_em, imprimir: c.req.query('imprimir') !== '0' });
   return new Response(html, {
     headers: { 'Content-Type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
   });
