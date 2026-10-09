@@ -1750,6 +1750,78 @@ export class Repo {
     return results;
   }
 
+  /** Itens do mês com os CFOPs de entrada dados, para a antecipação e o DIFAL (09/10). */
+  async itensParaApuracao(empresaId: string, competencia: string, cfops: string[]): Promise<any[]> {
+    this.exigirEmpresa(empresaId);
+    const r = this.recorteCompetencia(competencia);
+    const { results } = await this.db
+      .prepare(
+        `SELECT n.id AS nota_id, n.numero, n.serie, n.dh_emi, n.emit_nome, n.emit_cnpj, n.emit_uf, n.valor_total AS valor_nota,
+                i.n_item, COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original) AS descricao, i.ncm,
+                TRIM(i.cfop_novo) AS cfop, COALESCE(i.valor_total, 0) AS valor_produto,
+                COALESCE(i.valor_contabil, i.valor_total, 0) AS valor_contabil,
+                COALESCE(i.v_bc_icms, 0) AS base, COALESCE(i.v_icms, 0) AS icms,
+                COALESCE(i.v_ipi, 0) AS ipi, COALESCE(i.v_st, 0) + COALESCE(i.v_fcp_st, 0) AS st
+           FROM itens i JOIN notas n ON n.id = i.nota_id
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0 ${r.sql}
+            AND TRIM(i.cfop_novo) IN (${cfops.map(() => '?').join(',')})
+          ORDER BY n.dh_emi, n.numero, i.n_item
+          LIMIT 20000`,
+      )
+      .bind(this.tenant, empresaId, ...r.binds, ...cfops)
+      .all<any>();
+    return results;
+  }
+
+  async marcasApuracao(empresaId: string, tipo: string, competencia: string): Promise<Map<string, { situacao: 'fica' | 'sai'; por: string | null; em: string }>> {
+    this.exigirEmpresa(empresaId);
+    const { results } = await this.db
+      .prepare(
+        `SELECT m.nota_id, m.situacao, m.marcado_em, u.nome AS por
+           FROM apuracao_marcas m LEFT JOIN usuarios u ON u.id = m.marcado_por
+          WHERE m.tenant_id = ? AND m.empresa_id = ? AND m.tipo = ? AND m.competencia = ?`,
+      )
+      .bind(this.tenant, empresaId, tipo, competencia)
+      .all<any>();
+    return new Map(results.map((r: any) => [r.nota_id, { situacao: r.situacao, por: r.por ?? null, em: r.marcado_em }]));
+  }
+
+  /** Marca a nota na antecipação ou no DIFAL: fica, sai, ou volta para "a conferir" (null). Fica na trilha. */
+  async marcarApuracao(empresaId: string, tipo: string, notaId: string, situacao: 'fica' | 'sai' | null): Promise<boolean> {
+    this.exigirEmpresa(empresaId);
+    const nota = await this.db
+      .prepare('SELECT id, numero, competencia FROM notas WHERE tenant_id = ? AND empresa_id = ? AND id = ?')
+      .bind(this.tenant, empresaId, notaId)
+      .first<any>();
+    if (!nota) return false;
+    const antes = await this.db
+      .prepare('SELECT situacao FROM apuracao_marcas WHERE tenant_id = ? AND empresa_id = ? AND tipo = ? AND nota_id = ?')
+      .bind(this.tenant, empresaId, tipo, notaId)
+      .first<any>();
+    if ((antes?.situacao ?? null) === situacao) return true;
+    const t = agora();
+    await this.db.batch([
+      situacao
+        ? this.db.prepare(
+          `INSERT INTO apuracao_marcas (tenant_id, empresa_id, tipo, nota_id, competencia, situacao, marcado_por, marcado_em)
+           VALUES (?,?,?,?,?,?,?,?)
+           ON CONFLICT(empresa_id, tipo, nota_id) DO UPDATE SET situacao = excluded.situacao,
+             marcado_por = excluded.marcado_por, marcado_em = excluded.marcado_em, competencia = excluded.competencia`,
+        ).bind(this.tenant, empresaId, tipo, notaId, nota.competencia ?? '', situacao, this.ctx.sessao.usuarioId, t)
+        : this.db.prepare('DELETE FROM apuracao_marcas WHERE tenant_id = ? AND empresa_id = ? AND tipo = ? AND nota_id = ?')
+          .bind(this.tenant, empresaId, tipo, notaId),
+    ]);
+    const nome = (v: string | null) => (v === 'fica' ? 'fica' : v === 'sai' ? 'não fica' : 'a conferir');
+    await this.aud.registrarLote([
+      this.evento({
+        acao: 'alterar', entidade: 'apuracao', entidadeId: notaId, campo: tipo,
+        valorAntes: `nota ${nota.numero}: ${nome(antes?.situacao ?? null)}`, valorDepois: `nota ${nota.numero}: ${nome(situacao)}`,
+        origem: 'manual',
+      }),
+    ]);
+    return true;
+  }
+
   /**
    * Os itens do mês para a conferência com o Questor (02/10): um por linha, com o nome
    * da nota e o padronizado, a nota e o fornecedor. Mesmo recorte do relatório por
