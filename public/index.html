@@ -169,6 +169,10 @@
           <span class="num">4</span>
           <span>Relatórios<span class="sub">por CFOP, produto e nota</span></span>
         </button>
+        <button data-view="vApuracao">
+          <span class="num">5</span>
+          <span>Antecipação e DIFAL<span class="sub">notas do mês para marcar</span></span>
+        </button>
       </div>
       <div class="nav-grupo g-impostos">
         <div class="navlabel">Regras de impostos</div>
@@ -539,6 +543,34 @@
       </section>
 
       <!-- -------------------------------------------- REGRAS DE ICMS -->
+      <section id="vApuracao" class="hidden">
+        <h1>Antecipação e DIFAL <span class="escopo-empresa" id="escopo-apuracao"></span></h1>
+        <p class="page-desc">O sistema separa as notas do mês que se enquadram. Clique na nota para ver o PDF ao lado, marque
+          se ela <b>fica</b> ou <b>não fica</b> e tire o relatório para o cliente (resumo + PDF de cada nota que fica).
+          O cálculo da guia ainda não está aqui.</p>
+        <div class="card">
+          <div class="toolbar">
+            <div class="filters" id="ap-tipo">
+              <button data-ap="antecipacao" class="on">Antecipação de ICMS</button>
+              <button data-ap="difal">DIFAL (uso e consumo)</button>
+            </div>
+            <select id="ap-competencia" style="font-size:12px;width:210px"></select>
+            <div class="sep"></div>
+            <button class="btn sm primary" id="ap-relatorio" title="Folha de resumo com as notas que ficam e, depois, o PDF de cada uma. Salve como PDF e mande ao cliente.">⇩ Relatório para o cliente (PDF)</button>
+          </div>
+          <div class="tiny" id="ap-criterio" style="margin:0 14px 6px"></div>
+          <div id="ap-aviso" class="placar sutil hidden" style="margin:0 14px 8px"></div>
+          <div id="ap-placar" class="questor-placar" style="margin:0 14px 8px"></div>
+          <div class="ap-corpo">
+            <div class="ap-lista scroll"><table id="tbl-apuracao"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>
+            <div class="ap-pdf">
+              <div class="ap-pdf-vazio" id="ap-pdf-vazio">Clique numa nota para ver o PDF dela aqui.</div>
+              <iframe id="ap-iframe" class="hidden" title="PDF da nota"></iframe>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section id="vRegrasIcms" class="hidden">
         <h1>Regras de ICMS por CFOP</h1>
         <p class="page-desc">Vale para todas as empresas. Em <b>Outras</b>, o relatório por CFOP mostra a base e o ICMS
