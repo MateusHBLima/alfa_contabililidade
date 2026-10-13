@@ -116,6 +116,29 @@ export function chaveDoNivel(item: ItemNFe, emitCnpj: string, nivel: Nivel, camp
   return campo === 'cfop' ? `${base}#${String(item.CFOP ?? '').trim() || '?'}` : base;
 }
 
+/**
+ * O caminho inverso de chaveDoNivel (13/10, "de onde veio isto"): o que a chave de
+ * uma regra exige do item. `saida` so existe na chave de CFOP ('' = CFOP de saida
+ * vazio no XML). Nivel 7 (perfil) nao vem de item nenhum: devolve null.
+ */
+export type PartesDaChave = { cnpj?: string; cprod?: string; ean?: string; ncm?: string; saida?: string };
+export function partesDaChave(nivel: number, chave: string): PartesDaChave | null {
+  const k = chave.lastIndexOf('#');
+  const base = k >= 0 ? chave.slice(0, k) : chave;
+  const p: PartesDaChave = {};
+  if (k >= 0) { const s = chave.slice(k + 1); p.saida = s === '?' ? '' : s; }
+  const [a, b] = [base.slice(0, base.indexOf('|')), base.slice(base.indexOf('|') + 1)];
+  switch (nivel) {
+    case 1: if (!base.includes('|')) return null; return { ...p, cnpj: a, cprod: b };
+    case 2: if (!base.includes('|')) return null; return { ...p, cnpj: a, ean: b };
+    case 3: return { ...p, ean: base };
+    case 4: if (!base.includes('|')) return null; return { ...p, cnpj: a, ncm: b };
+    case 5: return { ...p, cnpj: base };
+    case 6: return { ...p, ncm: base };
+    default: return null;
+  }
+}
+
 /** As chaves de um item PARA UM CAMPO. Sem campo: as chaves dos campos que nao sao CFOP. */
 export function chavesDoItem(item: ItemNFe, emitCnpj: string, campo?: Campo): { nivel: Nivel; chave: string }[] {
   const out: { nivel: Nivel; chave: string }[] = [];
