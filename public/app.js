@@ -543,7 +543,7 @@ function marcarTrocaPendente() {
   const sel = $('#sel-empresa');
   const pendente = !!sel.value && sel.value !== estado.empresaId;
   sel.classList.toggle('pendente', pendente);
-  $('#btn-empresa-ok').classList.toggle('hidden', !pendente);
+  // 13/10 (Taís): o OK fica sempre à vista; com a empresa já aberta, ele reaplica o ano e o mês.
   const aviso = $('#troca-pendente');
   aviso.classList.toggle('hidden', !pendente);
   if (pendente) aviso.textContent = `Ainda em ${nomeEmpresaAtual() ?? '—'}. Clique OK para trocar.`;
@@ -558,6 +558,7 @@ $('#empresa-atual').addEventListener('click', (ev) => {
 $('#btn-empresa-ok').addEventListener('click', async () => {
   const id = $('#sel-empresa').value;
   if (id && id !== estado.empresaId) await trocarEmpresa(id);
+  else await aplicarCompetencia();
   marcarTrocaPendente();
 });
 
@@ -565,8 +566,10 @@ async function trocarEmpresa(empresaId) {
   estado.empresaId = empresaId;
   estado.notaAberta = null;
   marcarEscopo();
-  // Competencia e recorte da empresa ANTERIOR. Levar "setembro/2026" para uma
-  // empresa que so tem notas de 2025 devolveria lista vazia sem explicacao.
+  // O ano e o mês escolhidos valem para a empresa nova se ela tiver notas nesse mês
+  // (13/10, Taís: "coloquei outubro e apareceram as de setembro"). Antes a troca zerava o
+  // filtro mas o seletor continuava dizendo outubro. Se a empresa nova não tem aquele
+  // mês, o seletor volta para "todos" — nunca diz um mês e mostra outro.
   estado.competencia = '';
   estado.importacaoId = '';
   // 25/09: depois do OK a tela ficava 2-3 s mostrando a empresa anterior. Eram
@@ -574,12 +577,11 @@ async function trocarEmpresa(empresaId) {
   // tela avisa que está abrindo a empresa (o aviso só aparece se demorar).
   const aviso = setTimeout(() => mostrarEspera(`Abrindo ${nomeEmpresaAtual() ?? 'a empresa'}…`), 150);
   try {
-    const [, , notas] = await Promise.all([
-      carregarCompetencias(),
-      carregarImportacoes(),
-      api(`/api/empresas/${empresaId}/notas`),
-    ]);
-    estado.notas = notas;
+    await Promise.all([carregarCompetencias(), carregarImportacoes()]);
+    // carregarCompetencias redesenha os seletores mantendo ano e mês se a empresa nova os tiver.
+    const ano = $('#sel-ano').value, mes = $('#sel-mes').value;
+    estado.competencia = ano && mes ? `${ano}-${mes}` : ano || '';
+    estado.notas = await api(`/api/empresas/${empresaId}/notas${estado.competencia ? `?competencia=${estado.competencia}` : ''}`);
     renderNotas();
     // Trocar de empresa nao pode deixar na tela a lista da empresa anterior.
     const aberta = ['vFornecedores', 'vRegras', 'vRelatorios', 'v3', 'vApuracao']
@@ -4322,6 +4324,7 @@ async function abrirPainelSef() {
     $('#sef-info').textContent = partes.join(' ');
     $('#sef-consultar').disabled = !r.certificados.length;
     mostrarBuscaAutomatica(r.automatica);
+    desenharMesesSef(r);
   } catch (e) {
     $('#sef-info').textContent = 'Não consegui carregar: ' + e.message;
   }
@@ -4345,13 +4348,37 @@ function mostrarBuscaAutomatica(a) {
     texto = 'Busca automática desligada: as notas só entram quando alguém busca aqui.';
   }
   $('#sef-auto-texto').innerHTML = texto;
-  $('#sef-auto-ligar').classList.toggle('hidden', ligada);
+  // Ligada, o mesmo campo serve para mudar a data de início (13/10): pôr uma data mais
+  // antiga faz o sistema importar sozinho o que a SEF ainda tem desde ela.
+  $('#sef-auto-ligar').classList.remove('hidden');
+  $('#sef-auto-rotulo').textContent = ligada ? 'mudar o início para' : 'importar sozinho as emitidas a partir de';
+  $('#sef-auto-ligar-btn').textContent = ligada ? 'Mudar data de início' : 'Ligar busca automática';
+  $('#sef-auto-ligar-btn').classList.toggle('primary', !ligada);
   $('#sef-auto-desligar').classList.toggle('hidden', !ligada);
-  if (!ligada) {
-    const campo = $('#sef-auto-desde');
-    // Padrão: hoje — "a partir de hoje", como a Taís pediu. O que é de antes, ela busca à mão.
-    if (!campo.value) campo.value = a?.desde || isoLocal(new Date());
-  }
+  const campo = $('#sef-auto-desde');
+  // Padrão: hoje — "a partir de hoje", como a Taís pediu. Ligada: a data que está valendo.
+  campo.value = ligada ? (a.desde || '') : (campo.value || a?.desde || isoLocal(new Date()));
+}
+
+/**
+ * Situação de cada mês na SEF (13/10, pedido da Taís): completo (a SEF já entregou o
+ * mês inteiro), em andamento, ou sem movimento. A SEF entrega a nota um dia depois da
+ * emissão, então o mês só fecha uns dois dias depois de acabar.
+ */
+function desenharMesesSef(r) {
+  const caixa = $('#sef-meses');
+  const meses = r?.meses || [];
+  caixa.classList.toggle('hidden', !meses.length);
+  if (!meses.length) { caixa.innerHTML = ''; return; }
+  const nomeMes = (c) => `${MESES[Number(c.slice(5)) - 1] ?? c.slice(5)}/${c.slice(0, 4)}`;
+  const linhas = meses.slice().reverse().map((m) => {
+    const notas = `${m.noSistema} nota(s) no sistema` + (m.naCaixa ? ` · <b>${m.naCaixa} na SEF ainda sem importar</b>` : '');
+    if (m.semMovimento) return `<span class="mes sem" title="A SEF já entregou o mês inteiro e não veio nenhuma nota.">${nomeMes(m.competencia)}: <b>sem movimento</b></span>`;
+    if (m.completo) return `<span class="mes completo" title="A SEF já entregou todas as notas deste mês.">${nomeMes(m.competencia)}: ✓ completo · ${notas}</span>`;
+    return `<span class="mes andamento" title="A SEF entrega a nota um dia depois da emissão: o mês fecha uns dois dias depois de acabar.">${nomeMes(m.competencia)}: em andamento · ${notas}</span>`;
+  }).join('');
+  const ate = r.cobertura?.ate ? `A SEF já entregou tudo o que foi emitido até <b>${dataSef(r.cobertura.ate)}</b>.` : 'Ainda não houve uma consulta completa à SEF desta empresa.';
+  caixa.innerHTML = `<div><b>Mês a mês na SEF</b> · ${ate} Ela guarda desde ${dataSef(r.cobertura?.de ?? '')}.</div><div class="linhas">${linhas}</div>`;
 }
 
 async function ligarBuscaAutomatica(ligada) {
@@ -4359,9 +4386,21 @@ async function ligarBuscaAutomatica(ligada) {
   const desde = ligada ? $('#sef-auto-desde').value : null;
   if (ligada && !desde) return alerta('Escolha a data de início.');
   try {
+    const antes = await api(`/api/empresas/${estado.empresaId}/sef`);
+    // A SEF guarda o mês atual e os dois anteriores: antes disso, não tem o que puxar.
+    const limite = antes.cobertura?.de ?? isoLocal(new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1));
+    if (ligada && desde < limite) {
+      const ok = await confirmar({
+        titulo: 'A SEF não guarda notas tão antigas',
+        corpo: `<p class="dialogo-texto">A SEF só tem as notas desta empresa a partir de <b>${dataSef(limite)}</b>. O que for de antes disso não vem pela busca: tem que subir o XML à mão.</p>`,
+        ok: 'Entendi, ligar mesmo assim',
+      });
+      if (!ok) return;
+    }
     await api(`/api/empresas/${estado.empresaId}/sef/automatica`, { method: 'POST', body: JSON.stringify({ ligada, desde }) });
     const r = await api(`/api/empresas/${estado.empresaId}/sef`);
     mostrarBuscaAutomatica(r.automatica);
+    desenharMesesSef(r);
   } catch (e) {
     alerta('Não consegui ' + (ligada ? 'ligar' : 'desligar') + ': ' + e.message);
   }
@@ -4435,9 +4474,18 @@ $('#form-sef').addEventListener('submit', async (ev) => {
     if (canceladas) avisos.push(`<div class="aviso"><b>${canceladas} nota(s) que já estavam no sistema foram canceladas na SEF</b> e foram marcadas como canceladas.</div>`);
     const novas = sefNotas.filter((n) => !n.noSistema);
     const periodo = `${dataSef(de)} a ${dataSef(ate)}`;
+    // O período inteiro já veio da SEF? (13/10: "que ele me avise que não tem movimento")
+    const cob = r.cobertura;
+    const inteiro = cob && cob.ate && de >= cob.de && ate <= cob.ate;
+    const falta = !cob || !cob.ate ? 'A SEF ainda não entregou tudo desta empresa; consulte de novo depois.'
+      : de < cob.de ? `A SEF só guarda as notas desta empresa a partir de ${dataSef(cob.de)}.`
+      : ate > cob.ate ? `A SEF entrega a nota um dia depois da emissão: tudo o que foi emitido até ${dataSef(cob.ate)} já veio; o resto do período ainda pode chegar.` : '';
     const resumo = sefNotas.length
       ? `<p><b>${sefNotas.length} nota(s) emitidas de ${periodo}</b>${sefNotas.length - novas.length ? `, ${sefNotas.length - novas.length} já no sistema` : ''}.</p>`
-      : `<p>Nenhuma nota emitida de ${periodo} no que a SEF mandou até agora.</p>`;
+        + (inteiro ? '<p class="tiny">✓ Período completo: a SEF já mandou todas as notas dele.</p>' : falta ? `<p class="tiny">⚠ ${esc(falta)}</p>` : '')
+      : inteiro
+        ? `<div class="sem-movimento"><b>Sem movimento:</b> a SEF não tem nenhuma nota desta empresa emitida de ${periodo}. O período já veio inteiro.</div>`
+        : `<p>Nenhuma nota emitida de ${periodo} no que a SEF mandou até agora.</p>${falta ? `<p class="tiny">⚠ ${esc(falta)}</p>` : ''}`;
     const tabela = sefNotas.length ? `<div class="scroll sef-lista"><table>
         <thead><tr><th>Emissão</th><th>Número</th><th>Fornecedor</th><th class="num">Valor</th><th></th></tr></thead>
         <tbody>${sefNotas.map((n) => `<tr>
@@ -4448,6 +4496,8 @@ $('#form-sef').addEventListener('submit', async (ev) => {
     const botao = novas.length
       ? `<div class="sef-acoes"><button class="btn primary" type="button" id="sef-importar">Importar ${novas.length} nota(s) nova(s)</button></div>` : '';
     saida.innerHTML = avisos.join('') + resumo + tabela + botao;
+    // Depois de consultar, a linha mês a mês e a busca automática se atualizam.
+    api(`/api/empresas/${estado.empresaId}/sef`).then((info) => { desenharMesesSef(info); mostrarBuscaAutomatica(info.automatica); }).catch(() => {});
   } catch (e) {
     saida.innerHTML = `<div class="aviso">${esc(e.message)}</div>`;
   } finally {
