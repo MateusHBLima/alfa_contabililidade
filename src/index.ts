@@ -25,7 +25,7 @@ import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, res
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
-import { baixarDaSef, executarBuscaAutomatica, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
+import { baixarDaSef, executarBuscaAutomatica, mesesDaSef, coberturaDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
 import { ErroSef } from './captura/sefsc';
 import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
@@ -2088,8 +2088,15 @@ app.get('/api/empresas/:id/sef', async (c) => {
         .bind(e.auto_ligada_por, c.get('sessao').tenantId).first<{ nome: string }>())?.nome ?? null : null,
       ultima: e.auto_ultima, resultado: e.auto_ultimo_resultado,
     } : { ligada: false, desde: null, ligadaEm: null, ligadaPor: null, ultima: null, resultado: null },
+    ...(await situacaoDosMeses(repo, empresaId)),
   });
 });
+
+/** Até que dia a SEF já entregou tudo e a situação de cada mês (13/10). */
+async function situacaoDosMeses(repo: Repo, empresaId: string) {
+  const mov = await repo.movimentoPorMes(empresaId);
+  return { cobertura: coberturaDaSef(mov.primeiraConsulta, mov.completoEm), meses: mesesDaSef(mov) };
+}
 
 /**
  * Liga ou desliga a busca automática da empresa (01/10). Quem liga é em nome de quem
@@ -2142,7 +2149,8 @@ app.post('/api/empresas/:id/sef/consultar', async (c) => {
     chave: n.chave, numero: n.numero, fornecedor: n.emit_nome, cnpj: n.emit_cnpj, emissao: n.dh_emi, valor: n.valor,
     noSistema: !!n.nota_id, cancelada: !!n.cancelada,
   }));
-  return c.json({ download, canceladasAplicadas: canceladas, notas });
+  const { cobertura } = await situacaoDosMeses(repo, empresaId);
+  return c.json({ download, canceladasAplicadas: canceladas, notas, cobertura });
 });
 
 app.post('/api/empresas/:id/sef/importar', async (c) => {
