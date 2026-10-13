@@ -10,7 +10,7 @@ import { conferirSenha, gerarHashSenha, avaliarSenha, HashIncompativel, HASH_INE
 import {
   gerarSegredo, conferirTotp, uriDeProvisionamento, segredoLegivel,
 } from './auth/totp';
-import { importarArquivos } from './nfe/importador';
+import { importarArquivos, atualizarPalpitesDaNota } from './nfe/importador';
 import { parseNFe } from './nfe/parser';
 import { analisarCnaes } from './empresas/cnae';
 import { gerarXmlCorrigido, verificarInvariantes } from './nfe/serializer';
@@ -2395,6 +2395,11 @@ app.get('/api/notas/:id', async (c) => {
     if (await lerValoresFiscaisDaNota(c, r.nota.id, r.nota.r2_original)) {
       r = (await repo.obterNotaComItens(r.nota.id))!;
     }
+  }
+
+  // O que foi ensinado depois da importação vale para o que ainda não foi conferido (13/10).
+  if (await atualizarPalpitesDaNota(repo, r.nota, r.itens)) {
+    r = (await repo.obterNotaComItens(r.nota.id))!;
   }
 
   const historico = await repo.carregarHistoricoProdutos(
