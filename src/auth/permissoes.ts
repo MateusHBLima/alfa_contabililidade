@@ -188,9 +188,14 @@ export type Sessao = {
   deveTrocarSenha: boolean;
 };
 
+/**
+ * Quem tem `empresas.todas` vê todas, com ou sem vínculo (13/10). Antes, ganhar um
+ * vínculo — ser marcado como responsável de uma empresa nova — fazia o administrador
+ * passar a ver SÓ aquela empresa, e a busca automática ligada por ele parava nas outras.
+ */
 export function podeVerEmpresa(sessao: Sessao, empresaId: string): boolean {
-  if (sessao.empresas === null) return sessao.permissoes.has('empresas.todas');
-  return sessao.empresas.has(empresaId);
+  if (sessao.permissoes.has('empresas.todas')) return true;
+  return sessao.empresas !== null && sessao.empresas.has(empresaId);
 }
 
 export class SemPermissao extends Error {
