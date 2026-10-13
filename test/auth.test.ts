@@ -85,6 +85,13 @@ describe('permissões', () => {
     expect(podeVerEmpresa(sessao(['notas.visualizar'], null), 'qualquer')).toBe(false);
     expect(podeVerEmpresa(sessao(['empresas.todas'], null), 'qualquer')).toBe(true);
   });
+
+  it('13/10: quem vê todos os clientes continua vendo todos depois de ganhar um vínculo', () => {
+    // Bug real: marcada como responsável de uma empresa nova, a pessoa passou a ver só ela.
+    const s = sessao(['empresas.todas', 'notas.visualizar'], new Set(['emp-nova']));
+    expect(podeVerEmpresa(s, 'emp-nova')).toBe(true);
+    expect(podeVerEmpresa(s, 'emp-antiga')).toBe(true);
+  });
 });
 
 describe('cadeia de hash da auditoria', () => {

@@ -58,6 +58,25 @@ export type FichaRegra = {
   suspeita: boolean;
 };
 
+/**
+ * Gravar regra que ja existe atualiza em vez de estourar (13/10, Filomena).
+ *
+ * Antes cada caminho fazia "procura; se nao achar, insere". Duas gravacoes do
+ * mesmo produto chegando juntas - empresa nova, nenhuma regra ainda - liam "nao
+ * existe" as duas, a segunda batia na unicidade, voltava "este registro ja
+ * existe" e o item dela nao era salvo: o CFOP voltava para o que estava.
+ *
+ * Mesma regra de sempre: vale a decisao mais recente, menos em regra fixada,
+ * que so outra fixacao explicita muda. Valor igual sem fixar nao mexe em nada.
+ */
+const SE_A_REGRA_JA_EXISTE = `
+  ON CONFLICT (tenant_id, empresa_id, nivel, chave, campo) DO UPDATE SET
+    valor = excluded.valor, atualizada_em = excluded.criada_em, suspeita = 0, erros_seguidos = 0,
+    fixada = MAX(regras.fixada, excluded.fixada),
+    fixada_por = COALESCE(excluded.fixada_por, regras.fixada_por),
+    fixada_em = COALESCE(excluded.fixada_em, regras.fixada_em)
+  WHERE excluded.fixada = 1 OR (regras.fixada = 0 AND regras.valor <> excluded.valor)`;
+
 export class Repo {
   private aud: Auditoria;
 
@@ -95,11 +114,8 @@ export class Repo {
       .prepare('SELECT * FROM empresas WHERE tenant_id = ? AND ativo = 1 ORDER BY razao_social')
       .bind(this.tenant)
       .all<any>();
-    const permitidas = this.ctx.sessao.empresas;
-    if (permitidas === null) {
-      return this.ctx.sessao.permissoes.has('empresas.todas') ? results : [];
-    }
-    return results.filter((e) => permitidas.has(e.id));
+    // Mesma regra de podeVerEmpresa: "ver todos os clientes" vale com ou sem vínculo.
+    return results.filter((e) => podeVerEmpresa(this.ctx.sessao, e.id));
   }
 
   async obterEmpresa(empresaId: string): Promise<any | null> {
@@ -376,7 +392,7 @@ export class Repo {
           this.db
             .prepare(
               `INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, confianca, ativa, fixada, fixada_por, fixada_em, criada_em, criada_por)
-               VALUES (?,?,?,?,?,?,?,0.5,1,?,?,?,?,?)`,
+               VALUES (?,?,?,?,?,?,?,0.5,1,?,?,?,?,?) ${SE_A_REGRA_JA_EXISTE}`,
             )
             .bind(id(), this.tenant, empresaId, u.nivel, u.chave, u.campo, u.valor,
                   u.fixada ? 1 : 0, u.fixada ? quem : null, u.fixada ? quando : null, quando, quem),
@@ -513,50 +529,20 @@ export class Repo {
         continue;
       }
 
-      // criar / atualizar
-      const existente = await this.db
-        .prepare(
-          `SELECT id, valor, fixada FROM regras
-           WHERE tenant_id = ? AND empresa_id = ? AND nivel = ? AND chave = ? AND campo = ?`,
-        )
-        .bind(this.tenant, empresaId, acao.nivel, acao.chave, acao.campo)
-        .first<{ id: string; valor: string; fixada: number }>();
-
-      if (!existente) {
-        await this.db
-          .prepare(
-            `INSERT INTO regras
-               (id, tenant_id, empresa_id, nivel, chave, campo, valor, confianca, ativa,
-                fixada, fixada_por, fixada_em, criada_em, criada_por)
-             VALUES (?,?,?,?,?,?,?,0.5,1,?,?,?,?,?)`,
-          )
-          .bind(
-            id(), this.tenant, empresaId, acao.nivel, acao.chave, acao.campo, acao.valor,
-            acao.fixada ? 1 : 0,
-            acao.fixada ? this.ctx.sessao.usuarioId : null,
-            acao.fixada ? agora() : null,
-            agora(), this.ctx.sessao.usuarioId,
-          )
-          .run();
-        continue;
-      }
-
-      if (existente.valor === acao.valor && !acao.fixada) continue;
-
-      // Regra fixada só é sobrescrita por outra fixação explícita.
-      if (existente.fixada === 1 && !acao.fixada) continue;
-
+      // criar / atualizar numa instrucao so (ver SE_A_REGRA_JA_EXISTE).
+      const quando = agora();
+      const quem = this.ctx.sessao.usuarioId;
       await this.db
         .prepare(
-          `UPDATE regras SET valor=?, atualizada_em=?, suspeita=0, erros_seguidos=0,
-             fixada=?, fixada_por=COALESCE(?, fixada_por), fixada_em=COALESCE(?, fixada_em)
-           WHERE tenant_id = ? AND id = ?`,
+          `INSERT INTO regras
+             (id, tenant_id, empresa_id, nivel, chave, campo, valor, confianca, ativa,
+              fixada, fixada_por, fixada_em, criada_em, criada_por)
+           VALUES (?,?,?,?,?,?,?,0.5,1,?,?,?,?,?) ${SE_A_REGRA_JA_EXISTE}`,
         )
         .bind(
-          acao.valor, agora(), acao.fixada ? 1 : existente.fixada,
-          acao.fixada ? this.ctx.sessao.usuarioId : null,
-          acao.fixada ? agora() : null,
-          this.tenant, existente.id,
+          id(), this.tenant, empresaId, acao.nivel, acao.chave, acao.campo, acao.valor,
+          acao.fixada ? 1 : 0, acao.fixada ? quem : null, acao.fixada ? quando : null,
+          quando, quem,
         )
         .run();
     }
@@ -783,7 +769,7 @@ export class Repo {
               `INSERT INTO regras
                  (id, tenant_id, empresa_id, nivel, chave, campo, valor, confianca, ativa,
                   fixada, fixada_por, fixada_em, criada_em, criada_por)
-               VALUES (?,?,?,?,?,?,?,0.5,1,1,?,?,?,?)`,
+               VALUES (?,?,?,?,?,?,?,0.5,1,1,?,?,?,?) ${SE_A_REGRA_JA_EXISTE}`,
             )
             .bind(id(), this.tenant, empresaId, a.nivel, a.chave, 'cfop', a.valor,
                   quem, quando, quando, quem);
