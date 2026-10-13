@@ -1003,12 +1003,14 @@ function renderNotas() {
   const dataBr = (d) => d.split('-').reverse().join('/');
   const aviso = $('#periodo-notas');
   aviso.classList.toggle('hidden', !periodo);
-  $('#notas-limpar-datas').classList.toggle('hidden', !periodo);
   aviso.innerHTML = !periodo ? ''
     : invertido ? '⚠ A data "de" está depois da data "até". Troque uma das duas.'
     : `Mostrando as notas emitidas <b>${estado.dataDe ? `de ${dataBr(estado.dataDe)}` : 'desde o início'}</b>
        <b>${estado.dataAte ? `até ${dataBr(estado.dataAte)}` : 'até hoje'}</b> — ${noPeriodo.length} de ${estado.notas.length} nota(s).
-       O placar acima soma só esse período.`;
+       O placar acima soma só esse período.${noPeriodo.length === 0 && estado.competencia
+         ? ` Lá em cima está escolhido <b>${esc(estado.competencia.length > 4
+           ? `${MESES[Number(estado.competencia.slice(5)) - 1]} de ${estado.competencia.slice(0, 4)}` : estado.competencia)}</b>:
+           o período precisa estar dentro dele (ou escolha "o ano todo").` : ''}`;
 
   const totalItens = noPeriodo.reduce((s, n) => s + (n.total_itens ?? 0), 0);
   const revisados = noPeriodo.reduce((s, n) => s + (n.itens_revisados ?? 0), 0);
@@ -1333,14 +1335,8 @@ async function abrirOriginal() {
 }
 
 $('#busca').addEventListener('input', (e) => { estado.busca = e.target.value.toLowerCase(); renderItens(); });
-for (const [id, campo] of [['#notas-de', 'dataDe'], ['#notas-ate', 'dataAte']]) {
-  $(id).addEventListener('change', (e) => { estado[campo] = e.target.value; renderNotas(); });
-}
-$('#notas-limpar-datas').addEventListener('click', () => {
-  estado.dataDe = estado.dataAte = '';
-  $('#notas-de').value = $('#notas-ate').value = '';
-  renderNotas();
-});
+// Emissão de/até: só filtra no OK, no Enter ou num atalho (public/periodo.js, 13/10).
+ligarPeriodo('notas', (de, ate) => { estado.dataDe = de; estado.dataAte = ate; renderNotas(); }, { atalhos: true });
 $$('#filtros-notas button').forEach((b) => b.addEventListener('click', () => {
   $$('#filtros-notas button').forEach((x) => x.classList.remove('on'));
   b.classList.add('on');
@@ -3246,7 +3242,6 @@ function mostrarPeriodoRel() {
   const el = $('#rel-periodo');
   el.classList.toggle('hidden', !t);
   el.innerHTML = t ? `📅 <b>${esc(t)}</b> — os totais abaixo são só desse período.` : '';
-  $('#rel-limpar-datas').classList.toggle('hidden', !t);
 }
 
 async function abrirRelatorios() {
@@ -3317,7 +3312,6 @@ async function carregarRelatorio() {
   desenharRelatorio();
 }
 let seqRelatorio = 0;
-let esperaDatasRel = null;
 
 /* Busca dentro do relatório (27/09, pedido da Taís): filtra as linhas que já
    estão na tela - produto, código, CFOP ou valor - e o total passa a ser só do
@@ -3557,18 +3551,9 @@ $$('#rel-qual button').forEach((b) => b.addEventListener('click', () => {
   carregarRelatorio();
 }));
 $('#rel-competencia').addEventListener('change', (e) => { rel.competencia = e.target.value; carregarRelatorio(); });
-for (const [id, campo] of [['#rel-de', 'de'], ['#rel-ate', 'ate']]) {
-  $(id).addEventListener('change', (e) => {
-    rel[campo] = e.target.value;
-    clearTimeout(esperaDatasRel);
-    esperaDatasRel = setTimeout(carregarRelatorio, 400); // espera ela terminar de mexer na data
-  });
-}
-$('#rel-limpar-datas').addEventListener('click', () => {
-  rel.de = rel.ate = '';
-  $('#rel-de').value = $('#rel-ate').value = '';
-  carregarRelatorio();
-});
+// Emissão de/até: só recarrega no OK ou no Enter (public/periodo.js, 13/10). Sem atalhos:
+// o mês do relatório já é escolhido na lista ao lado.
+ligarPeriodo('rel', (de, ate) => { rel.de = de; rel.ate = ate; carregarRelatorio(); });
 let esperaFiltroRel = null;
 $('#rel-busca').addEventListener('input', (e) => {
   clearTimeout(esperaFiltroRel);
