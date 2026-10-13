@@ -95,11 +95,8 @@ export class Repo {
       .prepare('SELECT * FROM empresas WHERE tenant_id = ? AND ativo = 1 ORDER BY razao_social')
       .bind(this.tenant)
       .all<any>();
-    const permitidas = this.ctx.sessao.empresas;
-    if (permitidas === null) {
-      return this.ctx.sessao.permissoes.has('empresas.todas') ? results : [];
-    }
-    return results.filter((e) => permitidas.has(e.id));
+    // Mesma regra de podeVerEmpresa: "ver todos os clientes" vale com ou sem vínculo.
+    return results.filter((e) => podeVerEmpresa(this.ctx.sessao, e.id));
   }
 
   async obterEmpresa(empresaId: string): Promise<any | null> {
