@@ -3624,6 +3624,40 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     for (const r of regras) expect([r.n, r.valor]).toEqual([1, '1101']);
   });
 
+  it('13/10 (Filomena): setembro e outubro importados juntos — o que ela ensina em setembro chega em outubro ao abrir', async () => {
+    /* Áudio da Taís: "tratei umas notas no mês de setembro. E agora eu tô a tratar o mês de
+       outubro, e ele (...) tá a dar-me tudo como se fosse a primeira vez (...) palpite do
+       perfil 1102, mas na verdade eu já tratei essas notas no mês anterior com 1101". */
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'setembro.xml', conteudo: comCfop('11', '5102') },
+      { nome: 'outubro.xml', conteudo: comCfop('33', '5102') },
+    ]);
+    const [o1, o2, o3] = itensDa('33');
+    // Em outubro, antes de tratar setembro: um item ela digitou (1556), outro só conferiu.
+    await corrigir(o2.id, '1556');
+    const notaOut = o1.nota_id;
+    expect((await req(`/api/notas/${notaOut}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [o3.id] }) })).status).toBe(200);
+    // Ela trata setembro inteiro: 1101.
+    for (const i of itensDa('11')) expect((await corrigir(i.id, '1101')).status).toBe(200);
+    // Outubro continua com o palpite do perfil até alguém abrir a nota (o problema dela).
+    expect(itensDa('33')[0]).toMatchObject({ cfop_novo: '1102', cfop_origem: 'perfil' });
+    const trilhaAntes = db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0];
+
+    const aberta = await (await req(`/api/notas/${notaOut}`)).json() as any;
+    const [a1, a2, a3] = aberta.itens;
+    expect(a1).toMatchObject({ cfop_novo: '1101', revisado: 0 });
+    expect(String(a1.cfop_origem)).toMatch(/^regra:/);
+    expect(a1.procedencia.fonte).toBe('aprendida');
+    // O que ela digitou e o que ela conferiu não mudam.
+    expect(a2).toMatchObject({ cfop_novo: '1556', cfop_origem: 'manual' });
+    expect(a3).toMatchObject({ cfop_novo: '1102', revisado: 1 });
+    // O palpite atualizado não entra na trilha como se fosse alguém.
+    expect(db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0]).toEqual(trilhaAntes);
+    // Abrir de novo não muda mais nada.
+    await req(`/api/notas/${notaOut}`);
+    expect(itensDa('33').map((i: any) => [i.cfop_novo, i.cfop_origem?.slice(0, 6)])).toEqual([['1101', 'regra:'], ['1556', 'manual'], ['1102', 'perfil']]);
+  });
+
   it('13/10: a mesma regra criada por duas gravações simultâneas não estoura a unicidade, e a fixada continua mandando', async () => {
     const criar = (valor: string, fixada = false) => [{ tipo: 'criar' as const, nivel: 4 as const, chave: '83646984003044|04039000#5102', campo: 'cfop' as const, valor, fixada }];
     // As duas leem "não existe" antes de qualquer uma gravar - é a corrida do D1.
