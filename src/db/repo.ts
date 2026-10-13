@@ -1389,6 +1389,36 @@ export class Repo {
     return results;
   }
 
+  /**
+   * O que falta tratar em cada empresa (13/10, pedido da Taís): "uma lista das empresas
+   * que tem notas a tratar (...) antes de eu selecionar a empresa". Mesma regra da lista
+   * de notas: a tratar é nota com item não conferido; cancelada e estorno não contam.
+   * Só as empresas que a pessoa pode ver, e só as que têm pendência.
+   */
+  async pendenciasPorEmpresa(): Promise<{ empresaId: string; razaoSocial: string; notas: number; itens: number; maisAntiga: string | null }[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT p.empresa_id, e.razao_social, COUNT(*) AS notas, SUM(p.total - p.rev) AS itens, MIN(p.dh_emi) AS mais_antiga
+           FROM (SELECT n.id, n.empresa_id, n.dh_emi, COUNT(i.id) AS total,
+                        COALESCE(SUM(CASE WHEN i.revisado = 1 THEN 1 ELSE 0 END), 0) AS rev
+                   FROM notas n LEFT JOIN itens i ON i.nota_id = n.id
+                  WHERE n.tenant_id = ? AND n.cancelada_em IS NULL AND COALESCE(n.estorno, 0) <> 1
+                  GROUP BY n.id) p
+           JOIN empresas e ON e.id = p.empresa_id AND e.ativo = 1
+          WHERE NOT (p.total > 0 AND p.rev >= p.total)
+          GROUP BY p.empresa_id, e.razao_social
+          ORDER BY e.razao_social`,
+      )
+      .bind(this.tenant)
+      .all<any>();
+    return results
+      .filter((r: any) => podeVerEmpresa(this.ctx.sessao, r.empresa_id))
+      .map((r: any) => ({
+        empresaId: r.empresa_id, razaoSocial: r.razao_social,
+        notas: Number(r.notas), itens: Number(r.itens ?? 0), maisAntiga: r.mais_antiga ?? null,
+      }));
+  }
+
   // ---------------------------------------------------------------- valores fiscais
 
   /** Notas da competencia com item ainda sem valores fiscais (importado antes da 0013). */
