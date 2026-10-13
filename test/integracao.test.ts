@@ -4753,6 +4753,19 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     expect(estado().sef_completo_em).toBeNull();
   });
 
+  it('busca automática continua quando quem ligou vira responsável de outra empresa (13/10)', async () => {
+    await automatica({ ligada: true, desde: '2026-10-01' });
+    const outra = await repo.criarEmpresa({ cnpj: '12.345.678/0001-95', razaoSocial: 'EMPRESA NOVA', uf: 'SC', perfil: 'revenda' });
+    db.consultar("INSERT INTO usuario_empresas (usuario_id, empresa_id) VALUES ('u1', ?)", outra);
+    respostas.push(() => new Response(retorno('117', 'nada', { ult: '0' })));
+    const r = await rodar();
+    expect(r?.resultado).not.toMatch(/Parada/);
+    expect(posts()).toHaveLength(1);
+    // E na tela ela continua vendo as duas empresas.
+    const lista: any = await (await chamar('/api/empresas')).json();
+    expect(lista.map((e: any) => e.razao_social).sort()).toEqual(['EMPRESA NOVA', 'MERCADO PILOTO LTDA']);
+  });
+
   it('busca automática ligada: dá para mudar a data de início', async () => {
     await automatica({ ligada: true, desde: '2026-10-01' });
     await automatica({ ligada: true, desde: '2026-08-01' });
