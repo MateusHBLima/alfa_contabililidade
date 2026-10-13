@@ -2631,6 +2631,12 @@ app.patch('/api/itens/:id', async (c) => {
  * A trilha era gravada desde o primeiro dia e não havia como ler: a permissão
  * `auditoria.visualizar` podia ser concedida e não levava a lugar nenhum.
  */
+/** "De onde veio isto": a regra que deu o CFOP da linha e as decisões que a ensinaram (13/10). */
+app.get('/api/itens/:id/de-onde-veio', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  return c.json(await c.get('repo').deOndeVeio(c.req.param('id')));
+});
+
 app.get('/api/itens/:id/trilha', async (c) => {
   const sessao = c.get('sessao');
   exigir(sessao, 'auditoria.visualizar');
