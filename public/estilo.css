@@ -677,3 +677,13 @@ tr.nota-estorno td{background:#faf5ff}
 .de-onde-tabela table{font-size:12.5px}
 .de-onde-tabela tr.de-onde-igual td{background:var(--warn-soft)}
 .aviso-de-onde{color:var(--warn);font-weight:600}
+
+/* A tratar em todas as empresas (13/10) */
+.pendencias{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:12px 14px;margin-bottom:14px}
+.pend-topo{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px}
+.pend-lista{display:flex;gap:8px;flex-wrap:wrap}
+.pend-empresa{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;border:1px solid var(--warn);background:var(--warn-soft);color:var(--txt);border-radius:8px;padding:7px 11px;cursor:pointer;font:inherit;font-size:12.5px}
+.pend-empresa span{color:var(--warn);font-size:11.5px;font-weight:600}
+.pend-empresa:hover{filter:brightness(.97)}
+.pend-empresa.atual{box-shadow:0 0 0 2px var(--primary-soft);border-color:var(--primary-2)}
+.pend-ok{color:var(--ok);font-weight:700}

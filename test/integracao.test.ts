@@ -3702,6 +3702,28 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     expect(db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0]).toEqual(antes);
   });
 
+  it('13/10: a tratar em todas as empresas — só as que têm pendência, e some quando ela termina', async () => {
+    /* Áudio da Taís: "uma lista das empresas que tem notas a tratar (...) antes de eu
+       selecionar a empresa (...) às vezes eu tô me perdendo no que eu já fiz". */
+    const pend = async () => ((await (await req('/api/pendencias')).json()) as any).empresas;
+    expect(await pend()).toEqual([]);
+    const outra = await repo.criarEmpresa({ cnpj: '04123046000159', razaoSocial: 'AAA OUTRA SEM NOTA', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'a.xml', conteudo: comCfop('11', '5102') },
+      { nome: 'b.xml', conteudo: comCfop('33', '5102') },
+    ]);
+    let p = await pend();
+    expect(p).toEqual([{ empresaId, razaoSocial: 'THE SAILOR TESTE', notas: 2, itens: 6, maisAntiga: expect.any(String) }]);
+    expect(p.find((x: any) => x.empresaId === outra)).toBeUndefined();
+    // Trata uma nota inteira e metade da outra.
+    for (const i of itensDa('11')) await corrigir(i.id, '1101');
+    await corrigir(itensDa('33')[0].id, '1101');
+    expect(await pend()).toEqual([expect.objectContaining({ notas: 1, itens: 2 })]);
+    // Nota cancelada não conta como pendência.
+    db.consultar(`UPDATE notas SET cancelada_em = '2026-10-13T00:00:00Z' WHERE chave LIKE '%33'`);
+    expect(await pend()).toEqual([]);
+  });
+
   it('13/10: a mesma regra criada por duas gravações simultâneas não estoura a unicidade, e a fixada continua mandando', async () => {
     const criar = (valor: string, fixada = false) => [{ tipo: 'criar' as const, nivel: 4 as const, chave: '83646984003044|04039000#5102', campo: 'cfop' as const, valor, fixada }];
     // As duas leem "não existe" antes de qualquer uma gravar - é a corrida do D1.

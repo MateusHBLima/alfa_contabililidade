@@ -523,6 +523,7 @@ function irPara(view) {
   TELAS.forEach((v) => $('#' + v).classList.toggle('hidden', v !== view));
   marcarEscopo();
   gravarEndereco(view);
+  if (view === 'v1') atualizarPendencias();
   if (view === 'vEmpresas') renderEmpresas();
   if (view === 'vFornecedores') carregarFornecedores();
   if (view === 'vRegras') carregarRegras();
@@ -725,6 +726,54 @@ async function carregarEmpresas() {
   await carregarImportacoes();
   await carregarNotas();
 }
+
+/* ---- A tratar em todas as empresas (13/10, pedido da Taís) ----
+   "Tem algum filtro inicial, que ficasse lá em cima, que me desse (...) uma lista das
+   empresas que tem notas a tratar? (...) às vezes eu tô me perdendo no que eu já fiz."
+   Quadro no topo de Notas recebidas e o número no seletor de empresa. Mesma regra da
+   lista: nota com item não conferido; cancelada e estorno não contam. */
+let pendencias = [];
+async function atualizarPendencias() {
+  try { pendencias = (await api('/api/pendencias')).empresas; } catch { return; }
+  desenharPendencias();
+}
+function desenharPendencias() {
+  const porId = new Map(pendencias.map((p) => [p.empresaId, p]));
+  for (const o of $('#sel-empresa').options) {
+    const e = (estado.empresas || []).find((x) => x.id === o.value);
+    if (!e) continue;
+    const p = porId.get(e.id);
+    o.textContent = `${e.razao_social} — ${e.cnpj}${p ? ` · ${p.notas} a tratar` : ''}`;
+  }
+  const el = $('#painel-pendencias');
+  if (!el) return;
+  el.classList.remove('hidden');
+  if (pendencias.length === 0) {
+    el.innerHTML = '<div class="pend-ok">✓ Tudo tratado em todas as empresas.</div>';
+    return;
+  }
+  const total = pendencias.reduce((s, p) => s + p.notas, 0);
+  const data = (d) => String(d ?? '').slice(0, 10).split('-').reverse().join('/');
+  el.innerHTML = `<div class="pend-topo"><b>A tratar em todas as empresas</b>
+      <span class="hint">${total} nota${total === 1 ? '' : 's'} em ${pendencias.length} empresa${pendencias.length === 1 ? '' : 's'} · clique para abrir</span></div>
+    <div class="pend-lista">${pendencias.map((p) => `
+      <button type="button" class="pend-empresa${p.empresaId === estado.empresaId ? ' atual' : ''}" data-pendencia="${esc(p.empresaId)}" title="Abrir as notas a tratar desta empresa">
+        <b>${esc(p.razaoSocial)}</b>
+        <span>${p.notas} nota${p.notas === 1 ? '' : 's'} · ${p.itens} ${p.itens === 1 ? 'item' : 'itens'}${p.maisAntiga ? ` · desde ${esc(data(p.maisAntiga))}` : ''}</span>
+      </button>`).join('')}</div>`;
+}
+document.addEventListener('click', async (ev) => {
+  const b = ev.target.closest('[data-pendencia]');
+  if (!b) return;
+  // Todas as competências: a nota a tratar pode ser de outro mês que o escolhido lá em cima.
+  $('#sel-ano').value = '';
+  $('#sel-empresa').value = b.dataset.pendencia;
+  await trocarEmpresa(b.dataset.pendencia);
+  estado.filtroNotas = 'tratar';
+  $$('#filtros-notas button').forEach((x) => x.classList.toggle('on', x.dataset.fn === 'tratar'));
+  irPara('v1');
+  renderNotas();
+});
 
 // ------------------------------------------------------------------ ambiente 1
 
@@ -966,6 +1015,7 @@ async function carregarNotas() {
   const q = estado.competencia ? `?competencia=${estado.competencia}` : '';
   estado.notas = await api(`/api/empresas/${estado.empresaId}/notas${q}`);
   renderNotas();
+  atualizarPendencias();
 }
 
 /** O valor que a nota soma: zero se cancelada ou estorno (o XML continua com o valor original). */
