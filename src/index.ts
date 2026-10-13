@@ -2577,6 +2577,13 @@ app.patch('/api/itens/:id', async (c) => {
         ? ([1, 2] as const).slice()
         : undefined;
 
+  // O item primeiro, o aprendizado depois (13/10, Filomena): o que ela escolheu
+  // para a linha nunca pode se perder por causa de um problema ao aprender.
+  await repo.alterarItem(
+    c.req.param('id'),
+    validadas.map((m) => ({ ...m, origem: corpo.fixar ? 'manual:fixada' : 'manual' })),
+  );
+
   for (const m of validadas) {
     const sugestaoAnterior = sugerir(m.campo, item, candidatas, contexto);
     await repo.aplicarAprendizado(
@@ -2587,11 +2594,6 @@ app.patch('/api/itens/:id', async (c) => {
       }),
     );
   }
-
-  await repo.alterarItem(
-    c.req.param('id'),
-    validadas.map((m) => ({ ...m, origem: corpo.fixar ? 'manual:fixada' : 'manual' })),
-  );
 
   return c.json({ ok: true });
 });
