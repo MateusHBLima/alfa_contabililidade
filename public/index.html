@@ -303,7 +303,10 @@
               <input type="date" id="notas-de" style="font-size:12px;width:140px">
               <label class="tiny" for="notas-ate">até</label>
               <input type="date" id="notas-ate" style="font-size:12px;width:140px">
-              <button type="button" class="btn sm sutil hidden" id="notas-limpar-datas">limpar datas</button>
+              <button type="button" class="btn sm" id="notas-ok" title="Aplicar o período (ou Enter)">OK</button>
+              <button type="button" class="btn sm sutil hidden" id="notas-limpar">limpar datas</button>
+              <span class="atalhos-data" id="notas-atalhos"></span>
+              <span class="erro-data hidden" id="notas-erro"></span>
               <div class="sep"></div>
               <button class="btn sm" id="btn-agrupar" title="Dobra a lista por fornecedor: a decisão de CFOP costuma ser por fornecedor">▤ Agrupar por fornecedor</button>
             </div>
@@ -522,7 +525,9 @@
             <input type="date" id="rel-de" style="font-size:12px;width:140px">
             <label class="tiny" for="rel-ate">até</label>
             <input type="date" id="rel-ate" style="font-size:12px;width:140px">
-            <button type="button" class="btn sm sutil hidden" id="rel-limpar-datas">limpar datas</button>
+            <button type="button" class="btn sm" id="rel-ok" title="Aplicar o período (ou Enter)">OK</button>
+            <button type="button" class="btn sm sutil hidden" id="rel-limpar">limpar datas</button>
+            <span class="erro-data hidden" id="rel-erro"></span>
             <input type="search" id="rel-busca" placeholder="Procurar no relatório: produto, código, CFOP ou valor" style="font-size:12px;width:300px" autocomplete="off">
             <button type="button" class="btn sm hidden" id="rel-so-nf" title="Mostra só os produtos marcados com ✗ (não fecharam com o outro sistema). A planilha baixada também vem só com eles.">✗ Só os que não fecharam (0)</button>
             <button type="button" class="btn sm hidden" id="rel-questor" title="Suba o PDF do relatório “Totais ICMS por Produto” do Questor: o sistema compara produto por produto e aponta o que não bate">⇪ Conferir com o Questor</button>
@@ -753,6 +758,7 @@
   </div>
 </div>
 
+<script src="/periodo.js"></script>
 <script src="/app.js"></script>
 <div id="impressao-nota" class="impressao-nota"></div>
 </body>
