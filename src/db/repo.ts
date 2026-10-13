@@ -1521,6 +1521,8 @@ export class Repo {
     certificadoAceito?: string | null;
     /** A SEF recusou todos por vínculo: a empresa deixa de ter certificado confirmado. */
     nenhumVinculado?: boolean;
+    /** A consulta terminou sem ter mais nada na SEF: até 2 dias antes daqui, tudo já veio. */
+    completa?: boolean;
   }): Promise<void> {
     this.exigirEmpresa(empresaId);
     await this.db.batch([
@@ -1528,10 +1530,12 @@ export class Repo {
         `UPDATE captura_empresas SET proxima_consulta = ?, ultima_consulta = ?, ultimo_cstat = ?, ultimo_motivo = ?,
             ultimo_erro = ?, ult_nsu = COALESCE(?, ult_nsu), atualizado_em = ?,
             certificado_id = COALESCE(?, certificado_id),
-            certificado_confirmado_em = CASE WHEN ? IS NOT NULL THEN ? WHEN ? = 1 THEN NULL ELSE certificado_confirmado_em END
+            certificado_confirmado_em = CASE WHEN ? IS NOT NULL THEN ? WHEN ? = 1 THEN NULL ELSE certificado_confirmado_em END,
+            sef_completo_em = CASE WHEN ? = 1 THEN ? ELSE sef_completo_em END
           WHERE tenant_id = ? AND empresa_id = ?`,
       ).bind(c.proxima, c.quando, c.cStat, c.motivo, c.erro, c.ultNsu, c.quando,
         c.certificadoAceito ?? null, c.certificadoAceito ?? null, c.quando, c.nenhumVinculado ? 1 : 0,
+        c.completa ? 1 : 0, c.quando,
         this.tenant, empresaId),
       this.db.prepare(
         `INSERT INTO captura_buscas (id, tenant_id, empresa_id, usuario_id, quando, cstat, motivo, nsu_de, nsu_ate, documentos, erro, automatica)
@@ -1539,6 +1543,43 @@ export class Repo {
       ).bind(this.novoId(), this.tenant, empresaId, this.ctx.sessao.usuarioId, c.quando, c.cStat, c.motivo,
         c.nsuDe, c.ultNsu, c.documentos, c.erro, this.ctx.automatica ? 1 : 0),
     ]);
+  }
+
+  /**
+   * Por mês: notas no sistema e notas na caixa ainda sem importar, e quando foi a
+   * primeira consulta à SEF (13/10). Base da linha "completo / sem movimento" do painel.
+   */
+  async movimentoPorMes(empresaId: string): Promise<{ primeiraConsulta: string | null; completoEm: string | null; meses: Map<string, { noSistema: number; naCaixa: number }> }> {
+    this.exigirEmpresa(empresaId);
+    const [rC, rN, rX] = await this.db.batch([
+      this.db.prepare(
+        `SELECT c.sef_completo_em AS completo,
+                (SELECT MIN(b.quando) FROM captura_buscas b WHERE b.empresa_id = c.empresa_id AND b.cstat IN ('117','118')) AS primeira
+           FROM captura_empresas c WHERE c.tenant_id = ? AND c.empresa_id = ?`,
+      ).bind(this.tenant, empresaId),
+      this.db.prepare(
+        `SELECT competencia, COUNT(*) AS n FROM notas
+          WHERE tenant_id = ? AND empresa_id = ? AND cancelada_em IS NULL AND competencia IS NOT NULL
+          GROUP BY competencia`,
+      ).bind(this.tenant, empresaId),
+      this.db.prepare(
+        `SELECT substr(c.dh_emi, 1, 7) AS competencia, COUNT(*) AS n FROM captura_caixa c
+          WHERE c.tenant_id = ? AND c.empresa_id = ? AND c.tipo = 'nota' AND c.chave IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM notas n WHERE n.tenant_id = c.tenant_id AND n.chave = c.chave)
+            AND NOT EXISTS (SELECT 1 FROM captura_caixa e WHERE e.empresa_id = c.empresa_id AND e.chave = c.chave
+                             AND e.tipo = 'evento' AND e.tp_evento IN ('110111','110112'))
+          GROUP BY substr(c.dh_emi, 1, 7)`,
+      ).bind(this.tenant, empresaId),
+    ]);
+    const c = (rC!.results as any[])[0];
+    const meses = new Map<string, { noSistema: number; naCaixa: number }>();
+    for (const r of rN!.results as any[]) meses.set(r.competencia, { noSistema: Number(r.n), naCaixa: 0 });
+    for (const r of rX!.results as any[]) {
+      const m = meses.get(r.competencia) ?? { noSistema: 0, naCaixa: 0 };
+      m.naCaixa = Number(r.n);
+      meses.set(r.competencia, m);
+    }
+    return { primeiraConsulta: c?.primeira ?? null, completoEm: c?.completo ?? null, meses };
   }
 
   /** As notas da caixa emitidas no período, dizendo quais já estão no sistema e quais a SEF cancelou. */
