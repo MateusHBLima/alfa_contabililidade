@@ -254,3 +254,20 @@ describe('o ciclo completo — segunda nota do mesmo fornecedor', () => {
     expect(segundo.origem).toBe('regra:aprendida');
   });
 });
+
+describe('13/10: partesDaChave — o caminho inverso da chave da regra', () => {
+  it('desmonta cada nível, com o CFOP de saída', async () => {
+    const { partesDaChave, chaveDoNivel } = await import('../src/rules/engine');
+    const item = { cProd: ' ab-12 ', cEAN: '7891000100103', NCM: '18069000', CFOP: '5102' } as any;
+    const ida = (n: number) => partesDaChave(n, chaveDoNivel(item, '11.222.333/0001-81', n as any, 'cfop')!);
+    expect(ida(1)).toEqual({ cnpj: '11222333000181', cprod: 'AB-12', saida: '5102' });
+    expect(ida(2)).toEqual({ cnpj: '11222333000181', ean: '7891000100103', saida: '5102' });
+    expect(ida(3)).toEqual({ ean: '7891000100103', saida: '5102' });
+    expect(ida(4)).toEqual({ cnpj: '11222333000181', ncm: '18069000', saida: '5102' });
+    expect(ida(5)).toEqual({ cnpj: '11222333000181', saida: '5102' });
+    expect(ida(6)).toEqual({ ncm: '18069000', saida: '5102' });
+    expect(partesDaChave(7, 'perfil')).toBeNull();
+    expect(partesDaChave(6, '18069000#?')).toEqual({ ncm: '18069000', saida: '' });
+    expect(partesDaChave(1, '11222333000181|X')).toEqual({ cnpj: '11222333000181', cprod: 'X' }); // formato antigo, sem saída
+  });
+});

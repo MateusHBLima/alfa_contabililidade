@@ -1697,7 +1697,7 @@ function linhaItem(i) {
        <span>${esc(a.titulo)}</span>
      </div>`).join('');
 
-  const proc = selinhoProcedencia(i.procedencia);
+  const proc = selinhoProcedencia(i.procedencia, i.id);
   const notaCancelada = !!estado.notaAberta?.nota?.cancelada_em;
 
   // Terceiro eixo (invariante 9c): o quanto a NOTA foge do normal. Pedido da
@@ -1790,14 +1790,17 @@ function podeFixar(i) {
  *
  * Por isso a marca aparece em toda linha, inclusive nas que ainda pedem conferência.
  */
-function selinhoProcedencia(p) {
+function selinhoProcedencia(p, itemId = null) {
   const fonte = p?.fonte ?? 'nenhuma';
+  // Clicar no selo mostra de onde veio (13/10): a regra e as notas que a ensinaram.
+  const clicavel = itemId ? ` data-de-onde="${esc(itemId)}" role="button" tabindex="0"` : '';
+  const dica = itemId ? ' — clique para ver de qual nota veio' : '';
   if (fonte === 'fixada') {
-    return `<span class="proc proc-fixada" title="Padrão que a contabilidade fixou para este fornecedor">📌 PADRÃO FIXADO</span>`;
+    return `<span class="proc proc-fixada"${clicavel} title="Padrão que a contabilidade fixou para este fornecedor${dica}">📌 PADRÃO FIXADO</span>`;
   }
   if (fonte === 'aprendida') {
     const n = Number(p?.usos ?? 0);
-    return `<span class="proc proc-aprendida" title="O sistema guardou isto de uma correção de vocês">✓ VOCÊS ENSINARAM${n > 1 ? ` · ${n}x` : ''}</span>`;
+    return `<span class="proc proc-aprendida"${clicavel} title="O sistema guardou isto de uma correção de vocês${dica}">✓ VOCÊS ENSINARAM${n > 1 ? ` · ${n}x` : ''}</span>`;
   }
   if (fonte === 'manual') {
     return `<span class="proc proc-manual" title="Alguém digitou este valor nesta nota">✎ preenchido por vocês</span>`;
@@ -1936,6 +1939,81 @@ const ROTULO_CAMPO = {
   credito_icms: 'Crédito de ICMS', credito_pis: 'Crédito de PIS',
   credito_cofins: 'Crédito de COFINS', conferido: 'Conferência',
 };
+
+/* "De onde veio isto" (13/10, pedido da Taís): "ele aprendeu errado (...) tem alguma forma
+   de eu filtrar o produto para eu tentar achar, para trás, que nota que eu fiz?". Mostra a
+   regra que deu o CFOP e as decisões que batem com ela, mais recentes primeiro. */
+const DE_ONDE_NIVEL = {
+  1: (p) => `deste produto (código ${p.cprod}), deste fornecedor`,
+  2: (p) => `deste código de barras (${p.ean}), deste fornecedor`,
+  3: (p) => `deste código de barras (${p.ean}), de qualquer fornecedor`,
+  4: (p) => `de outros produtos deste fornecedor com o mesmo NCM (${p.ncm})`,
+  5: () => 'do padrão deste fornecedor',
+  6: (p) => `de outros produtos com o mesmo NCM (${p.ncm}), de qualquer fornecedor`,
+};
+function partesDaChaveTela(nivel, chave) {
+  const k = chave.lastIndexOf('#');
+  const base = k >= 0 ? chave.slice(0, k) : chave;
+  const depois = base.slice(base.indexOf('|') + 1);
+  return { 1: { cprod: depois }, 2: { ean: depois }, 3: { ean: base }, 4: { ncm: depois }, 6: { ncm: base } }[nivel] ?? {};
+}
+
+async function verDeOndeVeio(itemId) {
+  const i = (estado.notaAberta?.itens ?? []).find((x) => x.id === itemId);
+  const nome = i?.x_prod_novo || i?.x_prod_original || 'este item';
+  let r;
+  try { r = await api(`/api/itens/${itemId}/de-onde-veio`); } catch (e) {
+    return avisar('Não consegui ver de onde veio: ' + e.message);
+  }
+  if (!r.regra) return avisar('Este CFOP não veio de uma regra aprendida: foi digitado ou é palpite do perfil.', 'De onde veio isto');
+  const g = r.regra;
+  const caminho = (DE_ONDE_NIVEL[g.nivel] ?? (() => 'de uma regra'))(partesDaChaveTela(g.nivel, g.chave));
+  const deOutro = g.nivel === 4 || g.nivel === 6;
+  const iguais = r.decisoes.filter((d) => String(d.cfop_novo).trim() === String(g.valor).trim());
+  const primeira = iguais[0]?.item_id;
+  const linhas = r.decisoes.map((d) => {
+    const igual = String(d.cfop_novo).trim() === String(g.valor).trim();
+    const como = String(d.cfop_origem ?? '').startsWith('manual') ? 'digitou' : 'conferiu';
+    return `<tr class="${igual ? 'de-onde-igual' : ''}">
+      <td>${esc(dataCurta(d.dh_emi))}</td>
+      <td class="mono">${esc(d.numero ?? '')}</td>
+      <td>${esc(d.emit_nome ?? '')}</td>
+      <td>${esc(d.x_prod_novo || d.x_prod_original || '')}${deOutro ? ` <span class="tiny">${esc(d.c_prod ?? '')}</span>` : ''}</td>
+      <td class="mono">${esc(d.cfop_original ?? '')} → <b>${esc(d.cfop_novo)}</b>${d.item_id === primeira ? ' <span class="tag info">daqui</span>' : ''}</td>
+      <td class="tiny">${esc(como)}${d.revisado_por_nome ? ` · ${esc(d.revisado_por_nome)}` : ''}${d.revisado_em ? ` · ${esc(dataCurta(d.revisado_em))}` : ''}</td>
+      <td><button class="btn sm" type="button" data-de-onde-abrir="${esc(d.nota_id)}" data-item="${esc(d.item_id)}">Abrir →</button></td>
+    </tr>`;
+  }).join('');
+  const corpo = `
+    <p class="dialogo-destaque">${esc(nome)}</p>
+    <p class="dialogo-texto">O CFOP <b>${esc(g.valor)}</b> foi aprendido ${esc(caminho)}.
+      ${g.fixada ? `Está <b>fixado</b>${g.fixada_por_nome ? ` por ${esc(g.fixada_por_nome)}` : ''}${g.fixada_em ? ` em ${esc(dataCurta(g.fixada_em))}` : ''}.` : ''}
+      ${Number(g.usos) > 0 ? `<span class="tiny">Já foi usado ${Number(g.usos)}x${Number(g.erros) > 0 ? `, corrigido ${Number(g.erros)}x` : ''}.</span>` : ''}</p>
+    ${deOutro ? '<p class="dialogo-texto aviso-de-onde">⚠ Veio de <b>outro produto</b> com o mesmo NCM, não deste: por isso pode não aparecer na busca pelo nome.</p>' : ''}
+    ${r.decisoes.length === 0
+      ? '<p class="dialogo-texto sutil">Não achei nota tratada que bata com esta regra: ela pode ter vindo de uma nota apagada ou da arrumação das regras de 22/09.</p>'
+      : `<p class="dialogo-texto sutil">Notas tratadas por vocês que ensinam esta regra, da mais recente para a mais antiga. Em destaque, as que ficaram com ${esc(g.valor)}; a marcada <b>daqui</b> é a última, a que vale hoje.</p>
+         <div class="scroll de-onde-tabela"><table>
+           <thead><tr><th>Emissão</th><th>Nota</th><th>Fornecedor</th><th>Produto</th><th>CFOP</th><th>Quem</th><th></th></tr></thead>
+           <tbody>${linhas}</tbody></table></div>`}
+    <p class="dialogo-texto sutil">Se o certo é outro CFOP, troque nesta nota (ou na nota de onde veio): o sistema fica sempre com a última decisão e passa a sugerir o certo daqui pra frente.</p>`;
+  abrirModal('De onde veio isto', corpo, null);
+  $('.modal')?.classList.add('largo');
+  $('#modal-cancelar').classList.add('hidden');
+  $('#modal-ok').textContent = 'Fechar';
+}
+
+document.addEventListener('click', (ev) => {
+  const sel = ev.target.closest('[data-de-onde]');
+  if (sel) return verDeOndeVeio(sel.dataset.deOnde);
+  const ab = ev.target.closest('[data-de-onde-abrir]');
+  if (ab) { fecharModal(); return abrirNota(ab.dataset.deOndeAbrir, ab.dataset.item); }
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Enter' && ev.key !== ' ') return;
+  const sel = ev.target.closest?.('[data-de-onde]');
+  if (sel) { ev.preventDefault(); verDeOndeVeio(sel.dataset.deOnde); }
+});
 
 async function verTrilha(itemId) {
   const i = (estado.notaAberta?.itens ?? []).find((x) => x.id === itemId);
@@ -4185,6 +4263,7 @@ $('#tbl-certificados').addEventListener('click', async (ev) => {
 });
 
 function abrirModal(titulo, html, aoSalvar) {
+  $('.modal')?.classList.remove('largo');
   $('#modal-titulo').textContent = titulo;
   $('#modal-corpo').innerHTML = html;
   acaoModal = aoSalvar;

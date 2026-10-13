@@ -3658,6 +3658,50 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     expect(itensDa('33').map((i: any) => [i.cfop_novo, i.cfop_origem?.slice(0, 6)])).toEqual([['1101', 'regra:'], ['1556', 'manual'], ['1102', 'perfil']]);
   });
 
+  it('13/10: "de onde veio isto" — a regra da linha e a nota que ensinou, mesmo quando veio de outro produto pelo NCM', async () => {
+    /* Áudio da Taís: "ele aprendeu errado (...) veio dizendo que é 1556, mas na verdade era
+       1101 (...) tem alguma forma de eu filtrar o produto para eu tentar achar, para trás,
+       que nota que eu fiz?" */
+    const deOnde = async (id: string) => (await (await req(`/api/itens/${id}/de-onde-veio`)).json()) as any;
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'agosto.xml', conteudo: comCfop('11', '5102') }]);
+    const [a1] = itensDa('11');
+    await corrigir(a1.id, '1556'); // o erro: era 1101
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'setembro.xml', conteudo: comCfop('33', '5102') }]);
+    const [s1] = itensDa('33');
+    expect(s1.cfop_novo).toBe('1556');
+
+    let r = await deOnde(s1.id);
+    expect(r.regra).toMatchObject({ nivel: 1, valor: '1556' });
+    expect(r.decisoes.map((d: any) => [d.item_id, d.cfop_novo, d.numero])).toEqual([[a1.id, '1556', expect.any(String)]]);
+    expect(r.decisoes[0]).toMatchObject({ nota_id: a1.nota_id, revisado_por_nome: 'Contadora' });
+
+    // Outro produto do mesmo fornecedor, mesmo NCM, nunca visto: herda pelo NCM.
+    const novo = comCfop('44', '5102')
+      .replace(/<cProd>7891<\/cProd>/, '<cProd>NOVO1</cProd>')
+      .replace(/<cEAN>7891000100103<\/cEAN>/, '<cEAN>SEM GTIN</cEAN>');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'outubro.xml', conteudo: novo }]);
+    const [o1] = itensDa('44');
+    expect(o1.cfop_novo).toBe('1556');
+    r = await deOnde(o1.id);
+    expect([4, 6]).toContain(r.regra.nivel);
+    expect(r.decisoes.map((d: any) => d.c_prod)).toContain('7891'); // a nota que ensinou é de OUTRO produto
+
+    // Ela corrige agora: a regra passa a 1101 e a lista mostra as duas decisões, a mais recente primeiro.
+    await corrigir(s1.id, '1101');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'novembro.xml', conteudo: comCfop('55', '5102') }]);
+    const [n1] = itensDa('55');
+    r = await deOnde(n1.id);
+    expect(r.regra).toMatchObject({ nivel: 1, valor: '1101' });
+    expect(r.decisoes.map((d: any) => d.cfop_novo)).toEqual(['1101', '1556']);
+
+    // Linha digitada não veio de regra.
+    expect((await deOnde(s1.id)).regra).toBeNull();
+    // Só leitura: não grava nada na trilha.
+    const antes = db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0];
+    await deOnde(n1.id);
+    expect(db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0]).toEqual(antes);
+  });
+
   it('13/10: a mesma regra criada por duas gravações simultâneas não estoura a unicidade, e a fixada continua mandando', async () => {
     const criar = (valor: string, fixada = false) => [{ tipo: 'criar' as const, nivel: 4 as const, chave: '83646984003044|04039000#5102', campo: 'cfop' as const, valor, fixada }];
     // As duas leem "não existe" antes de qualquer uma gravar - é a corrida do D1.

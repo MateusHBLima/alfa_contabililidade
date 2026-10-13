@@ -4,7 +4,7 @@ import type { Sessao } from '../auth/permissoes';
 import { podeVerEmpresa } from '../auth/permissoes';
 import type { Campo } from '../rules/campos';
 import type { Nivel, Regra } from '../rules/engine';
-import { aplicarAcerto, aplicarErro, aprender, recalcularConfianca } from '../rules/engine';
+import { aplicarAcerto, aplicarErro, aprender, recalcularConfianca, partesDaChave, chaveDoNivel } from '../rules/engine';
 
 /**
  * Repositorio.
@@ -828,6 +828,79 @@ export class Repo {
       .bind(this.tenant, itemId)
       .all<any>();
     return results;
+  }
+
+  /**
+   * "De onde veio isto" (13/10, pedido da Taís): a regra que deu o CFOP da linha e as
+   * decisões dela que batem com a chave dessa regra - o mesmo produto do mesmo
+   * fornecedor, ou o mesmo código de barras, ou o mesmo NCM, conforme o nível. Mais
+   * recentes primeiro: a regra fica com a última decisão. Só leitura.
+   */
+  async deOndeVeio(itemId: string): Promise<{ regra: any | null; decisoes: any[] }> {
+    const it = await this.db
+      .prepare(
+        `SELECT i.*, n.empresa_id, n.emit_cnpj FROM itens i JOIN notas n ON n.id = i.nota_id
+          WHERE i.tenant_id = ? AND i.id = ?`,
+      )
+      .bind(this.tenant, itemId)
+      .first<any>();
+    if (!it) throw new ForaDoEscopo('Item não encontrado');
+    this.exigirEmpresa(it.empresa_id);
+
+    const campos = `r.id, r.nivel, r.chave, r.valor, r.usos, r.acertos, r.erros, r.fixada, r.fixada_em,
+                    r.criada_em, r.atualizada_em, uc.nome AS criada_por_nome, uf.nome AS fixada_por_nome
+               FROM regras r LEFT JOIN usuarios uc ON uc.id = r.criada_por LEFT JOIN usuarios uf ON uf.id = r.fixada_por`;
+    let regra: any = null;
+    const origem = String(it.cfop_origem ?? '');
+    if (origem.startsWith('regra:')) {
+      regra = await this.db
+        .prepare(`SELECT ${campos} WHERE r.tenant_id = ? AND r.empresa_id = ? AND r.id = ? AND r.campo = 'cfop'`)
+        .bind(this.tenant, it.empresa_id, origem.slice('regra:'.length))
+        .first<any>();
+    }
+    if (!regra && String(it.cfop_novo ?? '').trim()) {
+      // A linha mostra "PADRÃO FIXADO" quando o valor dela é o padrão fixado do produto.
+      const item = { cProd: it.c_prod, cEAN: it.c_ean, NCM: it.ncm, CFOP: it.cfop_original } as any;
+      const k1 = chaveDoNivel(item, it.emit_cnpj, 1, 'cfop');
+      const k2 = chaveDoNivel(item, it.emit_cnpj, 2, 'cfop');
+      regra = await this.db
+        .prepare(
+          `SELECT ${campos} WHERE r.tenant_id = ? AND r.empresa_id = ? AND r.campo = 'cfop' AND r.ativa = 1 AND r.fixada = 1
+             AND r.valor = ? AND ((r.nivel = 1 AND r.chave = ?) OR (r.nivel = 2 AND r.chave = ?)) ORDER BY r.nivel LIMIT 1`,
+        )
+        .bind(this.tenant, it.empresa_id, String(it.cfop_novo).trim(), k1 ?? '', k2 ?? '')
+        .first<any>();
+    }
+    if (!regra) return { regra: null, decisoes: [] };
+
+    const partes = partesDaChave(regra.nivel, regra.chave);
+    if (!partes) return { regra, decisoes: [] };
+    const onde: string[] = [];
+    const binds: unknown[] = [];
+    if (partes.cnpj !== undefined) { onde.push('n.emit_cnpj = ?'); binds.push(partes.cnpj); }
+    if (partes.cprod !== undefined) { onde.push("UPPER(TRIM(COALESCE(i.c_prod, ''))) = ?"); binds.push(partes.cprod); }
+    if (partes.ean !== undefined) { onde.push('i.c_ean = ?'); binds.push(partes.ean); }
+    if (partes.ncm !== undefined) { onde.push('i.ncm = ?'); binds.push(partes.ncm); }
+    if (partes.saida !== undefined) { onde.push("TRIM(COALESCE(i.cfop_original, '')) = ?"); binds.push(partes.saida); }
+
+    const { results } = await this.db
+      .prepare(
+        `SELECT i.id AS item_id, i.n_item, i.x_prod_original, i.x_prod_novo, i.c_prod, i.ncm,
+                i.cfop_original, i.cfop_novo, i.cfop_origem, i.revisado, i.revisado_em,
+                u.nome AS revisado_por_nome,
+                n.id AS nota_id, n.numero, n.dh_emi, n.emit_nome, n.competencia
+           FROM itens i JOIN notas n ON n.id = i.nota_id
+           LEFT JOIN usuarios u ON u.id = i.revisado_por
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND i.id <> ?
+            AND (i.revisado = 1 OR COALESCE(i.cfop_origem, '') LIKE 'manual%')
+            AND TRIM(COALESCE(i.cfop_novo, '')) <> ''
+            ${onde.length ? 'AND ' + onde.join(' AND ') : ''}
+          ORDER BY COALESCE(i.revisado_em, n.criado_em) DESC, n.numero, i.n_item
+          LIMIT 100`,
+      )
+      .bind(this.tenant, it.empresa_id, itemId, ...binds)
+      .all<any>();
+    return { regra, decisoes: results };
   }
 
   async conferirItens(notaId: string, itemIds: string[]): Promise<number> {
