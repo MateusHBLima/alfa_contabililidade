@@ -3601,6 +3601,45 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ajuste.xml', conteudo: comCfop('22', '5949') }]);
     expect(itensDa('22')[0].x_prod_novo).toBe('PUDIM MORANGO 520G');
   });
+
+  it('13/10 (Filomena): duas alterações ao mesmo tempo na empresa nova não dão "já existe" nem desfazem o CFOP', async () => {
+    /* Áudio da Taís: "dá uma mensagem dizendo 'esse produto já existe' e (...) tava 1102
+       e eu coloco 1101 (...) bota 1102 de novo". Empresa nova = nenhuma regra ainda;
+       duas gravações do mesmo produto/NCM/fornecedor chegando juntas tentavam criar a
+       mesma regra duas vezes, a segunda batia na unicidade e o item não era salvo. */
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'compra.xml', conteudo: comCfop('11', '5102') }]);
+    const itens = itensDa('11');
+    const respostas = await Promise.all([
+      ...itens.map((i) => corrigir(i.id, '1101')),
+      corrigir(itens[0].id, '1101'),
+    ]);
+    for (const r of respostas) expect(r.status, await r.clone().text()).toBe(200);
+    for (const i of itensDa('11')) expect(i.cfop_novo, `item ${i.n_item}`).toBe('1101');
+
+    // E a regra existe uma vez só, com o valor dela.
+    const regras = db.consultar(
+      `SELECT nivel, chave, COUNT(*) AS n, MAX(valor) AS valor FROM regras
+        WHERE empresa_id = ? AND campo = 'cfop' GROUP BY nivel, chave`, empresaId) as any[];
+    expect(regras.length).toBeGreaterThan(0);
+    for (const r of regras) expect([r.n, r.valor]).toEqual([1, '1101']);
+  });
+
+  it('13/10: a mesma regra criada por duas gravações simultâneas não estoura a unicidade, e a fixada continua mandando', async () => {
+    const criar = (valor: string, fixada = false) => [{ tipo: 'criar' as const, nivel: 4 as const, chave: '83646984003044|04039000#5102', campo: 'cfop' as const, valor, fixada }];
+    // As duas leem "não existe" antes de qualquer uma gravar - é a corrida do D1.
+    await Promise.all([repo.aplicarAprendizado(empresaId, criar('1101')), repo.aplicarAprendizado(empresaId, criar('1102'))]);
+    const ler = () => db.consultar(`SELECT valor, fixada FROM regras WHERE empresa_id = ? AND nivel = 4`, empresaId) as any[];
+    expect(ler()).toHaveLength(1);
+
+    await repo.aplicarAprendizado(empresaId, criar('1101', true));
+    await Promise.all([repo.aplicarAprendizado(empresaId, criar('1556')), repo.aplicarAprendizado(empresaId, criar('1556'))]);
+    expect(ler()).toEqual([{ valor: '1101', fixada: 1 }]);
+
+    // Os caminhos em lote (conferir e "salvar padrão de todos") também.
+    const lote = (valor: string) => [{ acao: criar(valor)[0]!, valor }];
+    await Promise.all([repo.aprenderEmLote(empresaId, lote('1102') as any), repo.aprenderEmLote(empresaId, lote('1102') as any)]);
+    expect(ler()).toEqual([{ valor: '1101', fixada: 1 }]);
+  });
 });
 
 describe('migração 0012: regras de CFOP refeitas com o CFOP de saída na chave', () => {
