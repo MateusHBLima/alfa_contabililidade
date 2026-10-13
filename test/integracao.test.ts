@@ -4727,6 +4727,40 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     expect(posts()).toHaveLength(0);
     db.consultar("UPDATE usuarios SET ativo = 1 WHERE email = 'contadora@alfacontabil.net'");
   });
+
+  // ---------------------------------------------------------------- mês completo / sem movimento (13/10)
+  it('consulta que termina sem ter mais marca até onde a SEF entregou; o painel diz mês a mês', async () => {
+    const infoAntes: any = await (await chamar(`/api/empresas/${empresaId}/sef`)).json();
+    expect(infoAntes.meses).toEqual([]);
+    expect(infoAntes.cobertura).toBeNull();
+
+    respostas.push(() => new Response(retorno('117', 'Nenhum DF-e localizado', { ult: '0' })));
+    const r = await consultar('2026-08-01', '2026-08-31');
+    expect(estado().sef_completo_em).toBeTruthy();
+    const doisDiasAtras = new Date(Date.now() - 3 * H - 48 * H).toISOString().slice(0, 10);
+    expect(r.cobertura).toMatchObject({ ate: doisDiasAtras });
+
+    const info: any = await (await chamar(`/api/empresas/${empresaId}/sef`)).json();
+    // Dois meses antes da primeira consulta: completo e, sem nota nenhuma, sem movimento.
+    expect(info.meses[0]).toMatchObject({ completo: true, semMovimento: true, noSistema: 0, naCaixa: 0 });
+    // O mês de hoje nunca está completo.
+    expect(info.meses.at(-1)).toMatchObject({ completo: false, semMovimento: false });
+  });
+
+  it('consulta que deu erro não marca o mês como completo', async () => {
+    respostas.push(() => new Response(retorno('8002', 'Rejeição: Requisitante não é Contabilista')));
+    await consultar('2026-08-01', '2026-08-31');
+    expect(estado().sef_completo_em).toBeNull();
+  });
+
+  it('busca automática ligada: dá para mudar a data de início', async () => {
+    await automatica({ ligada: true, desde: '2026-10-01' });
+    await automatica({ ligada: true, desde: '2026-08-01' });
+    const info: any = await (await chamar(`/api/empresas/${empresaId}/sef`)).json();
+    expect(info.automatica).toMatchObject({ ligada: true, desde: '2026-08-01' });
+    expect(db.consultar<any>("SELECT valor_antes, valor_depois FROM auditoria WHERE campo = 'busca_automatica' ORDER BY id").at(-1))
+      .toEqual({ valor_antes: 'ligada desde 2026-10-01', valor_depois: 'ligada desde 2026-08-01' });
+  });
 });
 
 describe('01/10: intermediário da busca na SEF (a Cloudflare não renegocia TLS)', async () => {
