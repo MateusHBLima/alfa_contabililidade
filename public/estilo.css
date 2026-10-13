@@ -667,3 +667,4 @@ tr.nota-estorno td{background:#faf5ff}
 .atalho-data{border:1px solid var(--line);background:var(--surface);color:var(--muted);border-radius:999px;font-size:11px;padding:2px 9px;cursor:pointer}
 .atalho-data:hover{border-color:var(--primary-2);color:var(--primary);background:var(--primary-soft)}
 .erro-data{color:var(--danger);font-size:12px;font-weight:600}
+#tbl-regras-icms td.regra-outras{background:#f4f6fa}

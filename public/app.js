@@ -1588,7 +1588,8 @@ function renderTotaisCfop(n) {
 function tabelaTotaisCfop(t) {
   const temSt = t.linhas.some((l) => Number(l.st) > 0);
   const temIpi = t.linhas.some((l) => Number(l.ipi) > 0);
-  const regraOutras = (c) => regrasIcmsCache?.get(c) === 'outras';
+  const emp = (estado.empresas || []).find((x) => x.id === estado.empresaId);
+  const regraOutras = (c) => regrasIcmsCache?.get(`${grupoIcms(emp?.regime)}|${c}`) === 'outras';
   return `<table><thead><tr>
        <th>CFOP de entrada</th><th class="num">Itens</th>
        <th class="num">Valor dos produtos</th><th class="num">Valor contábil</th>
@@ -1614,12 +1615,21 @@ function tabelaTotaisCfop(t) {
 }
 
 // Regras de ICMS em memória, só para o selo "no relatório: Outras" na nota.
+// Chave "grupo|cfop": desde 13/10 cada regime tem a sua coluna.
 let regrasIcmsCache = null;
 async function carregarRegrasIcmsCache() {
   try {
     const r = await api('/api/regras-icms');
-    regrasIcmsCache = new Map(r.regras.map((g) => [g.cfop, g.regra]));
+    regrasIcmsCache = new Map(r.regras.map((g) => [`${g.grupo}|${g.cfop}`, g.regra]));
   } catch { regrasIcmsCache = null; }
+}
+
+/* Grupo de regime das Regras de ICMS (13/10) — o mesmo grupoIcms do servidor. */
+const GRUPOS_ICMS = [['presumido', 'Presumido'], ['simples', 'Simples'], ['simples_fora', 'Simples por fora']];
+function grupoIcms(regime) {
+  if (regime === 'simples_fora') return 'simples_fora';
+  if (regime && regime.startsWith('simples')) return 'simples';
+  return 'presumido';
 }
 
 /* Imprimir a nota como ficou no sistema (28/09): para conferir com o Questor no
@@ -3950,33 +3960,54 @@ const descricaoCfop = (c) => (CFOPS.find(([x]) => x === c) ?? [c, ''])[1];
 
 async function carregarRegrasIcms() {
   const corpo = $('#tbl-regras-icms tbody');
-  corpo.innerHTML = '<tr><td colspan="4" class="vazio">carregando…</td></tr>';
+  corpo.innerHTML = '<tr><td colspan="6" class="vazio">carregando…</td></tr>';
   let r;
   try { r = await api('/api/regras-icms'); } catch (e) {
-    corpo.innerHTML = `<tr><td colspan="4" class="vazio">Não consegui carregar: ${esc(e.message)}</td></tr>`;
+    corpo.innerHTML = `<tr><td colspan="6" class="vazio">Não consegui carregar: ${esc(e.message)}</td></tr>`;
     return;
   }
   const podeMudar = pode('empresas.editar');
+  // Uma linha por CFOP, uma coluna por regime (13/10).
+  const porCfop = new Map();
+  for (const g of r.regras) {
+    if (!porCfop.has(g.cfop)) porCfop.set(g.cfop, {});
+    porCfop.get(g.cfop)[g.grupo] = g;
+  }
   // Na ordem da lista de CFOPs dela; os que não estão na lista vão no fim.
   const ordem = (c) => { const i = CFOPS.findIndex(([x]) => x === c); return i < 0 ? 999 : i; };
-  const regras = [...r.regras].sort((a, b) => ordem(a.cfop) - ordem(b.cfop) || a.cfop.localeCompare(b.cfop));
-  corpo.innerHTML = regras.map((g) => `<tr class="${g.regra === 'outras' ? 'regra-outras' : ''}">
-      <td class="mono"><b>${esc(g.cfop)}</b></td>
-      <td>${esc(descricaoCfop(g.cfop))}</td>
-      <td><select data-regra-cfop="${esc(g.cfop)}" ${podeMudar ? '' : 'disabled'}>
-        <option value="manter" ${g.regra === 'manter' ? 'selected' : ''}>Manter alíquota</option>
-        <option value="outras" ${g.regra === 'outras' ? 'selected' : ''}>Outras (zera base e ICMS)</option>
-      </select></td>
-      <td class="tiny">${g.atualizado_por ? `${esc(g.atualizado_por)} · ${esc(dataCurta(g.atualizado_em))}` : 'da planilha'}</td>
-    </tr>`).join('');
+  const cfops = [...porCfop.keys()].sort((a, b) => ordem(a) - ordem(b) || a.localeCompare(b));
+  const celula = (cfop, grupo, rotulo, g) => {
+    const quem = g?.atualizado_por ? `${g.atualizado_por} · ${dataCurta(g.atualizado_em)}` : 'padrão';
+    return `<td class="${g?.regra === 'outras' ? 'regra-outras' : ''}"><select data-regra-cfop="${esc(cfop)}" data-regra-grupo="${grupo}"
+        title="${esc(rotulo)} · ${esc(quem)}" ${podeMudar ? '' : 'disabled'}>
+        ${g ? '' : '<option value="" selected>—</option>'}
+        <option value="manter" ${g?.regra === 'manter' ? 'selected' : ''}>Manter alíquota</option>
+        <option value="outras" ${g?.regra === 'outras' ? 'selected' : ''}>Outras (zera base e ICMS)</option>
+      </select></td>`;
+  };
+  corpo.innerHTML = cfops.map((cfop) => {
+    const linha = porCfop.get(cfop);
+    const ultima = Object.values(linha).filter((g) => g.atualizado_por)
+      .sort((a, b) => String(b.atualizado_em).localeCompare(String(a.atualizado_em)))[0];
+    const rotuloUltima = ultima ? GRUPOS_ICMS.find(([k]) => k === ultima.grupo)?.[1] : '';
+    return `<tr>
+      <td class="mono"><b>${esc(cfop)}</b></td>
+      <td>${esc(descricaoCfop(cfop))}</td>
+      ${GRUPOS_ICMS.map(([k, rotulo]) => celula(cfop, k, rotulo, linha[k])).join('')}
+      <td class="tiny">${ultima ? `${esc(ultima.atualizado_por)} · ${esc(dataCurta(ultima.atualizado_em))} (${esc(rotuloUltima)})` : 'da planilha'}</td>
+    </tr>`;
+  }).join('');
 }
 
 $('#tbl-regras-icms')?.addEventListener('change', async (ev) => {
   const sel = ev.target.closest('select[data-regra-cfop]');
-  if (!sel) return;
+  if (!sel || !sel.value) return;
+  const rotulo = GRUPOS_ICMS.find(([k]) => k === sel.dataset.regraGrupo)?.[1] ?? '';
   try {
-    await api(`/api/regras-icms/${sel.dataset.regraCfop}`, { method: 'PUT', body: JSON.stringify({ regra: sel.value }) });
-    avisarSalvo(`CFOP ${sel.dataset.regraCfop}: ${sel.value === 'outras' ? 'Outras' : 'manter alíquota'}`);
+    await api(`/api/regras-icms/${sel.dataset.regraCfop}`, {
+      method: 'PUT', body: JSON.stringify({ regra: sel.value, grupo: sel.dataset.regraGrupo }),
+    });
+    avisarSalvo(`${rotulo} · CFOP ${sel.dataset.regraCfop}: ${sel.value === 'outras' ? 'Outras' : 'manter alíquota'}`);
   } catch (e) {
     alerta(`Não consegui salvar: ${e.message}`);
   }
@@ -3989,9 +4020,13 @@ $('#form-regra-nova')?.addEventListener('submit', async (ev) => {
   const cfop = $('#regra-nova-cfop').value.trim();
   if (!/^[123]\d{3}$/.test(cfop)) return alerta('CFOP de entrada com 4 dígitos (começa com 1, 2 ou 3).');
   try {
-    await api(`/api/regras-icms/${cfop}`, { method: 'PUT', body: JSON.stringify({ regra: $('#regra-nova-regra').value }) });
+    // Entra igual nas três colunas; depois ela ajusta cada uma.
+    for (const [grupo] of GRUPOS_ICMS) {
+      await api(`/api/regras-icms/${cfop}`, { method: 'PUT', body: JSON.stringify({ regra: $('#regra-nova-regra').value, grupo }) });
+    }
     $('#regra-nova-cfop').value = '';
     carregarRegrasIcms();
+    carregarRegrasIcmsCache();
   } catch (e) {
     alerta(`Não consegui salvar: ${e.message}`);
   }
