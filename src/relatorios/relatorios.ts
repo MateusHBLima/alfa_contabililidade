@@ -68,6 +68,19 @@ export type TotaisCfop = Totais & { notas: number; valorContabil: number; baseIc
 export type RegraIcms = 'manter' | 'outras';
 
 /**
+ * Grupo de regime das Regras de ICMS (13/10): cada CFOP tem uma regra por grupo.
+ * Presumido vale também para o Lucro Real e para empresa sem regime informado;
+ * Simples vale para o Integral, o Híbrido e o Simples antigo (sem classificar).
+ */
+export type GrupoIcms = 'presumido' | 'simples' | 'simples_fora';
+export const GRUPOS_ICMS: GrupoIcms[] = ['presumido', 'simples', 'simples_fora'];
+export function grupoIcms(regime: string | null | undefined): GrupoIcms {
+  if (regime === 'simples_fora') return 'simples_fora';
+  if (regime && regime.startsWith('simples')) return 'simples';
+  return 'presumido';
+}
+
+/**
  * Aplica as regras de ICMS por CFOP (planilha da Taís, 25/09) ao relatório já
  * montado: CFOP em "outras" sai com base e ICMS zerados e o valor contábil
  * inteiro na coluna Outras. Não mexe no item nem no XML — é só como o livro
