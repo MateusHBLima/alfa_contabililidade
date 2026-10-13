@@ -577,7 +577,9 @@ describe('tela: estorno em destaque e relatório que só aceita a última respos
   it('relatório: só a resposta do último pedido vai para a tela, com "Tentar de novo"', () => {
     expect(APP).toContain('if (meu !== seqRelatorio || pedido !== rel.qual) return;');
     expect(APP).toContain('id="rel-tentar"');
-    expect(APP).toContain('esperaDatasRel = setTimeout(carregarRelatorio, 400);');
+    // A espera de 400 ms enquanto ela digitava a data saiu em 13/10: agora o período só
+    // vale no OK ou no Enter (test/periodo.test.ts).
+    expect(APP).toContain("ligarPeriodo('rel', (de, ate) => { rel.de = de; rel.ate = ate; carregarRelatorio(); });");
   });
 });
 
