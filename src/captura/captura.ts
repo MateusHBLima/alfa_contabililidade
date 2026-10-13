@@ -252,6 +252,7 @@ export async function baixarDaSef(
     ultNsu: nsu, nsuDe, documentos,
     certificadoAceito: aceito?.id ?? null,
     nenhumVinculado: !aceito && ultimo?.cStat === '8002' && recusados.length === prontos.length,
+    completa: !erro && (ultimo?.cStat === '117' || (ultimo?.cStat === '118' && ultimo.qtd < 50)),
   });
   return { consultou: true, documentos, erro, temMais, liberadaEm: proxima, frase, certificado: aceito?.nome ?? null };
 }
@@ -460,4 +461,54 @@ export async function testarConexao(env: AmbienteCaptura, cert: CertParaBusca): 
     ];
     return { ok: false, detalhe: e instanceof Error ? e.message : String(e), diagnostico };
   }
+}
+
+// ------------------------------------------------------------------ o mês está completo?
+
+/**
+ * Até que dia a SEF já entregou tudo, e cada mês: completo, em andamento, sem
+ * movimento (13/10, pedido da Taís). Datas no horário de Brasília (UTC−3).
+ *
+ *   - A SEF entrega a nota 24 h depois da autorização. Uma consulta completa às T cobre
+ *     tudo o que foi emitido até o dia de (T − 48 h): o dia inteiro mais as 24 h.
+ *   - A SEF guarda o mês atual e os dois anteriores. A primeira consulta (NSU 0) trouxe
+ *     o que havia desde o dia 1º de dois meses antes dela. Antes disso, a SEF não tem.
+ */
+export type MesNaSef = {
+  competencia: string;
+  noSistema: number;
+  naCaixa: number;
+  completo: boolean;
+  semMovimento: boolean;
+};
+
+const BRT_MS = 3 * 3600_000;
+const diaBr = (ms: number) => new Date(ms - BRT_MS).toISOString().slice(0, 10);
+const ultimoDia = (comp: string) => new Date(Date.UTC(Number(comp.slice(0, 4)), Number(comp.slice(5, 7)), 0)).toISOString().slice(0, 10);
+const somarMeses = (comp: string, n: number) => {
+  const d = new Date(Date.UTC(Number(comp.slice(0, 4)), Number(comp.slice(5, 7)) - 1 + n, 1));
+  return d.toISOString().slice(0, 7);
+};
+
+export function coberturaDaSef(primeiraConsulta: string | null, completoEm: string | null): { de: string; ate: string | null } | null {
+  if (!primeiraConsulta) return null;
+  const de = `${somarMeses(diaBr(Date.parse(primeiraConsulta)).slice(0, 7), -2)}-01`;
+  const ate = completoEm ? diaBr(Date.parse(completoEm) - 48 * 3600_000) : null;
+  return { de, ate: ate && ate >= de ? ate : null };
+}
+
+export function mesesDaSef(
+  mov: { primeiraConsulta: string | null; completoEm: string | null; meses: Map<string, { noSistema: number; naCaixa: number }> },
+  agora = new Date(),
+): MesNaSef[] {
+  const cob = coberturaDaSef(mov.primeiraConsulta, mov.completoEm);
+  if (!cob) return [];
+  const atual = diaBr(agora.getTime()).slice(0, 7);
+  const saida: MesNaSef[] = [];
+  for (let m = cob.de.slice(0, 7); m <= atual && saida.length < 12; m = somarMeses(m, 1)) {
+    const n = mov.meses.get(m) ?? { noSistema: 0, naCaixa: 0 };
+    const completo = !!cob.ate && cob.ate >= ultimoDia(m);
+    saida.push({ competencia: m, ...n, completo, semMovimento: completo && n.noSistema === 0 && n.naCaixa === 0 });
+  }
+  return saida;
 }
