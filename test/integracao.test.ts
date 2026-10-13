@@ -3624,6 +3624,40 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     for (const r of regras) expect([r.n, r.valor]).toEqual([1, '1101']);
   });
 
+  it('13/10 (Filomena): setembro e outubro importados juntos — o que ela ensina em setembro chega em outubro ao abrir', async () => {
+    /* Áudio da Taís: "tratei umas notas no mês de setembro. E agora eu tô a tratar o mês de
+       outubro, e ele (...) tá a dar-me tudo como se fosse a primeira vez (...) palpite do
+       perfil 1102, mas na verdade eu já tratei essas notas no mês anterior com 1101". */
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'setembro.xml', conteudo: comCfop('11', '5102') },
+      { nome: 'outubro.xml', conteudo: comCfop('33', '5102') },
+    ]);
+    const [o1, o2, o3] = itensDa('33');
+    // Em outubro, antes de tratar setembro: um item ela digitou (1556), outro só conferiu.
+    await corrigir(o2.id, '1556');
+    const notaOut = o1.nota_id;
+    expect((await req(`/api/notas/${notaOut}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [o3.id] }) })).status).toBe(200);
+    // Ela trata setembro inteiro: 1101.
+    for (const i of itensDa('11')) expect((await corrigir(i.id, '1101')).status).toBe(200);
+    // Outubro continua com o palpite do perfil até alguém abrir a nota (o problema dela).
+    expect(itensDa('33')[0]).toMatchObject({ cfop_novo: '1102', cfop_origem: 'perfil' });
+    const trilhaAntes = db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0];
+
+    const aberta = await (await req(`/api/notas/${notaOut}`)).json() as any;
+    const [a1, a2, a3] = aberta.itens;
+    expect(a1).toMatchObject({ cfop_novo: '1101', revisado: 0 });
+    expect(String(a1.cfop_origem)).toMatch(/^regra:/);
+    expect(a1.procedencia.fonte).toBe('aprendida');
+    // O que ela digitou e o que ela conferiu não mudam.
+    expect(a2).toMatchObject({ cfop_novo: '1556', cfop_origem: 'manual' });
+    expect(a3).toMatchObject({ cfop_novo: '1102', revisado: 1 });
+    // O palpite atualizado não entra na trilha como se fosse alguém.
+    expect(db.consultar('SELECT COUNT(*) AS n FROM auditoria')[0]).toEqual(trilhaAntes);
+    // Abrir de novo não muda mais nada.
+    await req(`/api/notas/${notaOut}`);
+    expect(itensDa('33').map((i: any) => [i.cfop_novo, i.cfop_origem?.slice(0, 6)])).toEqual([['1101', 'regra:'], ['1556', 'manual'], ['1102', 'perfil']]);
+  });
+
   it('13/10: a mesma regra criada por duas gravações simultâneas não estoura a unicidade, e a fixada continua mandando', async () => {
     const criar = (valor: string, fixada = false) => [{ tipo: 'criar' as const, nivel: 4 as const, chave: '83646984003044|04039000#5102', campo: 'cfop' as const, valor, fixada }];
     // As duas leem "não existe" antes de qualquer uma gravar - é a corrida do D1.
@@ -3702,6 +3736,52 @@ describe('migração 0012: regras de CFOP refeitas com o CFOP de saída na chave
     const cfopDe = (s: string) => (db.consultar(`SELECT cfop_novo FROM itens WHERE nota_id=? ORDER BY n_item`, nota(s)) as any[]).map((i) => i.cfop_novo);
     expect(new Set(cfopDe('44'))).toEqual(new Set(['1101']));
     expect(new Set(cfopDe('55'))).toEqual(new Set(['1949']));
+  });
+});
+
+describe('migração 0028: regras de ICMS por regime — o Presumido volta ao que era antes de 13/10', () => {
+  /* 13/10: a Taís trocou regras pensando no Simples e mudou para todas as empresas.
+     A 0028 separa por regime e reconstrói o Presumido pela trilha de auditoria. */
+  const SQL_0018 = readFileSync(new URL('../migrations/0018_regras_icms.sql', import.meta.url), 'utf8');
+  const SQL_0028 = readFileSync(new URL('../migrations/0028_regras_icms_por_regime.sql', import.meta.url), 'utf8');
+
+  it('Presumido e Simples por fora como antes de 13/10 (com quem mudou antes), Simples tudo em Outras, trilha intacta', () => {
+    const exec = (sql: string) => (db as any).db.exec(sql);
+    exec('DROP TABLE regras_icms');
+    exec(SQL_0018); // a tabela antiga, com os 30 da planilha
+    const trilha = (quando: string, quem: string, cfop: string, antes: string | null, depois: string) => db.consultar(
+      `INSERT INTO auditoria (tenant_id, quando, usuario_id, acao, entidade, entidade_id, campo, valor_antes, valor_depois, origem, hash)
+       VALUES ('alfa', ?, ?, ?, 'regra_icms', ?, 'regra', ?, ?, 'manual', 'h')`, quando, quem, antes ? 'alterar' : 'criar', cfop, antes, depois);
+    const gravar = (cfop: string, regra: string, quando: string, quem: string) => db.consultar(
+      `INSERT INTO regras_icms (tenant_id, cfop, regra, atualizado_em, atualizado_por) VALUES ('alfa', ?, ?, ?, ?)
+       ON CONFLICT (tenant_id, cfop) DO UPDATE SET regra = excluded.regra, atualizado_em = excluded.atualizado_em, atualizado_por = excluded.atualizado_por`,
+      cfop, regra, quando, quem);
+    // 29/09: a Bruna pôs o 1556 em Outras (vale, é de antes).
+    gravar('1556', 'outras', '2026-09-29T14:52:00.000Z', 'u-bruna'); trilha('2026-09-29T14:52:00.000Z', 'u-bruna', '1556', 'manter', 'outras');
+    // 13/10: a Taís mexe pensando no Simples.
+    gravar('1117', 'outras', '2026-10-13T17:30:10.000Z', 'u1'); trilha('2026-10-13T17:30:10.000Z', 'u1', '1117', 'manter', 'outras');
+    gravar('1102', 'outras', '2026-10-13T17:30:20.000Z', 'u1'); trilha('2026-10-13T17:30:20.000Z', 'u1', '1102', 'manter', 'outras');
+    gravar('1102', 'manter', '2026-10-13T17:31:00.000Z', 'u1'); trilha('2026-10-13T17:31:00.000Z', 'u1', '1102', 'outras', 'manter');
+    gravar('1556', 'manter', '2026-10-13T17:32:00.000Z', 'u1'); trilha('2026-10-13T17:32:00.000Z', 'u1', '1556', 'outras', 'manter');
+    gravar('1933', 'outras', '2026-10-13T17:33:00.000Z', 'u1'); trilha('2026-10-13T17:33:00.000Z', 'u1', '1933', null, 'outras');
+    const trilhaAntes = JSON.stringify(db.consultar('SELECT * FROM auditoria ORDER BY id'));
+
+    exec(SQL_0028);
+
+    const regra = (grupo: string, cfop: string) => db.consultar(
+      `SELECT regra, atualizado_em, atualizado_por FROM regras_icms WHERE tenant_id = 'alfa' AND grupo = ? AND cfop = ?`, grupo, cfop)[0] as any;
+    expect(regra('presumido', '1117')).toEqual({ regra: 'manter', atualizado_em: '2026-09-28T00:00:00.000Z', atualizado_por: null });
+    expect(regra('presumido', '1102')).toEqual({ regra: 'manter', atualizado_em: '2026-09-28T00:00:00.000Z', atualizado_por: null });
+    expect(regra('presumido', '1556')).toEqual({ regra: 'outras', atualizado_em: '2026-09-29T14:52:00.000Z', atualizado_por: 'u-bruna' });
+    expect(regra('presumido', '1403')).toMatchObject({ regra: 'outras', atualizado_por: null });
+    expect(regra('presumido', '1933')).toMatchObject({ regra: 'outras' }); // criado em 13/10: fica
+    for (const cfop of ['1117', '1102', '1556', '1403', '1933', '1101']) {
+      expect(regra('simples_fora', cfop), cfop).toEqual(regra('presumido', cfop));
+      expect(regra('simples', cfop).regra, cfop).toBe('outras');
+    }
+    const n = (grupo: string) => (db.consultar(`SELECT COUNT(*) AS n FROM regras_icms WHERE grupo = ?`, grupo)[0] as any).n;
+    expect([n('presumido'), n('simples'), n('simples_fora')]).toEqual([31, 31, 31]);
+    expect(JSON.stringify(db.consultar('SELECT * FROM auditoria ORDER BY id'))).toBe(trilhaAntes);
   });
 });
 
@@ -4121,6 +4201,8 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
   });
 
   it('28/09: regras de ICMS — CFOP em "outras" sai com base e ICMS zerados e o valor em Outras', async () => {
+    // Desde 13/10 a regra é por regime; aqui, a coluna do Presumido.
+    db.consultar(`UPDATE empresas SET regime = 'presumido' WHERE id = ?`, empresaId);
     await subir(empresaId, outraNota(XML, '62'));
     const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
     const itens = (await json(`/api/notas/${nota}`)).itens;
@@ -4151,19 +4233,61 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     expect(analitico.canceladas).toBe(0);
     expect(analitico.linhas.map((l: any) => l.n_item)).toEqual([1, 2, 3]);
     // Trocar a regra muda o relatório na hora; nada é gravado no item.
-    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'outras' }) })).status).toBe(200);
+    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'outras', grupo: 'presumido' }) })).status).toBe(200);
     rel = await json(base);
     expect(rel.linhas.find((l: any) => l.cfop === '1102')).toMatchObject({ regra: 'outras', baseIcms: 0, icms: 0 });
     expect(db.consultar(`SELECT COUNT(*) AS n FROM itens WHERE v_bc_icms > 0`)[0].n).toBe(3);
     expect(db.consultar(`SELECT * FROM auditoria WHERE entidade = 'regra_icms'`)).toHaveLength(1);
-    // A lista vem da planilha dela (30 CFOPs).
+    // A lista vem da planilha dela (30 CFOPs), uma vez por regime.
     const lista = (await json('/api/regras-icms')).regras;
-    expect(lista).toHaveLength(30);
-    expect(lista.find((r: any) => r.cfop === '1556').regra).toBe('manter');
-    expect(lista.find((r: any) => r.cfop === '1403').regra).toBe('outras');
-    // CFOP de saída não entra; regra desconhecida é recusada.
-    expect((await req('/api/regras-icms/5102', { method: 'PUT', body: JSON.stringify({ regra: 'outras' }) })).status).toBe(400);
-    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'zerar' }) })).status).toBe(400);
+    expect(lista).toHaveLength(90);
+    const de = (grupo: string, cfop: string) => lista.find((r: any) => r.grupo === grupo && r.cfop === cfop).regra;
+    expect(de('presumido', '1556')).toBe('manter');
+    expect(de('presumido', '1403')).toBe('outras');
+    expect(de('simples', '1101')).toBe('outras');
+    expect(de('simples_fora', '1101')).toBe('manter');
+    // CFOP de saída não entra; regra ou regime desconhecido é recusado; sem regime também.
+    expect((await req('/api/regras-icms/5102', { method: 'PUT', body: JSON.stringify({ regra: 'outras', grupo: 'presumido' }) })).status).toBe(400);
+    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'zerar', grupo: 'presumido' }) })).status).toBe(400);
+    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'outras', grupo: 'real' }) })).status).toBe(400);
+    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'outras' }) })).status).toBe(400);
+  });
+
+  it('13/10: a regra de ICMS é a do regime da empresa — mexer no Simples não muda o Presumido', async () => {
+    /* Áudio da Taís: "as minhas empresas do presumido, eu tenho que manter a alíquota,
+       e as minhas empresas do simples, eu tenho que deixar em outras (...) eu mudei
+       tudo agora e vi que mudou tudo pra todos". */
+    await subir(empresaId, outraNota(XML, '64'));
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    db.consultar(`UPDATE itens SET v_bc_icms = valor_total, v_icms = ROUND(valor_total * 0.17, 2) WHERE nota_id = '${nota}'`);
+    const itens = (await json(`/api/notas/${nota}`)).itens;
+    await req(`/api/notas/${nota}/aplicar-cfop`, { method: 'POST', body: JSON.stringify({ cfop: '1102', itens: itens.map((i: any) => i.id) }) });
+    const base = `/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`;
+    const regra1102 = async () => (await json(base)).linhas.find((l: any) => l.cfop === '1102').regra;
+    const regime = (r: string | null) => db.consultar(`UPDATE empresas SET regime = ? WHERE id = ?`, r, empresaId);
+
+    // Como começa: Presumido, Lucro Real e sem regime mantêm; Simples (integral, híbrido
+    // e o antigo sem classificar) vai para Outras; Simples por fora começa igual ao Presumido.
+    for (const [r, esperado] of [['presumido', 'manter'], ['real', 'manter'], [null, 'manter'], ['simples_integral', 'outras'],
+      ['simples_hibrido', 'outras'], ['simples', 'outras'], ['simples_fora', 'manter']] as const) {
+      regime(r);
+      expect(await regra1102(), String(r)).toBe(esperado);
+    }
+    // Mudar a coluna do Simples por fora não mexe no Presumido nem no Simples.
+    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'outras', grupo: 'simples_fora' }) })).status).toBe(200);
+    expect(await regra1102()).toBe('outras');
+    regime('presumido');
+    expect(await regra1102()).toBe('manter');
+    // Mudar a do Simples não mexe no Presumido nem no Simples por fora.
+    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'manter', grupo: 'simples' }) })).status).toBe(200);
+    expect(await regra1102()).toBe('manter');
+    regime('simples_integral');
+    expect(await regra1102()).toBe('manter');
+    regime('simples_fora');
+    expect(await regra1102()).toBe('outras');
+    // Cada troca fica na trilha, com o regime.
+    expect((db.consultar(`SELECT campo FROM auditoria WHERE entidade = 'regra_icms' ORDER BY id`) as any[]).map((a) => a.campo))
+      .toEqual(['regra:simples_fora', 'regra:simples']);
   });
 
   it('28/09: total por CFOP da nota traz base e ICMS (somando os itens)', async () => {

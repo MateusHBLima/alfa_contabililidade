@@ -10,7 +10,7 @@ import { conferirSenha, gerarHashSenha, avaliarSenha, HashIncompativel, HASH_INE
 import {
   gerarSegredo, conferirTotp, uriDeProvisionamento, segredoLegivel,
 } from './auth/totp';
-import { importarArquivos } from './nfe/importador';
+import { importarArquivos, atualizarPalpitesDaNota } from './nfe/importador';
 import { parseNFe } from './nfe/parser';
 import { analisarCnaes } from './empresas/cnae';
 import { gerarXmlCorrigido, verificarInvariantes } from './nfe/serializer';
@@ -27,7 +27,7 @@ import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
 import { baixarDaSef, executarBuscaAutomatica, mesesDaSef, coberturaDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
 import { ErroSef } from './captura/sefsc';
-import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
+import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, grupoIcms, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 import { lerPaginasQuestor, conferirComQuestor, ErroQuestor } from './relatorios/questor';
 
@@ -1881,18 +1881,18 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
     const doCfop = cfopFiltro ? `-cfop-${cfopFiltro.replace(/\D/g, '') || 'sem'}` : '';
     if (csv) return csvResposta(csvAnalitico(linhas), `relatorio-analitico-${sufixo}${doCfop}.csv`);
     if (qual === 'notas') {
-      const regra = (await repo.regrasIcms()).get(cfopFiltro!) ?? null;
+      const regra = (await repo.regrasIcms(grupoIcms(empresa?.regime))).get(cfopFiltro!) ?? null;
       return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, cfop: cfopFiltro, regra, notas: aplicarRegraNasNotas(notasDoAnalitico(linhas), regra) });
     }
     // Relatório "Por nota" (28/09): a tela aplica a regra de ICMS de cada CFOP
     // item a item, igual ao relatório por CFOP, para os dois baterem.
-    const regras = Object.fromEntries(await repo.regrasIcms());
+    const regras = Object.fromEntries(await repo.regrasIcms(grupoIcms(empresa?.regime)));
     return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, cfop: cfopFiltro ?? null, canceladas, estornos, regras, linhas });
   }
 
   let rel: any =
     qual === 'cfop'
-      ? aplicarRegrasIcms(montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia, periodo)), await repo.regrasIcms())
+      ? aplicarRegrasIcms(montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia, periodo)), await repo.regrasIcms(grupoIcms(empresa?.regime)))
       : montarRelatorioProdutos(await repo.relatorioProdutos(empresaId, competencia, periodo));
 
   // Produtos marcados "não fechou" no mês (28/09). Com soNaoFechou=1, o relatório
@@ -1920,19 +1920,22 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, canceladas, estornos, naoFecharam, ...rel });
 });
 
-/** Regras de ICMS por CFOP (28/09, planilha da Taís): valem para o escritório inteiro. */
+/** Regras de ICMS por CFOP (28/09, planilha da Taís): uma por grupo de regime desde 13/10 (grupoIcms). */
 app.get('/api/regras-icms', async (c) => {
   exigir(c.get('sessao'), 'notas.visualizar');
   return c.json({ regras: await c.get('repo').listarRegrasIcms() });
 });
 
 app.put('/api/regras-icms/:cfop', async (c) => {
-  // Muda como o relatório de todas as empresas mostra base e ICMS: é decisão de quem administra.
+  // Muda como o relatório das empresas de um regime mostra base e ICMS: é decisão de quem administra.
   exigir(c.get('sessao'), 'empresas.editar');
   const cfop = c.req.param('cfop');
   if (!/^[123]\d{3}$/.test(cfop)) return c.json({ erro: 'CFOP de entrada inválido (1xxx, 2xxx ou 3xxx)' }, 400);
-  const { regra } = z.object({ regra: z.enum(['manter', 'outras']) }).parse(await c.req.json());
-  const mudou = await c.get('repo').definirRegraIcms(cfop, regra);
+  const { regra, grupo } = z.object({
+    regra: z.enum(['manter', 'outras']),
+    grupo: z.enum(['presumido', 'simples', 'simples_fora']),
+  }).parse(await c.req.json());
+  const mudou = await c.get('repo').definirRegraIcms(grupo, cfop, regra);
   return c.json({ ok: true, mudou });
 });
 
@@ -2392,6 +2395,11 @@ app.get('/api/notas/:id', async (c) => {
     if (await lerValoresFiscaisDaNota(c, r.nota.id, r.nota.r2_original)) {
       r = (await repo.obterNotaComItens(r.nota.id))!;
     }
+  }
+
+  // O que foi ensinado depois da importação vale para o que ainda não foi conferido (13/10).
+  if (await atualizarPalpitesDaNota(repo, r.nota, r.itens)) {
+    r = (await repo.obterNotaComItens(r.nota.id))!;
   }
 
   const historico = await repo.carregarHistoricoProdutos(

@@ -388,3 +388,95 @@ export function valoresFiscaisBind(item: { vProd: number | null; fiscal?: import
 function vazioParaNulo(v: string): string | null {
   return v.trim() === '' ? null : v;
 }
+
+/** Coluna do valor e da origem de cada campo na tabela itens. */
+const COLUNAS_CAMPO: Record<string, { valor: string; origem: string }> = {
+  cfop: { valor: 'cfop_novo', origem: 'cfop_origem' },
+  descricao: { valor: 'x_prod_novo', origem: 'x_prod_origem' },
+  cst_entrada: { valor: 'cst_entrada', origem: 'cst_entrada_origem' },
+  conta_contabil: { valor: 'conta_contabil', origem: 'conta_contabil_origem' },
+  credito_icms: { valor: 'credito_icms', origem: 'credito_icms_origem' },
+  credito_pis: { valor: 'credito_pis', origem: 'credito_pis_origem' },
+  credito_cofins: { valor: 'credito_cofins', origem: 'credito_cofins_origem' },
+};
+
+/**
+ * Atualiza os palpites de uma nota com o que a contabilidade já ensinou (13/10).
+ *
+ * O motor roda na importação. Caso real (Filomena, 13/10): setembro e outubro
+ * importados juntos, às 11h; ela tratou setembro depois, ensinando 1101. Outubro
+ * já estava gravado com o palpite do perfil (1102) e continuou assim, como se
+ * fosse a primeira vez: 117 itens de outubro tinham o mesmo produto, do mesmo
+ * fornecedor e na mesma operação, já tratado em setembro.
+ *
+ * Roda ao abrir a nota. Só mexe em item NÃO conferido e, nele, só no campo que o
+ * sistema preencheu (perfil, regra, importação). O que alguém digitou ("manual")
+ * e o que já foi conferido nunca são tocados. Devolve quantos itens mudaram.
+ */
+export async function atualizarPalpitesDaNota(repo: Repo, nota: any, itens: any[]): Promise<number> {
+  const pendentes = itens.filter((i) => Number(i.revisado) !== 1);
+  if (pendentes.length === 0) return 0;
+  const empresa = await repo.obterEmpresa(nota.empresa_id);
+  if (!empresa) return 0;
+
+  const comoItem = (i: any) => ({
+    nItem: i.n_item, cProd: i.c_prod, cEAN: i.c_ean, xProd: i.x_prod_original,
+    NCM: i.ncm, CEST: i.cest, CFOP: i.cfop_original, uCom: i.unidade,
+    qCom: i.quantidade, vUnCom: i.valor_unitario, vProd: i.valor_total,
+    cstIcms: i.cst_origem ?? null, temIbsCbs: false,
+  });
+  const candidatas = await repo.carregarRegrasCandidatas(
+    empresa.id, pendentes.flatMap((i) => chavesParaBuscar(comoItem(i) as any, nota.emit_cnpj)),
+  );
+  // Sem nenhuma regra para estes produtos, não há o que atualizar.
+  if (candidatas.length === 0) return 0;
+
+  const contexto: ContextoNota = {
+    perfil: (empresa.perfil ?? 'revenda') as PerfilEmpresa,
+    ufEmitente: nota.emit_uf ?? null,
+    ufDestinatario: empresa.uf ?? null,
+  };
+  const doSistema = (origem: unknown) => !String(origem ?? '').startsWith('manual');
+
+  const comandos: D1PreparedStatement[] = [];
+  for (const i of pendentes) {
+    const item = comoItem(i) as any;
+    const doItem = regrasDoItem(item, nota.emit_cnpj, candidatas);
+    const sug: Record<string, ReturnType<typeof sugerir>> = {};
+    for (const campo of TODOS_CAMPOS) sug[campo] = sugerir(campo, item, doItem, contexto);
+
+    const sets: string[] = [];
+    const binds: unknown[] = [];
+    const conferir: string[] = [];
+    const conferirBinds: unknown[] = [];
+    for (const campo of TODOS_CAMPOS) {
+      const col = COLUNAS_CAMPO[campo];
+      if (!col || !doSistema(i[col.origem])) continue;
+      const s = sug[campo]!;
+      // Só troca quando agora há uma regra aprendida; palpite por palpite, fica como está.
+      if (!s.regraId) continue;
+      const valor = campo === 'cfop' || campo === 'descricao' ? s.valor : vazioParaNulo(s.valor);
+      if ((i[col.valor] ?? null) === valor && i[col.origem] === s.origem) continue;
+      sets.push(`${col.valor} = ?`, `${col.origem} = ?`);
+      binds.push(valor, s.origem);
+      // Se alguém mexeu nesse campo entre a leitura e agora, não sobrescreve.
+      conferir.push(`COALESCE(${col.origem}, '') = ?`);
+      conferirBinds.push(String(i[col.origem] ?? ''));
+    }
+    if (sets.length === 0) continue;
+
+    if (doSistema(i.cfop_origem)) {
+      const confianca = sug['cfop']!.confianca === 'alta' ? 'alta'
+        : sug['cfop']!.regraId || sug['descricao']!.regraId ? 'media' : 'nenhuma';
+      sets.push('confianca = ?');
+      binds.push(confianca);
+    }
+    comandos.push(
+      repo.bd
+        .prepare(`UPDATE itens SET ${sets.join(', ')} WHERE tenant_id = ? AND id = ? AND revisado = 0 AND ${conferir.join(' AND ')}`)
+        .bind(...binds, repo.contexto.sessao.tenantId, i.id, ...conferirBinds),
+    );
+  }
+  for (let k = 0; k < comandos.length; k += 100) await repo.bd.batch(comandos.slice(k, k + 100));
+  return comandos.length;
+}
