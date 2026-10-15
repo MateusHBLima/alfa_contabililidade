@@ -143,6 +143,24 @@ async function lerSessao(
 
 // ------------------------------------------------------------------ middleware
 
+/**
+ * Tela nova (v2) em teste (15/10): o Mateus olha a v2 com a conta dele e os dados
+ * reais, e nada que a Taís fez pode mudar. Toda chamada da v2 em teste leva o
+ * cabeçalho X-Tela: v2-teste (public/v2/api.js); com ele o servidor só responde
+ * leitura - conferir, trocar CFOP, importar, apagar, tudo é recusado aqui, antes de
+ * qualquer rota. Abrir nota também não atualiza palpite (GET /api/notas/:id).
+ * A tela de sempre não manda o cabeçalho e não muda em nada.
+ */
+const CABECALHO_TESTE = 'x-tela';
+const ehTelaEmTeste = (c: { req: { header(n: string): string | undefined } }) =>
+  c.req.header(CABECALHO_TESTE) === 'v2-teste';
+app.use('/api/*', async (c, next) => {
+  if (ehTelaEmTeste(c) && c.req.method !== 'GET' && c.req.method !== 'HEAD') {
+    return c.json({ erro: 'Tela nova em teste: aqui é só para olhar. Nada foi gravado.', modoTeste: true }, 403);
+  }
+  return next();
+});
+
 app.use('/api/*', async (c, next) => {
   // Sem SESSION_SECRET nao ha como assinar o cookie; sem AUDIT_SEED nao ha primeiro elo
   // da cadeia de auditoria. Faltando qualquer um dos dois, o HMAC estoura la dentro e a
@@ -2442,7 +2460,8 @@ app.get('/api/notas/:id', async (c) => {
 
   // O que foi ensinado depois da importação vale para o que ainda não foi conferido (13/10).
   // Só para quem pode editar CFOP: abrir a nota com o papel "Somente leitura" não muda nada.
-  if (c.get('sessao').permissoes.has('notas.editar_cfop') && await atualizarPalpitesDaNota(repo, r.nota, r.itens)) {
+  // Nem pela tela nova em teste (15/10): lá é só para olhar.
+  if (c.get('sessao').permissoes.has('notas.editar_cfop') && !ehTelaEmTeste(c) && await atualizarPalpitesDaNota(repo, r.nota, r.itens)) {
     r = (await repo.obterNotaComItens(r.nota.id))!;
   }
 

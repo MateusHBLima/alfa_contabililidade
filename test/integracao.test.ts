@@ -3909,6 +3909,41 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     expect(v.comNomeTratado).toBe(9);
   });
 
+  it('15/10 (tela nova em teste): com o cabeçalho da v2 nada é gravado e abrir a nota não muda palpite', async () => {
+    const v2 = { 'X-Tela': 'v2-teste' };
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: comCfop('11', '5102') }]);
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: comCfop('33', '5102') }]);
+    const [a1] = itensDa('11');
+    const [b1] = itensDa('33');
+    const antes = db.consultar(`SELECT id, cfop_novo, cfop_origem, x_prod_novo, revisado FROM itens ORDER BY id`);
+    const trilhaAntes = (db.consultar(`SELECT COUNT(*) AS n FROM auditoria`)[0] as any).n;
+    // Gravar pela v2 em teste: recusado antes de qualquer rota.
+    const tentativas = [
+      req(`/api/itens/${a1.id}`, { method: 'PATCH', headers: v2, body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1556' }] }) }),
+      req(`/api/notas/${a1.nota_id}/conferir`, { method: 'POST', headers: v2, body: '{}' }),
+      req(`/api/itens/${a1.id}/desconferir`, { method: 'POST', headers: v2 }),
+      req(`/api/notas/${a1.nota_id}/aplicar-cfop`, { method: 'POST', headers: v2, body: JSON.stringify({ cfop: '1556', itens: [a1.id] }) }),
+      req(`/api/notas/${a1.nota_id}`, { method: 'DELETE', headers: v2 }),
+      req(`/api/empresas/${empresaId}/nomes-de-outro-produto/corrigir`, { method: 'POST', headers: v2, body: '{}' }),
+    ];
+    for (const r of await Promise.all(tentativas)) {
+      expect(r.status).toBe(403);
+      expect(await r.json()).toMatchObject({ modoTeste: true });
+    }
+    expect(db.consultar(`SELECT id, cfop_novo, cfop_origem, x_prod_novo, revisado FROM itens ORDER BY id`)).toEqual(antes);
+    expect((db.consultar(`SELECT COUNT(*) AS n FROM auditoria`)[0] as any).n).toBe(trilhaAntes);
+    // Pela tela de sempre ela ensina 1101 no item da nota a...
+    expect((await corrigir(a1.id, '1101')).status).toBe(200);
+    // ...e a nota b, aberta pela v2 em teste, fica como estava (leitura funciona normalmente).
+    const lida = await req(`/api/notas/${b1.nota_id}`, { headers: v2 });
+    expect(lida.status).toBe(200);
+    expect((await lida.json() as any).itens.find((i: any) => i.id === b1.id).cfop_novo).toBe(b1.cfop_novo);
+    expect((db.consultar(`SELECT cfop_novo FROM itens WHERE id = ?`, b1.id)[0] as any).cfop_novo).toBe(b1.cfop_novo);
+    // Pela tela de sempre, abrir atualiza o palpite, como antes.
+    await req(`/api/notas/${b1.nota_id}`);
+    expect((db.consultar(`SELECT cfop_novo FROM itens WHERE id = ?`, b1.id)[0] as any).cfop_novo).toBe('1101');
+  });
+
   it('13/10: a mesma regra criada por duas gravações simultâneas não estoura a unicidade, e a fixada continua mandando', async () => {
     const criar = (valor: string, fixada = false) => [{ tipo: 'criar' as const, nivel: 4 as const, chave: '83646984003044|04039000#5102', campo: 'cfop' as const, valor, fixada }];
     // As duas leem "não existe" antes de qualquer uma gravar - é a corrida do D1.
