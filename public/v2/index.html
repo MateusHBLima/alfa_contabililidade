@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alfa Fiscal</title>
+<link rel="stylesheet" href="/v2/estilo.css">
+<script type="module" src="/v2/app.js"></script>
+</head>
+<body>
+
+<header class="topo">
+  <a class="marca" href="#t=notas" title="Notas"><span class="marca-sinal">AF</span><span>Alfa Fiscal</span></a>
+
+  <nav class="menu-principal" id="menu-principal" aria-label="Telas">
+    <a href="#t=notas" data-tela="notas" class="ativo">Notas</a>
+    <a data-antiga="vRelatorios" href="/" title="Abre na tela de sempre">Relatórios <span class="seta-fora">↗</span></a>
+    <a data-antiga="v3" href="/" title="Abre na tela de sempre">Exportar XML <span class="seta-fora">↗</span></a>
+    <a data-antiga="vApuracao" href="/" title="Abre na tela de sempre">Antecipação e DIFAL <span class="seta-fora">↗</span></a>
+  </nav>
+
+  <div class="contexto">
+    <button type="button" class="seletor seletor-empresa" id="btn-empresa" aria-haspopup="true" aria-expanded="false">
+      <span class="seletor-rotulo">Empresa</span>
+      <span class="seletor-valor" id="empresa-nome">—</span>
+    </button>
+    <button type="button" class="seletor" id="btn-mes" aria-haspopup="true" aria-expanded="false">
+      <span class="seletor-rotulo">Mês</span>
+      <span class="seletor-valor" id="mes-nome">—</span>
+    </button>
+  </div>
+
+  <button type="button" class="usuario" id="btn-usuario" aria-haspopup="true" aria-expanded="false">
+    <span class="usuario-sinal" id="usuario-sinal">?</span>
+  </button>
+</header>
+
+<div class="faixa-teste" id="faixa-teste" hidden>
+  <b>Tela nova em teste.</b> Aqui é só para olhar: nada que você clicar é gravado.
+  <a href="/" id="link-tela-antiga">Voltar para a tela de sempre</a>
+</div>
+<div class="carregando" id="carregando" hidden></div>
+
+<main id="tela" class="tela"></main>
+
+<aside class="painel" id="painel" hidden aria-label="Item"></aside>
+
+<dialog id="dialogo" class="dialogo"></dialog>
+<div id="aviso" class="aviso" role="status" aria-live="polite" hidden></div>
+
+</body>
+</html>
