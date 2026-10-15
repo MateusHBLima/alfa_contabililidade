@@ -51,6 +51,8 @@ export const NOME_BUSCA_AUTOMATICA = 'Busca automática';
 export type FichaRegra = {
   id: string;
   nivel: number;
+  /** o valor que a regra diz HOJE (pode ter mudado depois que a linha foi conferida) */
+  valor: string;
   usos: number;
   acertos: number;
   erros: number;
@@ -1058,7 +1060,7 @@ export class Repo {
       const fatia = unicos.slice(i, i + POR_CONSULTA);
       const { results } = await this.db
         .prepare(
-          `SELECT id, nivel, usos, acertos, erros, fixada, suspeita
+          `SELECT id, nivel, valor, usos, acertos, erros, fixada, suspeita
              FROM regras WHERE tenant_id = ? AND empresa_id = ?
               AND id IN (${fatia.map(() => '?').join(',')})`,
         )
@@ -1068,6 +1070,7 @@ export class Repo {
         mapa.set(r.id, {
           id: r.id,
           nivel: r.nivel,
+          valor: String(r.valor ?? ''),
           usos: r.usos ?? 0,
           acertos: r.acertos ?? 0,
           erros: r.erros ?? 0,
@@ -1380,7 +1383,15 @@ export class Repo {
                 (SELECT COUNT(*) FROM itens i WHERE i.nota_id = n.id) AS total_itens,
                 (SELECT COUNT(*) FROM itens i WHERE i.nota_id = n.id AND i.revisado = 1) AS itens_revisados,
                 (SELECT COUNT(*) FROM itens i WHERE i.nota_id = n.id
-                    AND (i.cfop_novo IS NULL OR TRIM(i.cfop_novo) = '')) AS itens_sem_cfop
+                    AND (i.cfop_novo IS NULL OR TRIM(i.cfop_novo) = '')) AS itens_sem_cfop,
+                -- "Vieram prontas" (15/10, reunião): item não conferido cujo CFOP veio de regra
+                -- do PRÓPRIO produto (níveis 1, 2, 3), do padrão do fornecedor (5) ou fixada,
+                -- ativa, sem suspeita e ainda com o mesmo valor. Regra de outro produto pelo
+                -- NCM (4, 6) não conta: é o caso da Sprite.
+                (SELECT COUNT(*) FROM itens i JOIN regras r ON r.id = substr(i.cfop_origem, 7)
+                  WHERE i.nota_id = n.id AND i.revisado = 0 AND i.cfop_origem LIKE 'regra:%'
+                    AND r.ativa = 1 AND r.suspeita = 0 AND (r.fixada = 1 OR r.nivel IN (1, 2, 3, 5))
+                    AND r.valor = TRIM(i.cfop_novo)) AS itens_prontos
          FROM notas n WHERE n.tenant_id = ? AND n.empresa_id = ? ${filtro}
          ORDER BY n.dh_emi DESC LIMIT 500`,
       )
@@ -1976,9 +1987,16 @@ export class Repo {
     return results;
   }
 
-  async relatorioProdutos(empresaId: string, competencia?: string, periodo?: Periodo): Promise<any[]> {
+  /**
+   * `cfop` (15/10, pedido da Taís na reunião): "o que eu botei 1101 me apareça só os
+   * produtos do 1101" - para bater o olho e achar o pão de queijo no uso e consumo.
+   * '(sem CFOP)' = itens ainda sem CFOP de entrada.
+   */
+  async relatorioProdutos(empresaId: string, competencia?: string, periodo?: Periodo, cfop?: string): Promise<any[]> {
     this.exigirEmpresa(empresaId);
     const r = this.recorteCompetencia(competencia, periodo);
+    if (cfop === '(sem CFOP)') r.sql += " AND TRIM(COALESCE(i.cfop_novo, '')) = ''";
+    else if (cfop) { r.sql += " AND TRIM(COALESCE(i.cfop_novo, '')) = ?"; r.binds.push(cfop); }
     const { results } = await this.db
       .prepare(
         `SELECT MIN(COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original)) AS descricao,
@@ -1998,6 +2016,73 @@ export class Repo {
       .bind(this.tenant, empresaId, ...r.binds)
       .all<any>();
     return results;
+  }
+
+  /** Os CFOPs de entrada do período, com quantos itens - as opções do filtro de CFOP (15/10). */
+  async cfopsDoPeriodo(empresaId: string, competencia?: string, periodo?: Periodo): Promise<{ cfop: string; itens: number }[]> {
+    this.exigirEmpresa(empresaId);
+    const r = this.recorteCompetencia(competencia, periodo);
+    const { results } = await this.db
+      .prepare(
+        `SELECT TRIM(COALESCE(i.cfop_novo, '')) AS cfop, COUNT(*) AS itens
+           FROM itens i JOIN notas n ON n.id = i.nota_id
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0 ${r.sql}
+          GROUP BY 1 ORDER BY 1`,
+      )
+      .bind(this.tenant, empresaId, ...r.binds)
+      .all<any>();
+    return results.map((x: any) => ({ cfop: x.cfop || '(sem CFOP)', itens: Number(x.itens) }));
+  }
+
+  /**
+   * Divergências (15/10, auditoria pedida na reunião): o MESMO produto, do MESMO
+   * fornecedor, na MESMA operação (CFOP de saída), decidido com CFOPs de entrada
+   * diferentes. É onde mora o erro do tipo Sprite: um mês 1102, outro 1403. Olha o
+   * histórico inteiro da empresa, mas só traz o produto que aparece na competência
+   * escolhida (é o mês que ela está fechando). Decidido = conferido ou digitado.
+   */
+  async divergencias(empresaId: string, competencia?: string): Promise<any[]> {
+    this.exigirEmpresa(empresaId);
+    const r = this.recorteCompetencia(competencia);
+    const chave = "n.emit_cnpj || '|' || UPPER(TRIM(COALESCE(i.c_prod, ''))) || '|' || TRIM(COALESCE(i.cfop_original, ''))";
+    const { results } = await this.db
+      .prepare(
+        `WITH decididos AS (
+           SELECT ${chave} AS k, i.id AS item_id, i.n_item, i.c_prod, i.cfop_original, TRIM(i.cfop_novo) AS cfop,
+                  COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original) AS descricao, i.cfop_origem,
+                  i.revisado_em, u.nome AS revisado_por_nome, n.id AS nota_id, n.numero, n.dh_emi, n.emit_nome, n.competencia
+             FROM itens i JOIN notas n ON n.id = i.nota_id LEFT JOIN usuarios u ON u.id = i.revisado_por
+            WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0
+              AND (i.revisado = 1 OR COALESCE(i.cfop_origem, '') LIKE 'manual%')
+              AND TRIM(COALESCE(i.cfop_novo, '')) <> ''
+         ),
+         divergentes AS (
+           SELECT k FROM decididos GROUP BY k HAVING COUNT(DISTINCT cfop) > 1
+         )
+         SELECT d.* FROM decididos d
+          WHERE d.k IN (SELECT k FROM divergentes)
+            AND d.k IN (SELECT ${chave} FROM itens i JOIN notas n ON n.id = i.nota_id
+                         WHERE n.tenant_id = ? AND n.empresa_id = ? ${r.sql})
+          ORDER BY d.k, COALESCE(d.revisado_em, '') DESC
+          LIMIT 1000`,
+      )
+      .bind(this.tenant, empresaId, this.tenant, empresaId, ...r.binds)
+      .all<any>();
+    const grupos = new Map<string, any>();
+    for (const x of results as any[]) {
+      let g = grupos.get(x.k);
+      if (!g) {
+        g = { fornecedor: x.emit_nome, codigo: x.c_prod, saida: x.cfop_original, descricao: x.descricao, cfops: {} as Record<string, number>, itens: [] as any[] };
+        grupos.set(x.k, g);
+      }
+      g.cfops[x.cfop] = (g.cfops[x.cfop] ?? 0) + 1;
+      g.itens.push({
+        itemId: x.item_id, notaId: x.nota_id, numero: x.numero, emissao: x.dh_emi, competencia: x.competencia,
+        cfop: x.cfop, como: String(x.cfop_origem ?? '').startsWith('manual') ? 'digitou' : 'conferiu',
+        quem: x.revisado_por_nome ?? null, quando: x.revisado_em ?? null, descricao: x.descricao,
+      });
+    }
+    return [...grupos.values()];
   }
 
   /**
