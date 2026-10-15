@@ -160,6 +160,9 @@ export function chavesParaBuscar(item: ItemNFe, emitCnpj: string): { nivel: Nive
  * um item que veio em 5102.
  */
 export function regrasDoItem(item: ItemNFe, emitCnpj: string, candidatas: Regra[]): Regra[] {
+  // O nome nunca vem de outro produto (15/10): regra de descrição por NCM ou do
+  // fornecedor inteiro, gravada antes da correção, não responde por item nenhum.
+  candidatas = candidatas.filter((r) => nivelValeParaCampo(r.campo, r.nivel));
   const cache = new Map<string, Set<string>>();
   const chavesDe = (campo: Campo) => {
     const k = campo === 'cfop' ? 'cfop' : 'outros';
@@ -178,12 +181,30 @@ export function regrasDoItem(item: ItemNFe, emitCnpj: string, candidatas: Regra[
  * Exclui o nivel 5 - ver o comentario em NIVEIS.
  */
 export function chavesAprendiveis(item: ItemNFe, emitCnpj: string, campo?: Campo) {
-  return chavesDoItem(item, emitCnpj, campo).filter(({ nivel }) => NIVEIS[nivel - 1]?.implicito);
+  return chavesDoItem(item, emitCnpj, campo)
+    .filter(({ nivel }) => NIVEIS[nivel - 1]?.implicito && nivelValeParaCampo(campo, nivel));
 }
 
 /** Niveis que podem ser gravados quando alguem pede explicitamente. */
 export function chavesAprendiveisExplicitas(item: ItemNFe, emitCnpj: string, campo?: Campo) {
-  return chavesDoItem(item, emitCnpj, campo).filter(({ nivel }) => NIVEIS[nivel - 1]?.aprende);
+  return chavesDoItem(item, emitCnpj, campo)
+    .filter(({ nivel }) => NIVEIS[nivel - 1]?.aprende && nivelValeParaCampo(campo, nivel));
+}
+
+/**
+ * O NOME do produto só se aprende e só se sugere pelo próprio produto: código do
+ * fornecedor (1), código de barras no fornecedor (2) ou o mesmo código de barras em
+ * outro fornecedor (3). Nunca pelo NCM (4 e 6) nem pelo fornecedor inteiro (5).
+ *
+ * Caso real, L'Italiana Garden Cucina, 15/10: a Taís deu o nome "FANTA LAR LATA" à
+ * Fanta em 28/09 e, pelo NCM 22021000, a Coca Zero, as Sprites e até o Guaraná de
+ * outro fornecedor passaram a chegar com o nome da Fanta - no relatório por produto
+ * e no XML corrigido. NCM é classificação tributária: serve de palpite para o CFOP
+ * (com o selo "de outro produto"), não para dizer que produto é.
+ */
+export const NIVEIS_DO_NOME: readonly Nivel[] = [1, 2, 3];
+export function nivelValeParaCampo(campo: Campo | undefined, nivel: number): boolean {
+  return campo !== 'descricao' || (NIVEIS_DO_NOME as readonly number[]).includes(nivel);
 }
 
 // ------------------------------------------------------------------ confianca

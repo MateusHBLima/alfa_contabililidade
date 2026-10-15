@@ -4,7 +4,7 @@ import type { Sessao } from '../auth/permissoes';
 import { podeVerEmpresa } from '../auth/permissoes';
 import type { Campo } from '../rules/campos';
 import type { Nivel, Regra } from '../rules/engine';
-import { aplicarAcerto, aplicarErro, aprender, recalcularConfianca, partesDaChave, chaveDoNivel } from '../rules/engine';
+import { aplicarAcerto, aplicarErro, aprender, recalcularConfianca, partesDaChave, chaveDoNivel, chavesDoItem, regrasDoItem, sugerir } from '../rules/engine';
 
 /**
  * Repositorio.
@@ -2083,6 +2083,94 @@ export class Repo {
       });
     }
     return [...grupos.values()];
+  }
+
+  /**
+   * Itens cujo NOME veio de outro produto (15/10): descrição dada por regra de NCM
+   * (níveis 4 e 6) ou do fornecedor inteiro (5), que o motor gravava até esta data.
+   * A origem gravada no item diz qual regra deu o nome; o que alguém digitou tem
+   * origem "manual" e nunca entra aqui. Para cada um, o nome certo: o que ensinaram
+   * para o PRÓPRIO produto (níveis 1, 2 e 3) ou, sem isso, o do fornecedor - o mesmo
+   * que a importação daria hoje.
+   */
+  async nomesDeOutroProduto(empresaId: string): Promise<any[]> {
+    this.exigirEmpresa(empresaId);
+    const { results } = await this.db
+      .prepare(
+        `SELECT i.id AS item_id, i.n_item, i.c_prod, i.c_ean, i.ncm, i.cfop_original, i.cfop_origem,
+                i.x_prod_original, i.x_prod_novo, i.x_prod_origem, i.revisado,
+                n.id AS nota_id, n.numero, n.competencia, n.dh_emi, n.emit_cnpj, n.emit_nome,
+                r.nivel AS regra_nivel
+           FROM notas n CROSS JOIN itens i JOIN regras r ON r.id = SUBSTR(i.x_prod_origem, 7)
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND i.nota_id = n.id
+            AND i.x_prod_origem LIKE 'regra:%'
+            AND r.tenant_id = n.tenant_id AND r.empresa_id = n.empresa_id
+            AND r.campo = 'descricao' AND r.nivel NOT IN (1, 2, 3)
+          ORDER BY n.dh_emi, n.numero, i.n_item`,
+      )
+      .bind(this.tenant, empresaId)
+      .all<any>();
+    if (results.length === 0) return [];
+
+    const comoItem = (i: any) => ({
+      nItem: i.n_item, cProd: i.c_prod, cEAN: i.c_ean, xProd: i.x_prod_original, NCM: i.ncm,
+      CEST: null, CFOP: i.cfop_original, uCom: null, qCom: null, vUnCom: null, vProd: null,
+      cstIcms: null, temIbsCbs: false,
+    }) as any;
+    const candidatas = await this.carregarRegrasCandidatas(
+      empresaId, results.flatMap((i: any) => chavesDoItem(comoItem(i), i.emit_cnpj)),
+    );
+    const semContexto = { perfil: 'revenda' as const, ufEmitente: null, ufDestinatario: null };
+    return results.map((i: any) => {
+      const s = sugerir('descricao', comoItem(i), regrasDoItem(comoItem(i), i.emit_cnpj, candidatas), semContexto);
+      return {
+        itemId: i.item_id, notaId: i.nota_id, numero: i.numero, competencia: i.competencia, emissao: i.dh_emi,
+        fornecedor: i.emit_nome, nItem: i.n_item, codigo: i.c_prod, ncm: i.ncm,
+        doFornecedor: i.x_prod_original, nomeAtual: i.x_prod_novo, nomeCerto: s.valor,
+        comoFica: s.regraId ? 'nome ensinado para o próprio produto' : 'nome do fornecedor',
+        origemAtual: i.x_prod_origem, origemCerta: s.origem, cfopOrigem: i.cfop_origem,
+        conferido: Number(i.revisado) === 1, trocaNome: String(s.valor ?? '').trim() !== String(i.x_prod_novo ?? '').trim(),
+      };
+    });
+  }
+
+  /**
+   * Corrige os itens de nomesDeOutroProduto: nome certo no item, cada troca na trilha
+   * (origem "correcao:nome-de-outro-produto", com o nome de antes). Conferido continua
+   * conferido; o CFOP não muda. Não ensina nada. Rodar de novo não acha mais nada.
+   */
+  async corrigirNomesDeOutroProduto(empresaId: string): Promise<{ itens: number; nomesTrocados: number }> {
+    const lista = await this.nomesDeOutroProduto(empresaId);
+    const comandos: D1PreparedStatement[] = [];
+    for (const x of lista) {
+      const sets = ['x_prod_novo = ?', 'x_prod_origem = ?'];
+      const binds: unknown[] = [x.nomeCerto, x.origemCerta];
+      // Linha não conferida com CFOP de palpite: a cor acompanha o que sobrou (como na importação).
+      const cfopDoSistema = !String(x.cfopOrigem ?? '').startsWith('regra:') && !String(x.cfopOrigem ?? '').startsWith('manual');
+      if (!x.conferido && cfopDoSistema) {
+        sets.push('confianca = ?');
+        binds.push(String(x.origemCerta).startsWith('regra:') ? 'media' : 'nenhuma');
+      }
+      // Se alguém mexeu no nome entre a leitura e agora, não sobrescreve.
+      comandos.push(
+        this.db
+          .prepare(`UPDATE itens SET ${sets.join(', ')} WHERE tenant_id = ? AND id = ? AND x_prod_origem = ?`)
+          .bind(...binds, this.tenant, x.itemId, x.origemAtual),
+      );
+    }
+    const feitos: any[] = [];
+    for (let k = 0; k < comandos.length; k += 100) {
+      const r = await this.db.batch(comandos.slice(k, k + 100));
+      r.forEach((res: any, j: number) => { if (Number(res?.meta?.changes ?? 0) > 0) feitos.push(lista[k + j]); });
+    }
+    const eventos = feitos.filter((x) => x.trocaNome).map((x) =>
+      this.evento({
+        acao: 'alterar', entidade: 'item_nota', entidadeId: x.itemId, campo: 'descricao',
+        valorAntes: x.nomeAtual ?? null, valorDepois: x.nomeCerto, origem: 'correcao:nome-de-outro-produto',
+      }),
+    );
+    for (let k = 0; k < eventos.length; k += 100) await this.aud.registrarLote(eventos.slice(k, k + 100));
+    return { itens: feitos.length, nomesTrocados: eventos.length };
   }
 
   /**

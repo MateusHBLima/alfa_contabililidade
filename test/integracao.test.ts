@@ -3798,6 +3798,81 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     expect((await lista()).find((n: any) => n.chave.endsWith('44'))).toMatchObject({ total_itens: 3, itens_prontos: 3 });
   });
 
+  it('15/10 (Fanta): o nome dado a um produto não passa para outro com o mesmo NCM, nem para o fornecedor inteiro', async () => {
+    /* Cucina, 28/09: a Taís deu à Fanta o nome "FANTA LAR LATA"; Coca Zero, Sprites e o
+       Guaraná de outro fornecedor (mesmo NCM 22021000) passaram a vir com esse nome. */
+    const mesmoNcm = (sufixo: string) => comCfop(sufixo, '5102').replace('<NCM>34022000</NCM>', '<NCM>22021000</NCM>');
+    const nomear = (itemId: string, nome: string, escopo?: string) => req(`/api/itens/${itemId}`, {
+      method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'descricao', valor: nome }], ...(escopo ? { escopo } : {}) }),
+    });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: mesmoNcm('11') }]);
+    expect((await nomear(itensDa('11')[1].id, 'FANTA LAR LATA')).status).toBe(200);
+    // "Aplicar a todo o fornecedor" um nome também não vira regra do fornecedor.
+    expect((await nomear(itensDa('11')[0].id, 'CHOCOLATE AO LEITE 200G', 'fornecedor')).status).toBe(200);
+    // Próxima nota: o próprio produto vem com o nome dela; o outro do mesmo NCM, com o do fornecedor.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: mesmoNcm('33') }]);
+    const [b1, b2, b3] = itensDa('33');
+    expect(b2.x_prod_novo).toBe('FANTA LAR LATA');
+    expect(b3.x_prod_novo).toBe('DET LIQ NEUTRO 500ML');
+    expect(b1.x_prod_novo).toBe('CHOC AO LEITE PT 200G');
+    // Outro fornecedor, mesmo NCM: o nome do fornecedor dele.
+    const outroFornecedor = mesmoNcm('44').replaceAll('83646984003044', '12345678000195').replace('<cProd>7892</cProd>', '<cProd>1003</cProd>');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'c.xml', conteudo: outroFornecedor }]);
+    expect(itensDa('44')[1].x_prod_novo).toBe('REFRIG COLA 2L');
+    // Nenhuma regra de nome fora do próprio produto.
+    expect(db.consultar(`SELECT nivel FROM regras WHERE campo = 'descricao' AND nivel NOT IN (1, 2, 3)`)).toEqual([]);
+  });
+
+  it('15/10 (Fanta): os nomes que vieram de outro produto voltam ao certo, com a trilha, e o conferido continua conferido', async () => {
+    const mesmoNcm = (sufixo: string) => comCfop(sufixo, '5102').replace('<NCM>34022000</NCM>', '<NCM>22021000</NCM>');
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'a.xml', conteudo: mesmoNcm('11') }, { nome: 'b.xml', conteudo: mesmoNcm('33') }, { nome: 'c.xml', conteudo: mesmoNcm('44') },
+    ]);
+    // Ela ensinou o nome do próprio refrigerante (regra do produto, nível 1).
+    await req(`/api/itens/${itensDa('11')[1].id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'descricao', valor: 'REFRIGERANTE COLA 2L' }] }) });
+    // Como estava em produção: regras de nome pelo NCM, gravadas pelo motor antigo e desligadas pela 0030.
+    const legado = (id: string, nivel: number, chave: string) => db.consultar(
+      `INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, usos, acertos, erros, erros_seguidos, confianca, ativa, suspeita, criada_em)
+       VALUES (?, 'alfa', ?, ?, ?, 'descricao', 'FANTA LAR LATA', 1, 0, 0, 0, 0.5, 0, 0, '2026-09-28T14:59:13.000Z')`, id, empresaId, nivel, chave);
+    legado('r-ncm4', 4, '83646984003044|22021000');
+    legado('r-ncm6', 6, '22021000');
+    const [, b2, b3] = itensDa('33');
+    const [, , c3] = itensDa('44');
+    // b2: o próprio refrigerante, não conferido, com o nome vindo do NCM.
+    db.consultar(`UPDATE itens SET x_prod_novo = 'FANTA LAR LATA', x_prod_origem = 'regra:r-ncm6', confianca = 'media' WHERE id = ?`, b2.id);
+    // b3: o detergente, já conferido (01/10) com o nome da Fanta.
+    db.consultar(`UPDATE itens SET x_prod_novo = 'FANTA LAR LATA', x_prod_origem = 'regra:r-ncm4', revisado = 1, revisado_por = 'u1', revisado_em = '2026-10-01T17:14:06.000Z' WHERE id = ?`, b3.id);
+    // c3: alguém DIGITOU esse nome: não entra na correção.
+    db.consultar(`UPDATE itens SET x_prod_novo = 'FANTA LAR LATA', x_prod_origem = 'manual' WHERE id = ?`, c3.id);
+    const cfopsAntes = db.consultar(`SELECT id, cfop_novo, cfop_origem FROM itens ORDER BY id`);
+
+    const base = `/api/empresas/${empresaId}/nomes-de-outro-produto`;
+    const previa = await (await req(base)).json() as any;
+    expect(previa.trocamNome).toBe(2);
+    const porItem = Object.fromEntries(previa.itens.map((x: any) => [x.itemId, x]));
+    expect(porItem[b2.id]).toMatchObject({ nomeAtual: 'FANTA LAR LATA', nomeCerto: 'REFRIGERANTE COLA 2L', comoFica: 'nome ensinado para o próprio produto', conferido: false });
+    expect(porItem[b3.id]).toMatchObject({ nomeAtual: 'FANTA LAR LATA', nomeCerto: 'DET LIQ NEUTRO 500ML', comoFica: 'nome do fornecedor', conferido: true });
+    expect(porItem[c3.id]).toBeUndefined();
+    // A prévia não muda nada.
+    expect(db.consultar(`SELECT x_prod_novo FROM itens WHERE id = ?`, b3.id)).toEqual([{ x_prod_novo: 'FANTA LAR LATA' }]);
+
+    const r = await (await req(`${base}/corrigir`, { method: 'POST', body: '{}' })).json() as any;
+    expect(r).toMatchObject({ ok: true, itens: 2, nomesTrocados: 2 });
+    const item = (id: string) => db.consultar(`SELECT x_prod_novo, x_prod_origem, revisado, revisado_em FROM itens WHERE id = ?`, id)[0] as any;
+    expect(item(b2.id)).toMatchObject({ x_prod_novo: 'REFRIGERANTE COLA 2L', revisado: 0 });
+    expect(item(b2.id).x_prod_origem).toMatch(/^regra:/);
+    expect(item(b3.id)).toMatchObject({ x_prod_novo: 'DET LIQ NEUTRO 500ML', x_prod_origem: 'importacao', revisado: 1, revisado_em: '2026-10-01T17:14:06.000Z' });
+    expect(item(c3.id)).toMatchObject({ x_prod_novo: 'FANTA LAR LATA', x_prod_origem: 'manual' });
+    expect(db.consultar(`SELECT id, cfop_novo, cfop_origem FROM itens ORDER BY id`)).toEqual(cfopsAntes);
+    // Cada troca na trilha, com o nome de antes; a cadeia continua inteira.
+    const t = await (await req(`/api/itens/${b3.id}/trilha`)).json() as any[];
+    expect(t.find((e: any) => e.origem === 'correcao:nome-de-outro-produto')).toMatchObject({ campo: 'descricao', valor_antes: 'FANTA LAR LATA', valor_depois: 'DET LIQ NEUTRO 500ML' });
+    expect((await new Auditoria(db as any, SEED).verificarCadeia('alfa')).ok).toBe(true);
+    // As regras dela continuam no banco (desligadas), e rodar de novo não acha mais nada.
+    expect(db.consultar(`SELECT id, ativa FROM regras WHERE id IN ('r-ncm4', 'r-ncm6') ORDER BY id`)).toEqual([{ id: 'r-ncm4', ativa: 0 }, { id: 'r-ncm6', ativa: 0 }]);
+    expect((await (await req(base)).json() as any).itens).toEqual([]);
+  });
+
   it('13/10: a mesma regra criada por duas gravações simultâneas não estoura a unicidade, e a fixada continua mandando', async () => {
     const criar = (valor: string, fixada = false) => [{ tipo: 'criar' as const, nivel: 4 as const, chave: '83646984003044|04039000#5102', campo: 'cfop' as const, valor, fixada }];
     // As duas leem "não existe" antes de qualquer uma gravar - é a corrida do D1.
@@ -3922,6 +3997,23 @@ describe('migração 0028: regras de ICMS por regime — o Presumido volta ao qu
     const n = (grupo: string) => (db.consultar(`SELECT COUNT(*) AS n FROM regras_icms WHERE grupo = ?`, grupo)[0] as any).n;
     expect([n('presumido'), n('simples'), n('simples_fora')]).toEqual([31, 31, 31]);
     expect(JSON.stringify(db.consultar('SELECT * FROM auditoria ORDER BY id'))).toBe(trilhaAntes);
+  });
+});
+
+describe('migração 0030: regras de nome que não são do próprio produto ficam desligadas, não apagadas', () => {
+  const SQL_0030 = readFileSync(new URL('../migrations/0030_nome_so_do_proprio_produto.sql', import.meta.url), 'utf8');
+  it('desliga descrição dos níveis 4, 5 e 6; o resto continua como estava', () => {
+    db.consultar(`INSERT INTO empresas (id, tenant_id, cnpj, razao_social, criado_em) VALUES ('e1', 'alfa', '11222333000181', 'CUCINA TESTE', '2026-09-01')`);
+    const regra = (id: string, nivel: number, campo: string) => db.consultar(
+      `INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, usos, acertos, erros, erros_seguidos, confianca, ativa, suspeita, criada_em)
+       VALUES (?, 'alfa', 'e1', ?, ?, ?, 'X', 1, 0, 0, 0, 0.5, 1, 0, '2026-09-28')`, id, nivel, `k${id}`, campo);
+    regra('d1', 1, 'descricao'); regra('d3', 3, 'descricao'); regra('d4', 4, 'descricao'); regra('d5', 5, 'descricao'); regra('d6', 6, 'descricao');
+    regra('c4', 4, 'cfop'); regra('c6', 6, 'cfop');
+    (db as any).db.exec(SQL_0030);
+    expect(db.consultar(`SELECT id, ativa FROM regras ORDER BY id`)).toEqual([
+      { id: 'c4', ativa: 1 }, { id: 'c6', ativa: 1 },
+      { id: 'd1', ativa: 1 }, { id: 'd3', ativa: 1 }, { id: 'd4', ativa: 0 }, { id: 'd5', ativa: 0 }, { id: 'd6', ativa: 0 },
+    ]);
   });
 });
 

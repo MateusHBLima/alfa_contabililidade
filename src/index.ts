@@ -1939,6 +1939,23 @@ app.get('/api/empresas/:id/auditoria/divergencias', async (c) => {
   return c.json({ competencia: competencia ?? null, grupos: await c.get('repo').divergencias(c.req.param('id'), competencia) });
 });
 
+/**
+ * Nome que veio de OUTRO produto pelo NCM (15/10, Fanta/Sprite/Coca Zero da Cucina).
+ * GET mostra, item por item, o nome de agora e o nome certo; POST corrige todos, com
+ * cada troca na trilha. Só o nome muda: conferido continua conferido, CFOP fica.
+ */
+app.get('/api/empresas/:id/nomes-de-outro-produto', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const itens = await c.get('repo').nomesDeOutroProduto(c.req.param('id'));
+  return c.json({ itens, trocamNome: itens.filter((x: any) => x.trocaNome).length });
+});
+
+app.post('/api/empresas/:id/nomes-de-outro-produto/corrigir', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  exigir(c.get('sessao'), 'notas.editar_descricao');
+  return c.json({ ok: true, ...(await c.get('repo').corrigirNomesDeOutroProduto(c.req.param('id'))) });
+});
+
 /** Regras de ICMS por CFOP (28/09, planilha da Taís): uma por grupo de regime desde 13/10 (grupoIcms). */
 app.get('/api/regras-icms', async (c) => {
   exigir(c.get('sessao'), 'notas.visualizar');

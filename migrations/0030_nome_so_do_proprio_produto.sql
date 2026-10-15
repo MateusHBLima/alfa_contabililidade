@@ -1,0 +1,13 @@
+-- O nome do produto não vem mais de outro produto (15/10).
+--
+-- A descrição aprendia nos mesmos níveis do CFOP, inclusive pelo NCM (4: mesmo
+-- fornecedor e NCM; 6: NCM de qualquer fornecedor). Na L'Italiana Garden Cucina, o
+-- nome que a Taís deu à Fanta em 28/09 passou para a Coca Zero, as Sprites e o
+-- Guaraná (NCM 22021000). O motor agora só aprende e só usa nome pelo próprio
+-- produto (níveis 1, 2 e 3: ver nivelValeParaCampo em src/rules/engine.ts).
+--
+-- Aqui as regras de descrição dos outros níveis são DESLIGADAS, não apagadas: o
+-- que ela ensinou continua no banco e na trilha. Os itens que receberam esses nomes
+-- são corrigidos pela rota /api/empresas/:id/nomes-de-outro-produto, que grava cada
+-- troca na trilha (a trilha é encadeada por hash e não pode ser escrita daqui).
+UPDATE regras SET ativa = 0 WHERE campo = 'descricao' AND nivel NOT IN (1, 2, 3) AND ativa = 1;
