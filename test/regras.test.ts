@@ -271,3 +271,22 @@ describe('13/10: partesDaChave — o caminho inverso da chave da regra', () => {
     expect(partesDaChave(1, '11222333000181|X')).toEqual({ cnpj: '11222333000181', cprod: 'X' }); // formato antigo, sem saída
   });
 });
+
+describe('15/10: o nome do produto só vem do próprio produto', () => {
+  it('descrição aprende só nos níveis 1, 2 e 3 (nunca NCM nem fornecedor inteiro); o CFOP continua aprendendo no NCM', async () => {
+    const { regrasDoItem } = await import('../src/rules/engine');
+    const niveis = (campo: 'descricao' | 'cfop', apenasNiveis?: any) =>
+      aprender({ item: item1, emitCnpj: CNPJ, campo, valorFinal: 'X', sugestao: null, apenasNiveis })
+        .filter((a: any) => a.tipo === 'criar').map((a: any) => a.nivel);
+    expect(niveis('descricao')).toEqual([1, 2, 3]);
+    expect(niveis('descricao', [5])).toEqual([]);
+    expect(niveis('cfop')).toEqual([1, 2, 3, 4, 6]);
+    // Regra de nome gravada antes (nível 4 ou 6) não responde por outro produto do mesmo NCM.
+    const antigas = [
+      regra({ id: 'n4', nivel: 4, chave: chaveDoNivel(item2, CNPJ, 4)!, campo: 'descricao', valor: 'FANTA' }),
+      regra({ id: 'n6', nivel: 6, chave: chaveDoNivel(item2, CNPJ, 6)!, campo: 'descricao', valor: 'FANTA' }),
+    ];
+    expect(regrasDoItem(item2, CNPJ, antigas)).toEqual([]);
+    expect(sugerirDescricao(item2, regrasDoItem(item2, CNPJ, antigas)).valor).toBe(item2.xProd);
+  });
+});

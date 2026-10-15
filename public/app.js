@@ -2220,7 +2220,8 @@ async function verTrilha(itemId) {
                 e.valor_antes ? `<s>${esc(e.valor_antes)}</s> → ` : ''
               }<b>${esc(e.valor_depois ?? '—')}</b></span>`}
           <span class="trilha-quem">${esc(e.usuario_email ?? '—')}${
-            e.origem && e.origem !== 'manual' ? ` · ${esc(e.origem)}` : ''}</span>
+            e.origem && e.origem !== 'manual' ? ` · ${esc(e.origem === 'correcao:nome-de-outro-produto'
+              ? 'correção: o nome tinha vindo de outro produto (15/10)' : e.origem)}` : ''}</span>
         </li>`).join('')}</ul>`;
 
   const ok = await confirmar({
