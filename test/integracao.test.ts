@@ -3873,6 +3873,42 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     expect((await (await req(base)).json() as any).itens).toEqual([]);
   });
 
+  it('15/10 (verificação): todo nome tratado ou foi digitado ou veio de regra do próprio produto; o resto aparece como erro', async () => {
+    const mesmoNcm = (sufixo: string) => comCfop(sufixo, '5102').replace('<NCM>34022000</NCM>', '<NCM>22021000</NCM>');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: mesmoNcm('11') }]);
+    const nomear = (id: string, nome: string) =>
+      req(`/api/itens/${id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'descricao', valor: nome }] }) });
+    const [a1, a2, a3] = itensDa('11');
+    await nomear(a1.id, 'CHOCOLATE AO LEITE 200G'); // digitado, parecido com o do fornecedor
+    await nomear(a2.id, 'REFRIGERANTE COLA 2L');    // digitado; vira regra do próprio produto
+    await nomear(a3.id, '1');                       // digitado, nada a ver com o do fornecedor
+    // Na nota b, o refrigerante vem com o nome ensinado (regra do próprio produto).
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: mesmoNcm('33') }]);
+    const [b1, b2, b3] = itensDa('33');
+    expect(b2.x_prod_novo).toBe('REFRIGERANTE COLA 2L');
+    // Erros fabricados: regra que não existe, regra de CFOP, regra de nome de OUTRO produto.
+    const regraCfop = (db.consultar(`SELECT id FROM regras WHERE campo = 'cfop' LIMIT 1`)[0] as any)?.id
+      ?? (await corrigir(a1.id, '1101'), (db.consultar(`SELECT id FROM regras WHERE campo = 'cfop' LIMIT 1`)[0] as any).id);
+    const regraDoA2 = (db.consultar(`SELECT id FROM regras WHERE campo = 'descricao' AND nivel = 1 AND valor = 'REFRIGERANTE COLA 2L'`)[0] as any).id;
+    db.consultar(`UPDATE itens SET x_prod_novo = 'QUALQUER', x_prod_origem = 'regra:nao-existe' WHERE id = ?`, b1.id);
+    db.consultar(`UPDATE itens SET x_prod_novo = 'QUALQUER', x_prod_origem = ? WHERE id = ?`, `regra:${regraCfop}`, b3.id);
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'c.xml', conteudo: mesmoNcm('44') }]);
+    const [c1] = itensDa('44');
+    db.consultar(`UPDATE itens SET x_prod_novo = 'REFRIGERANTE COLA 2L', x_prod_origem = ? WHERE id = ?`, `regra:${regraDoA2}`, c1.id);
+
+    const v = await (await req(`/api/empresas/${empresaId}/nomes/verificacao`)).json() as any;
+    expect(v.digitados).toBe(3);
+    expect(v.doProprioProduto).toBe(3); // b2, e c2 e c3 (nota c, com os nomes que ela ensinou)
+    const motivos = Object.fromEntries(v.erros.map((e: any) => [e.itemId, e.motivo]));
+    expect(motivos[b1.id]).toBe('a regra que deu o nome não existe mais');
+    expect(motivos[b3.id]).toMatch(/regra de cfop/);
+    expect(motivos[c1.id]).toBe('a regra que deu o nome é de outro código ou fornecedor');
+    expect(v.erros).toHaveLength(3);
+    // O "1" que ela digitou e a linha que herdou esse nome do próprio produto.
+    expect(v.paraConferir.map((x: any) => x.itemId).sort()).toEqual([a3.id, itensDa('44')[2].id].sort());
+    expect(v.comNomeTratado).toBe(9);
+  });
+
   it('13/10: a mesma regra criada por duas gravações simultâneas não estoura a unicidade, e a fixada continua mandando', async () => {
     const criar = (valor: string, fixada = false) => [{ tipo: 'criar' as const, nivel: 4 as const, chave: '83646984003044|04039000#5102', campo: 'cfop' as const, valor, fixada }];
     // As duas leem "não existe" antes de qualquer uma gravar - é a corrida do D1.

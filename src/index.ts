@@ -1956,6 +1956,12 @@ app.post('/api/empresas/:id/nomes-de-outro-produto/corrigir', async (c) => {
   return c.json({ ok: true, ...(await c.get('repo').corrigirNomesDeOutroProduto(c.req.param('id'))) });
 });
 
+/** Verificação completa dos nomes da empresa (15/10): só leitura. Ver Repo.verificarNomes. */
+app.get('/api/empresas/:id/nomes/verificacao', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  return c.json(await c.get('repo').verificarNomes(c.req.param('id')));
+});
+
 /** Regras de ICMS por CFOP (28/09, planilha da Taís): uma por grupo de regime desde 13/10 (grupoIcms). */
 app.get('/api/regras-icms', async (c) => {
   exigir(c.get('sessao'), 'notas.visualizar');

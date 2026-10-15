@@ -2174,6 +2174,82 @@ export class Repo {
   }
 
   /**
+   * Verificação completa dos nomes (15/10, "isso não pode acontecer"): TODO item da
+   * empresa cujo nome tratado é diferente do nome do fornecedor tem de ter vindo de
+   * uma de duas fontes:
+   *   - alguém digitou (origem "manual"), ou
+   *   - uma regra de nome do PRÓPRIO produto (níveis 1, 2 e 3) cuja chave bate com o
+   *     código, o código de barras e o fornecedor do item.
+   * Qualquer outra coisa é erro e volta com o motivo. Só leitura.
+   *
+   * Dos digitados e dos que vieram de regra do próprio produto, separa para a
+   * contadora olhar os que não têm nenhuma palavra em comum com o nome do fornecedor
+   * (ex.: "1", ou o nome de outro produto colado na linha errada). Esses não são
+   * corrigidos sozinhos: foi alguém que digitou.
+   */
+  async verificarNomes(empresaId: string): Promise<{
+    comNomeTratado: number; digitados: number; doProprioProduto: number; erros: any[]; paraConferir: any[];
+  }> {
+    this.exigirEmpresa(empresaId);
+    const { results } = await this.db
+      .prepare(
+        `SELECT i.id AS item_id, i.n_item, i.c_prod, i.c_ean, i.ncm, i.cfop_original,
+                i.x_prod_original, i.x_prod_novo, i.x_prod_origem, i.revisado,
+                n.id AS nota_id, n.numero, n.competencia, n.emit_cnpj, n.emit_nome,
+                r.id AS r_id, r.nivel AS r_nivel, r.chave AS r_chave, r.campo AS r_campo, r.empresa_id AS r_empresa
+           FROM notas n CROSS JOIN itens i
+           LEFT JOIN regras r ON r.id = SUBSTR(i.x_prod_origem, 7) AND i.x_prod_origem LIKE 'regra:%'
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND i.nota_id = n.id
+            AND TRIM(COALESCE(i.x_prod_novo, '')) <> ''
+            AND TRIM(i.x_prod_novo) <> TRIM(COALESCE(i.x_prod_original, ''))
+          ORDER BY n.dh_emi, n.numero, i.n_item`,
+      )
+      .bind(this.tenant, empresaId)
+      .all<any>();
+
+    const palavras = (t: unknown) => new Set(
+      String(t ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase()
+        .split(/[^A-Z0-9]+/).filter((w) => w.length >= 3 && !/^\d+$/.test(w)),
+    );
+    const linha = (i: any, motivo: string) => ({
+      itemId: i.item_id, notaId: i.nota_id, numero: i.numero, competencia: i.competencia, nItem: i.n_item,
+      fornecedor: i.emit_nome, codigo: i.c_prod, doFornecedor: i.x_prod_original, nomeAtual: i.x_prod_novo,
+      origem: i.x_prod_origem, conferido: Number(i.revisado) === 1, motivo,
+    });
+
+    let digitados = 0;
+    let doProprioProduto = 0;
+    const erros: any[] = [];
+    const paraConferir: any[] = [];
+    for (const i of results as any[]) {
+      const origem = String(i.x_prod_origem ?? '');
+      const nadaEmComum = () => {
+        const forn = palavras(i.x_prod_original);
+        const novo = palavras(i.x_prod_novo);
+        return novo.size === 0 || ![...novo].some((w) => forn.has(w));
+      };
+      if (origem.startsWith('manual')) {
+        digitados += 1;
+        if (nadaEmComum()) paraConferir.push(linha(i, 'digitado sem nenhuma palavra em comum com o nome do fornecedor'));
+        continue;
+      }
+      if (!origem.startsWith('regra:')) { erros.push(linha(i, `nome diferente do fornecedor sem regra nem digitação (origem "${origem || 'vazia'}")`)); continue; }
+      if (!i.r_id) { erros.push(linha(i, 'a regra que deu o nome não existe mais')); continue; }
+      if (i.r_campo !== 'descricao') { erros.push(linha(i, `a origem aponta para uma regra de ${i.r_campo}, não de nome`)); continue; }
+      if (i.r_empresa !== empresaId) { erros.push(linha(i, 'a regra que deu o nome é de outra empresa')); continue; }
+      if (![1, 2, 3].includes(Number(i.r_nivel))) { erros.push(linha(i, `nome de outro produto (regra de nível ${i.r_nivel})`)); continue; }
+      const item = { cProd: i.c_prod, cEAN: i.c_ean, NCM: i.ncm, CFOP: i.cfop_original } as any;
+      if (chaveDoNivel(item, String(i.emit_cnpj ?? ''), Number(i.r_nivel) as Nivel) !== i.r_chave) {
+        erros.push(linha(i, 'a regra que deu o nome é de outro código ou fornecedor'));
+        continue;
+      }
+      doProprioProduto += 1;
+      if (nadaEmComum()) paraConferir.push(linha(i, 'nome ensinado para o produto sem nenhuma palavra em comum com o nome do fornecedor'));
+    }
+    return { comNomeTratado: results.length, digitados, doProprioProduto, erros, paraConferir };
+  }
+
+  /**
    * Importacoes da empresa: os lotes de um mesmo envio (envio_id) viram UMA
    * importacao, com os resultados por arquivo somados. Lote sem envio_id (antes
    * da migracao 0011) e uma importacao sozinho.
