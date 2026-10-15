@@ -26,9 +26,9 @@ export async function api(caminho, opcoes = {}) {
   } catch {
     throw new ErroApi('Sem conexão com o servidor. Confira a internet e tente de novo.');
   }
-  // Sem sessão: a entrada continua sendo a da tela de sempre.
+  // Sem sessão: entra pela página de sempre e volta para cá depois (?voltar).
   if (r.status === 401) {
-    location.href = '/';
+    location.href = '/?voltar=' + encodeURIComponent(location.pathname + location.hash);
     throw new ErroApi('sessão expirada');
   }
   const ct = r.headers.get('Content-Type') ?? '';
