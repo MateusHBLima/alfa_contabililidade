@@ -104,7 +104,7 @@ $('#form-login').addEventListener('submit', async (e) => {
   try {
     const r = await api('/api/login', {
       method: 'POST',
-      body: JSON.stringify({ email: $('#login-email').value.trim(), senha: $('#login-senha').value }),
+      body: JSON.stringify({ email: $('#login-email').value.trim(), senha: $('#login-senha').value, lembrar: !!$('#login-lembrar')?.checked }),
     });
 
     // Senha certa, sessão ainda não. Pedimos o segundo fator sem sair da tela.
@@ -304,7 +304,7 @@ $('#btn-mfa').addEventListener('click', async () => {
   try {
     const r = await api('/api/login/mfa', {
       method: 'POST',
-      body: JSON.stringify({ desafio: estado.desafioMfa, codigo: $('#mfa-codigo').value }),
+      body: JSON.stringify({ desafio: estado.desafioMfa, codigo: $('#mfa-codigo').value, lembrar: !!$('#login-lembrar')?.checked }),
     });
     await iniciar();
     if (r && r.deveTrocarSenha) abrirTrocaDeSenha(true);
@@ -769,8 +769,10 @@ document.addEventListener('click', async (ev) => {
   $('#sel-ano').value = '';
   $('#sel-empresa').value = b.dataset.pendencia;
   await trocarEmpresa(b.dataset.pendencia);
-  estado.filtroNotas = 'tratar';
-  $$('#filtros-notas button').forEach((x) => x.classList.toggle('on', x.dataset.fn === 'tratar'));
+  // Se nada precisa dela, abre direto nas que vieram prontas (15/10).
+  const precisam = estado.notas.some((n) => !notaTratada(n) && !notaVeioPronta(n));
+  estado.filtroNotas = precisam || !estado.notas.some(notaVeioPronta) ? 'tratar' : 'prontas';
+  $$('#filtros-notas button').forEach((x) => x.classList.toggle('on', x.dataset.fn === estado.filtroNotas));
   irPara('v1');
   renderNotas();
 });
@@ -1038,6 +1040,90 @@ function faixaEstornos(lista, onde) {
   </div>`;
 }
 
+/* ---- Vieram prontas (15/10, reunião) ----
+   "Que se eu já tratei aquele produto 10 vezes ele não precisa mais me aparecer (...)
+   as que ela já tratou automático ficam lá embaixo, mas que eu consiga abrir e já ver
+   os produtos (...) eu confio, mas desconfiando." Nada é conferido sozinho: ela vê os
+   itens sem abrir a nota e confere por nota ou todas de uma vez. */
+function notaTratada(n) {
+  return !!n.cancelada_em || Number(n.estorno) === 1 || ((n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens);
+}
+function notaVeioPronta(n) {
+  if (notaTratada(n)) return false;
+  const faltam = (n.total_itens ?? 0) - (n.itens_revisados ?? 0);
+  return faltam > 0 && Number(n.itens_prontos ?? 0) >= faltam;
+}
+
+/** Confere uma nota que veio pronta - só se, aberta, todos os que faltam vieram certos. */
+async function conferirNotaPronta(notaId, emLote = false) {
+  const n = await api(`/api/notas/${notaId}`);
+  const faltam = n.itens.filter((i) => !i.revisado);
+  const certos = itensQueVieramCertos(n);
+  if (certos.length < faltam.length) return { ok: false, numero: n.nota.numero };
+  await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: certos.map((i) => i.id) }) });
+  if (!emLote) { avisarSalvo(`Nota ${n.nota.numero} conferida`); await carregarNotas(); }
+  return { ok: true, numero: n.nota.numero, itens: certos.length };
+}
+
+async function verItensDaNota(notaId, botao) {
+  const tr = botao.closest('tr');
+  const aberto = tr.nextElementSibling?.classList.contains('itens-da-nota');
+  if (aberto) { tr.nextElementSibling.remove(); botao.textContent = '▸'; return; }
+  botao.textContent = '▾';
+  const sub = document.createElement('tr');
+  sub.className = 'itens-da-nota';
+  sub.innerHTML = '<td colspan="8" class="vazio">carregando os itens…</td>';
+  tr.after(sub);
+  try {
+    const n = await api(`/api/notas/${notaId}`);
+    sub.innerHTML = `<td colspan="8"><table class="itens-mini"><tbody>${n.itens.map((i) => `
+      <tr class="${i.revisado ? 'mini-conferido' : ''}">
+        <td class="tiny">${i.n_item}</td>
+        <td>${esc(i.x_prod_novo || i.x_prod_original || '')}<span class="porque">cód. ${esc(i.c_prod ?? '')}</span></td>
+        <td class="mono">${esc(i.cfop_original ?? '')} → <b>${esc(i.cfop_novo ?? '—')}</b></td>
+        <td>${selinhoProcedencia(i.procedencia)}${i.revisado ? ' <span class="tag ok">conferido</span>' : ''}</td>
+        <td class="num">${moeda(i.valor_total)}</td>
+      </tr>`).join('')}</tbody></table></td>`;
+  } catch (e) {
+    sub.innerHTML = `<td colspan="8" class="vazio">Não consegui ler os itens: ${esc(e.message)}</td>`;
+  }
+}
+
+document.addEventListener('click', async (ev) => {
+  const ver = ev.target.closest('[data-ver-itens]');
+  if (ver) return verItensDaNota(ver.dataset.verItens, ver);
+  const um = ev.target.closest('[data-conferir-pronta]');
+  if (um) {
+    um.disabled = true;
+    try {
+      const r = await conferirNotaPronta(um.dataset.conferirPronta);
+      if (!r.ok) { await avisar(`A nota ${r.numero} tem item para olhar (aviso ou algo que não veio pronto). Vou abrir a nota.`); abrirNota(um.dataset.conferirPronta); }
+    } catch (e) { alerta(e.message); } finally { um.disabled = false; }
+    return;
+  }
+  if (ev.target.closest('#btn-conferir-prontas')) {
+    const ids = [...document.querySelectorAll('#tbl-notas [data-conferir-pronta]')].map((b) => b.dataset.conferirPronta);
+    if (!ids.length) return;
+    const ok = await confirmar({
+      titulo: 'Conferir as notas que vieram prontas',
+      ok: `Conferir ${ids.length} nota${ids.length === 1 ? '' : 's'}`,
+      corpo: `<p class="dialogo-texto">Todos os itens que faltam nestas ${ids.length} notas vêm do que vocês ensinaram para o próprio produto (ou de padrão fixado).</p>
+        <p class="dialogo-texto sutil">Nota que, aberta, tiver algum aviso fica de fora, para você olhar.</p>`,
+    });
+    if (!ok) return;
+    let feitas = 0; const ficaram = [];
+    mostrarEspera(`Conferindo ${ids.length} nota(s)…`);
+    try {
+      for (const id of ids) {
+        const r = await conferirNotaPronta(id, true);
+        if (r.ok) feitas += 1; else ficaram.push(r.numero);
+      }
+    } finally { esconderEspera(); }
+    await carregarNotas();
+    avisar(`${feitas} nota${feitas === 1 ? '' : 's'} conferida${feitas === 1 ? '' : 's'}.${ficaram.length ? ` Ficaram para você olhar: ${ficaram.join(', ')}.` : ''}`, 'Vieram prontas');
+  }
+});
+
 function renderNotas() {
   const corpo = $('#tbl-notas tbody');
   const vazio = $('#vazio-notas');
@@ -1080,7 +1166,7 @@ function renderNotas() {
 
   // Empresa com 200 notas nao se trata num dia. Separar o que ja passou por gente
   // do que ainda nao passou foi o primeiro pedido da contadora depois de usar.
-  const tratada = (n) => !!n.cancelada_em || Number(n.estorno) === 1 || ((n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens);
+  const tratada = notaTratada;
   const estornos = noPeriodo.filter((n) => Number(n.estorno) === 1 && !n.cancelada_em);
   $('#estornos-notas').classList.toggle('hidden', estornos.length === 0);
   $('#estornos-notas').innerHTML = faixaEstornos(estornos, periodo ? 'neste período' : 'nesta empresa');
@@ -1088,16 +1174,37 @@ function renderNotas() {
   const lotesDaImportacao = imp ? new Set(imp.lotes) : null;
   const visiveis = noPeriodo.filter((n) => {
     if (lotesDaImportacao && !lotesDaImportacao.has(n.lote_id)) return false;
-    if (estado.filtroNotas === 'tratar') return !tratada(n);
+    if (estado.filtroNotas === 'tratar') return !tratada(n) && !notaVeioPronta(n);
+    if (estado.filtroNotas === 'prontas') return notaVeioPronta(n);
     if (estado.filtroNotas === 'tratadas') return tratada(n);
     return true;
   });
+
+  // "Precisam de você" x "Vieram prontas" (15/10, reunião): os números nos botões, e nas
+  // prontas a barra de conferir em lote.
+  const doFiltro = noPeriodo.filter((n) => !lotesDaImportacao || lotesDaImportacao.has(n.lote_id));
+  const nPrecisam = doFiltro.filter((n) => !tratada(n) && !notaVeioPronta(n)).length;
+  const nProntas = doFiltro.filter(notaVeioPronta).length;
+  for (const b of $$('#filtros-notas button')) {
+    if (b.dataset.fn === 'tratar') b.textContent = `Precisam de você (${nPrecisam})`;
+    if (b.dataset.fn === 'prontas') b.textContent = `Vieram prontas (${nProntas})`;
+  }
+  const barra = $('#barra-prontas');
+  barra.classList.toggle('hidden', estado.filtroNotas !== 'prontas' || nProntas === 0);
+  barra.innerHTML = estado.filtroNotas === 'prontas' && nProntas
+    ? `<b>${nProntas} nota${nProntas === 1 ? '' : 's'} vieram prontas:</b> todos os itens que faltam vêm do que vocês ensinaram para o próprio produto (ou de padrão fixado).
+       Veja os itens sem abrir (▸) e confira.
+       <button type="button" class="btn sm ok" id="btn-conferir-prontas">✓ Conferir as ${visiveis.length}</button>`
+    : '';
 
   if (visiveis.length === 0) {
     corpo.innerHTML = `<tr><td colspan="8" class="vazio">${
       periodo && noPeriodo.length === 0 ? 'Nenhuma nota emitida nesse período.'
       : lotesDaImportacao ? 'Nenhuma nota desta importação neste filtro.'
-      : estado.filtroNotas === 'tratadas' ? 'Nenhuma nota tratada ainda.' : 'Nenhuma nota pendente.'
+      : estado.filtroNotas === 'tratadas' ? 'Nenhuma nota tratada ainda.'
+      : estado.filtroNotas === 'tratar' && nProntas ? `Nenhuma nota precisa de você. ${nProntas} vieram prontas — veja em “Vieram prontas”.`
+      : estado.filtroNotas === 'prontas' ? 'Nenhuma nota veio pronta.'
+      : 'Nenhuma nota pendente.'
     }</td></tr>`;
     return;
   }
@@ -1133,8 +1240,9 @@ function renderNotas() {
       pronta: { rotulo: 'Ver →', classe: '', dica: 'Abrir para conferir ou ajustar' },
     }[estagio];
 
-    return `<tr class="nota-${estagio}">
-      <td>${dataCurta(n.dh_emi)}</td>
+    const pronta = notaVeioPronta(n);
+    return `<tr class="nota-${estagio}${pronta ? ' nota-veio-pronta' : ''}" data-linha-nota="${esc(n.id)}">
+      <td>${pronta ? `<button type="button" class="seta-itens" data-ver-itens="${esc(n.id)}" title="Ver os itens sem abrir a nota">▸</button> ` : ''}${dataCurta(n.dh_emi)}</td>
       <td class="mono">${esc(n.numero)}</td>
       <td>${esc(n.emit_nome ?? n.emit_cnpj)}<span class="porque">${esc(n.emit_cnpj)}</span></td>
       <td class="mono tiny">${esc(String(n.chave).slice(0, 12))}…</td>
@@ -1144,9 +1252,10 @@ function renderNotas() {
         ? `<span title="Valor do XML: R$ ${moeda(n.valor_total)} — nota cancelada, vale zero">0,00</span>`
         : moeda(n.valor_total)}</td>
       <td class="num">${n.total_itens ?? 0}</td>
-      <td>${selo}</td>
+      <td>${selo}${pronta ? ' <span class="tag ok" title="Todos os itens que faltam vêm do que vocês ensinaram para o próprio produto">✓ veio pronta</span>' : ''}</td>
       <td class="acoes">
-        <button class="btn sm ${acao.classe}" data-nota="${n.id}" title="${acao.dica}">${acao.rotulo}</button>
+        ${pronta ? `<button class="btn sm ok" data-conferir-pronta="${n.id}" title="Conferir os itens que vieram prontos">✓ Conferir</button>` : ''}
+        <button class="btn sm ${pronta ? '' : acao.classe}" data-nota="${n.id}" title="${acao.dica}">${pronta ? 'Abrir' : acao.rotulo}</button>
         ${pode('notas.apagar') ? `<button class="btn sm perigo" data-apagar-nota="${n.id}" title="Apagar esta nota">Apagar</button>` : ''}
       </td>
     </tr>`;
@@ -1473,7 +1582,7 @@ function montarSeletorCfop() {
 function itensQueVieramCertos(n) {
   return (n?.itens ?? []).filter((i) => !i.revisado && !conferindo.has(i.id)
     && String(i.cfop_novo ?? '').trim() !== ''
-    && ['aprendida', 'fixada'].includes(i.procedencia?.fonte)
+    && ['aprendida', 'fixada'].includes(i.procedencia?.fonte) && !i.procedencia?.regraAgora
     && !(i.alertas ?? []).some((a) => a.severidade === 'critico' || a.severidade === 'atencao'));
 }
 function barraConferirCertos(n, cancelada) {
@@ -1484,7 +1593,7 @@ function barraConferirCertos(n, cancelada) {
   const resto = pendentes - certos.length;
   return `<div class="conferir-certos">
     <button type="button" class="btn ok" id="btn-conferir-certos">✓ Conferir ${certos.length === 1 ? 'o item que veio certo' : `os ${certos.length} itens que vieram certos`}</button>
-    <span class="tiny">“Vocês ensinaram” ou padrão fixado, sem nenhum aviso.${resto > 0 ? ` ${resto === 1 ? 'O outro item fica' : `Os outros ${resto} ficam`} para você olhar.` : ' É a nota inteira.'}</span>
+    <span class="tiny">“Vocês ensinaram” neste produto ou padrão fixado, sem nenhum aviso. O que veio de outro produto (NCM) fica para você olhar.${resto > 0 ? ` ${resto === 1 ? 'O outro item fica' : `Os outros ${resto} ficam`} para você olhar.` : ' É a nota inteira.'}</span>
   </div>`;
 }
 
@@ -1845,12 +1954,20 @@ function selinhoProcedencia(p, itemId = null) {
   // Clicar no selo mostra de onde veio (13/10): a regra e as notas que a ensinaram.
   const clicavel = itemId ? ` data-de-onde="${esc(itemId)}" role="button" tabindex="0"` : '';
   const dica = itemId ? ' — clique para ver de qual nota veio' : '';
+  // A regra mudou depois que esta linha foi conferida (15/10, caso da Sprite).
+  const mudou = p?.regraAgora
+    ? ` <span class="proc proc-mudou"${clicavel} title="Esta linha ficou com outro CFOP; depois vocês ensinaram ${esc(p.regraAgora)}${dica}">⚠ regra hoje: ${esc(p.regraAgora)}</span>`
+    : '';
   if (fonte === 'fixada') {
-    return `<span class="proc proc-fixada"${clicavel} title="Padrão que a contabilidade fixou para este fornecedor${dica}">📌 PADRÃO FIXADO</span>`;
+    return `<span class="proc proc-fixada"${clicavel} title="Padrão que a contabilidade fixou para este fornecedor${dica}">📌 PADRÃO FIXADO</span>${mudou}`;
   }
   if (fonte === 'aprendida') {
     const n = Number(p?.usos ?? 0);
-    return `<span class="proc proc-aprendida"${clicavel} title="O sistema guardou isto de uma correção de vocês${dica}">✓ VOCÊS ENSINARAM${n > 1 ? ` · ${n}x` : ''}</span>`;
+    return `<span class="proc proc-aprendida"${clicavel} title="O sistema guardou isto de uma correção de vocês neste produto${dica}">✓ VOCÊS ENSINARAM${n > 1 ? ` · ${n}x` : ''}</span>${mudou}`;
+  }
+  if (fonte === 'parecido') {
+    // 15/10: aprendido de OUTRO produto com o mesmo NCM. Pede olho: não é "este produto".
+    return `<span class="proc proc-parecido"${clicavel} title="Ninguém tratou ESTE produto ainda: o CFOP veio de outro produto com o mesmo NCM${dica}">≈ DE OUTRO PRODUTO (NCM)</span>${mudou}`;
   }
   if (fonte === 'manual') {
     return `<span class="proc proc-manual" title="Alguém digitou este valor nesta nota">✎ preenchido por vocês</span>`;
@@ -2021,10 +2138,14 @@ async function verDeOndeVeio(itemId) {
   const deOutro = g.nivel === 4 || g.nivel === 6;
   const iguais = r.decisoes.filter((d) => String(d.cfop_novo).trim() === String(g.valor).trim());
   const primeira = iguais[0]?.item_id;
+  // 15/10 (Sprite): a linha pode estar com um CFOP e a regra, hoje, com outro.
+  const valorLinha = String(i?.cfop_novo ?? '').trim();
+  const difere = valorLinha !== '' && valorLinha !== String(g.valor).trim();
   const linhas = r.decisoes.map((d) => {
     const igual = String(d.cfop_novo).trim() === String(g.valor).trim();
+    const comoALinha = difere && String(d.cfop_novo).trim() === valorLinha;
     const como = String(d.cfop_origem ?? '').startsWith('manual') ? 'digitou' : 'conferiu';
-    return `<tr class="${igual ? 'de-onde-igual' : ''}">
+    return `<tr class="${igual ? 'de-onde-igual' : comoALinha ? 'de-onde-linha' : ''}">
       <td>${esc(dataCurta(d.dh_emi))}</td>
       <td class="mono">${esc(d.numero ?? '')}</td>
       <td>${esc(d.emit_nome ?? '')}</td>
@@ -2040,6 +2161,13 @@ async function verDeOndeVeio(itemId) {
       ${g.fixada ? `Está <b>fixado</b>${g.fixada_por_nome ? ` por ${esc(g.fixada_por_nome)}` : ''}${g.fixada_em ? ` em ${esc(dataCurta(g.fixada_em))}` : ''}.` : ''}
       ${Number(g.usos) > 0 ? `<span class="tiny">Já foi usado ${Number(g.usos)}x${Number(g.erros) > 0 ? `, corrigido ${Number(g.erros)}x` : ''}.</span>` : ''}</p>
     ${deOutro ? '<p class="dialogo-texto aviso-de-onde">⚠ Veio de <b>outro produto</b> com o mesmo NCM, não deste: por isso pode não aparecer na busca pelo nome.</p>' : ''}
+    ${difere ? `<div class="de-onde-difere">⚠ <b>Esta linha está em ${esc(valorLinha)}, mas a regra hoje diz ${esc(g.valor)}.</b>
+      ${i?.revisado
+        ? `A linha foi conferida${i.revisado_por_nome ? ` por ${esc(i.revisado_por_nome)}` : ''}${i.revisado_em ? ` em ${esc(dataCurta(i.revisado_em))}` : ''}, quando a regra ainda dizia ${esc(valorLinha)}.`
+        : 'A linha ainda não foi conferida: abrindo a nota de novo, ela já vem com o valor de hoje.'}
+      ${iguais[0] ? `Depois, vocês ensinaram ${esc(g.valor)} em <b>${esc(iguais[0].x_prod_novo || iguais[0].x_prod_original || '')}</b> (nota ${esc(iguais[0].numero ?? '')}${iguais[0].revisado_em ? `, ${esc(dataCurta(iguais[0].revisado_em))}` : ''}).` : ''}
+      ${i?.revisado ? `Linha conferida não muda sozinha: se o certo é ${esc(g.valor)}, troque aqui.` : ''}
+      Na lista abaixo, em azul as decisões com ${esc(valorLinha)}.</div>` : ''}
     ${r.decisoes.length === 0
       ? '<p class="dialogo-texto sutil">Não achei nota tratada que bata com esta regra: ela pode ter vindo de uma nota apagada ou da arrumação das regras de 22/09.</p>'
       : `<p class="dialogo-texto sutil">Notas tratadas por vocês que ensinam esta regra, da mais recente para a mais antiga. Em destaque, as que ficaram com ${esc(g.valor)}; a marcada <b>daqui</b> é a última, a que vale hoje.</p>
@@ -3363,7 +3491,25 @@ $('#btn-novo-usuario').addEventListener('click', () => editarUsuario(null).catch
 // medicao do projeto. A conta e do servidor; a tela so desenha, e a planilha
 // baixada sai da MESMA rota (formato=csv), para tela e arquivo nunca discordarem.
 
-const rel = { qual: 'cfop', competencia: '', filtro: '', ultimo: null, soNaoFechou: false, de: '', ate: '', questor: null };
+const rel = { qual: 'cfop', competencia: '', filtro: '', ultimo: null, soNaoFechou: false, de: '', ate: '', questor: null, cfopProd: '' };
+
+/* Filtro "CFOP de entrada" do relatório por produto (15/10, reunião): "o que eu botei
+   1101 me apareça só os produtos do 1101" - bater o olho e achar o pão de queijo no
+   uso e consumo sem abrir nota por nota. */
+function qsCfopProd() {
+  return rel.qual === 'produtos' && rel.cfopProd ? `&cfop=${encodeURIComponent(rel.cfopProd)}` : '';
+}
+function montarFiltroCfopProd(r) {
+  const sel = $('#rel-cfop-prod');
+  if (!sel) return;
+  sel.classList.toggle('hidden', rel.qual !== 'produtos');
+  if (rel.qual !== 'produtos') return;
+  const ops = r?.cfopsDoPeriodo ?? [];
+  if (rel.cfopProd && !ops.some((o) => o.cfop === rel.cfopProd)) ops.push({ cfop: rel.cfopProd, itens: 0 });
+  sel.innerHTML = '<option value="">todos os CFOPs de entrada</option>' + ops.map((o) =>
+    `<option value="${esc(o.cfop)}">${esc(o.cfop)}${descricaoCfop(o.cfop) ? ` · ${esc(descricaoCfop(o.cfop))}` : ''} (${o.itens} ${o.itens === 1 ? 'item' : 'itens'})</option>`).join('');
+  sel.value = rel.cfopProd;
+}
 
 /* Período de emissão nos relatórios (29/09, pedido da Taís): "do dia 1 ao dia 20",
    e a data tem que aparecer no print e no PDF para saber de que período era. */
@@ -3428,8 +3574,14 @@ async function carregarRelatorio() {
   let r;
   try {
     // "Por nota" usa o analítico (um item por linha) e agrupa aqui.
+    if (pedido === 'divergencias') {
+      r = await api(`/api/empresas/${estado.empresaId}/auditoria/divergencias?competencia=${rel.competencia}`);
+      if (meu !== seqRelatorio || pedido !== rel.qual) return;
+      montarFiltroCfopProd(null);
+      return desenharDivergencias(r);
+    }
     const rota = pedido === 'nota' ? 'analitico' : pedido;
-    r = await api(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}${qsPeriodo()}`);
+    r = await api(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}${qsPeriodo()}${qsCfopProd()}`);
     if (pedido === 'nota') {
       r.linhas = r.linhas.map((l) => aplicarRegraNoItem(l, r.regras?.[l.cfop_novo] ?? null));
       r.totais = { itens: r.linhas.length, conferidos: r.linhas.filter((l) => l.revisado).length };
@@ -3447,6 +3599,7 @@ async function carregarRelatorio() {
   // um pedido antigo que chegasse depois pintaria o total de outro período.
   if (meu !== seqRelatorio || pedido !== rel.qual) return;
   rel.ultimo = { ...r, qual: pedido };
+  montarFiltroCfopProd(r);
   desenharRelatorio();
 }
 let seqRelatorio = 0;
@@ -3532,7 +3685,8 @@ function desenharRelatorio() {
       <td class="num">${l.notas}</td><td class="num">${l.itens}</td><td class="num">${l.conferidos}</td>
       <td class="num"><b>${moeda(l.valorContabil)}</b></td><td class="num">${moeda(l.baseIcms)}</td><td class="num">${moeda(l.icms)}</td>
       <td class="num">${l.regra === 'outras' ? moeda(l.outras) : ''}</td>
-      <td class="num">${moeda(l.st)}</td><td class="num">${moeda(l.ipi)}</td><td class="tiny">${esc(l.origem)}</td></tr>`).join('');
+      <td class="num">${moeda(l.st)}</td><td class="num">${moeda(l.ipi)}</td><td class="tiny">${esc(l.origem)}
+        <button type="button" class="btn sm sutil" data-produtos-do-cfop="${esc(l.cfop)}" title="Ver só os produtos deste CFOP, sem abrir nota">produtos →</button></td></tr>`).join('');
     const t = filtro
       ? { notas: '—', itens: soma('itens'), conferidos: soma('conferidos'), valorContabil: soma('valorContabil'),
           baseIcms: soma('baseIcms'), icms: soma('icms'), outras: soma('outras'), st: soma('st'), ipi: soma('ipi') }
@@ -3561,6 +3715,35 @@ function desenharRelatorio() {
       ? '<tr><td class="vazio" colspan="12">Nenhum produto marcado como “não fechou” neste mês. Marque no ✗ de cada linha.</td></tr>'
       : `<tr><td class="vazio" colspan="12">Nada com “${esc(filtro)}”${soNf ? ' entre os que não fecharam' : ''} neste relatório. Tente só um pedaço do nome, o código ou o valor.</td></tr>`;
   }
+}
+
+/* ---- Divergências (15/10, auditoria pedida na reunião) ----
+   O mesmo produto, do mesmo fornecedor, na mesma operação (CFOP de saída), decidido
+   com CFOPs de entrada diferentes - em qualquer mês, para os produtos deste mês. É
+   onde mora o erro do tipo Sprite. Não diz qual está certo: mostra as decisões. */
+function desenharDivergencias(r) {
+  const tabela = $('#tbl-relatorio');
+  const [cab, corpo, pe] = [tabela.querySelector('thead'), tabela.querySelector('tbody'), tabela.querySelector('tfoot')];
+  limparGruposNota();
+  $('#rel-aviso')?.classList.add('hidden');
+  atualizarBotaoNaoFechou();
+  const filtro = rel.filtro.trim();
+  const grupos = r.grupos.filter((g) => !filtro || semAcentoMaiusc([g.descricao, g.fornecedor, g.codigo, g.saida, Object.keys(g.cfops).join(' ')].join(' ')).includes(semAcentoMaiusc(filtro)));
+  cab.innerHTML = '<tr><th>Produto</th><th>Fornecedor</th><th>Cód.</th><th>CFOP de saída</th><th>Decisões</th></tr>';
+  pe.innerHTML = `<tr><th colspan="5">${grupos.length} produto${grupos.length === 1 ? '' : 's'} com CFOPs diferentes na mesma operação · o histórico inteiro, para os produtos desta competência</th></tr>`;
+  if (grupos.length === 0) {
+    corpo.innerHTML = `<tr><td class="vazio" colspan="5">✓ Nenhum produto desta competência foi tratado com CFOPs diferentes na mesma operação${filtro ? ` (com “${esc(filtro)}”)` : ''}.</td></tr>`;
+    return;
+  }
+  corpo.innerHTML = grupos.map((g) => `
+    <tr class="div-grupo"><td><b>${esc(g.descricao ?? '')}</b></td><td>${esc(g.fornecedor ?? '')}</td><td class="mono tiny">${esc(g.codigo ?? '')}</td>
+      <td class="mono">${esc(g.saida ?? '')}</td>
+      <td>${Object.entries(g.cfops).map(([c, n]) => `<span class="tag warn mono">${esc(c)} · ${n}x</span>`).join(' ')}</td></tr>
+    <tr class="div-itens"><td colspan="5"><table class="div-sub"><tbody>${g.itens.map((x) => `
+      <tr><td>${esc(dataCurta(x.emissao))}</td><td class="mono">nota ${esc(x.numero ?? '')}</td><td class="mono"><b>${esc(x.cfop)}</b></td>
+        <td class="tiny">${esc(x.como)}${x.quem ? ` · ${esc(x.quem)}` : ''}${x.quando ? ` · ${esc(dataCurta(x.quando))}` : ''}</td>
+        <td><button type="button" class="btn sm" data-div-abrir="${esc(x.notaId)}" data-item="${esc(x.itemId)}">Abrir →</button></td></tr>`).join('')}
+    </tbody></table></td></tr>`).join('');
 }
 
 /* ---- Relatório "Por nota (item a item)" (28/09, pedido da Taís) ----
@@ -3683,6 +3866,7 @@ function imprimirRelatorio() {
 }
 $('#rel-imprimir')?.addEventListener('click', imprimirRelatorio);
 
+$('#rel-cfop-prod')?.addEventListener('change', (e) => { rel.cfopProd = e.target.value; carregarRelatorio(); });
 $$('#rel-qual button').forEach((b) => b.addEventListener('click', () => {
   rel.qual = b.dataset.rel;
   $$('#rel-qual button').forEach((x) => x.classList.toggle('on', x === b));
@@ -3710,6 +3894,15 @@ $('#tbl-relatorio').addEventListener('click', async (ev) => {
   if (baixarCfop) {
     return baixar(`/api/empresas/${estado.empresaId}/relatorios/analitico?competencia=${rel.competencia}&cfop=${encodeURIComponent(baixarCfop.dataset.baixarCfop)}&formato=csv${qsPeriodo()}`);
   }
+  const prodCfop = ev.target.closest('[data-produtos-do-cfop]');
+  if (prodCfop) {
+    rel.qual = 'produtos';
+    rel.cfopProd = prodCfop.dataset.produtosDoCfop;
+    $$('#rel-qual button').forEach((x) => x.classList.toggle('on', x.dataset.rel === 'produtos'));
+    return carregarRelatorio();
+  }
+  const divAbrir = ev.target.closest('[data-div-abrir]');
+  if (divAbrir) return abrirNota(divAbrir.dataset.divAbrir, divAbrir.dataset.item);
   const marcar = ev.target.closest('[data-marcar-produto]');
   if (marcar) return alternarNaoFechou(marcar.closest('tr[data-rel-produto]'));
   const linhaProduto = ev.target.closest('tr[data-rel-produto]');
@@ -4188,7 +4381,7 @@ $('#rel-baixar').addEventListener('click', () => {
   if (!estado.empresaId || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
   const so = rel.qual === 'produtos' && rel.soNaoFechou ? '&soNaoFechou=1' : '';
   const rota = rel.qual === 'nota' ? 'analitico' : rel.qual; // "Por nota" baixa o analítico, item a item
-  baixar(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}&formato=csv${so}${qsPeriodo()}`);
+  baixar(`/api/empresas/${estado.empresaId}/relatorios/${rota}?competencia=${rel.competencia}&formato=csv${so}${qsPeriodo()}${qsCfopProd()}`);
 });
 
 async function carregarFornecedores() {

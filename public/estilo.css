@@ -687,3 +687,26 @@ tr.nota-estorno td{background:#faf5ff}
 .pend-empresa:hover{filter:brightness(.97)}
 .pend-empresa.atual{box-shadow:0 0 0 2px var(--primary-soft);border-color:var(--primary-2)}
 .pend-ok{color:var(--ok);font-weight:700}
+
+/* Manter conectado (15/10) */
+.lembrar{display:flex;gap:7px;align-items:center;font-size:12.5px;color:var(--muted);margin:2px 0 12px;cursor:pointer}
+
+/* 15/10, caso da Sprite: regra de OUTRO produto (NCM) e regra que mudou depois */
+.proc-parecido{background:#fff4dc;color:#8a4b00;border:1.5px dashed #c97a00;font-weight:800;font-size:11.5px;padding:2px 8px}
+.proc-mudou{background:var(--danger-soft);color:var(--danger);border:1px solid var(--danger);font-weight:800;font-size:11.5px;padding:2px 8px;margin-left:4px}
+.de-onde-tabela tr.de-onde-linha td{background:var(--primary-soft)}
+.de-onde-difere{background:var(--danger-soft);border:1px solid var(--danger);color:var(--txt);border-radius:8px;padding:9px 12px;margin:8px 0;font-size:13px;line-height:1.5}
+
+/* Divergências (15/10) */
+#tbl-relatorio tr.div-grupo td{background:var(--warn-soft);border-top:2px solid var(--warn)}
+#tbl-relatorio tr.div-itens>td{padding:0 0 8px 24px}
+.div-sub{width:auto;font-size:12.5px}
+.div-sub td{padding:3px 10px;border-bottom:1px solid var(--line-2)}
+
+/* Vieram prontas (15/10) */
+.barra-prontas{margin:0 14px 10px;padding:9px 12px;border:1px solid var(--ok);background:var(--ok-soft);border-radius:8px;font-size:13px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.seta-itens{border:0;background:none;cursor:pointer;color:var(--primary);font-size:12px;padding:0 4px}
+#tbl-notas tr.itens-da-nota>td{background:var(--surface-2);padding:6px 10px 10px 34px}
+.itens-mini{width:100%;font-size:12.5px}
+.itens-mini td{padding:4px 8px;border-bottom:1px solid var(--line-2)}
+.itens-mini tr.mini-conferido td{color:var(--muted)}
