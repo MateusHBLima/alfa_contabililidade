@@ -119,6 +119,13 @@ export const PAPEIS_SEMENTE: { nome: string; descricao: string; sistema: boolean
     ],
   },
   {
+    // 15/10: acesso de consulta (o do Claude, auditoria, sócios). Não altera nada.
+    nome: 'Somente leitura',
+    descricao: 'Vê todas as empresas, notas, relatórios, regras e a trilha. Não altera nada.',
+    sistema: false,
+    permissoes: ['notas.visualizar', 'empresas.visualizar', 'empresas.todas', 'regras.visualizar', 'auditoria.visualizar'],
+  },
+  {
     nome: 'Admin',
     descricao: 'Acesso total, incluindo usuários, papéis e empresas.',
     sistema: true,

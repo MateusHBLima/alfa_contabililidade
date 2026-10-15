@@ -92,7 +92,7 @@ describe('as migrações aplicam num SQLite real', () => {
     );
     expect(tabelas.length).toBe(30); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
-    expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(3);
+    expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(4); // + Somente leitura (0029)
   });
 
   it('as chaves estrangeiras estão ativas e valem', async () => {
@@ -3724,6 +3724,80 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     expect(await pend()).toEqual([]);
   });
 
+  it('15/10 (Sprite): o que veio de OUTRO produto pelo NCM tem selo próprio, fica fora do "vieram certos" e avisa quando a regra mudou', async () => {
+    /* Vídeo da Taís: Sprite em 1102 com "vocês ensinaram"; clicando, abria a Fanta em 1403. */
+    const mesmoNcm = (sufixo: string) => comCfop(sufixo, '5102').replace('<NCM>34022000</NCM>', '<NCM>22021000</NCM>');
+    const abrir = async (n: string) => (await (await req(`/api/notas/${n}`)).json()) as any;
+    // 1) Ela trata o refrigerante (item 2) em 1102.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: mesmoNcm('11') }]);
+    expect((await corrigir(itensDa('11')[1].id, '1102')).status).toBe(200);
+    // 2) Outra nota: o item 3, que ninguém tratou, tem o mesmo NCM e herda 1102 pelo NCM.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: mesmoNcm('33') }]);
+    const nota2 = itensDa('33')[0].nota_id;
+    let n2 = await abrir(nota2);
+    const p3 = n2.itens.find((i: any) => i.n_item === 3);
+    expect(p3.cfop_novo).toBe('1102');
+    expect(p3.procedencia).toMatchObject({ fonte: 'parecido' });
+    expect(n2.itens.find((i: any) => i.n_item === 2).procedencia.fonte).toBe('aprendida'); // o próprio produto
+    // 3) Ela confere o item 3 assim mesmo (1102)...
+    expect((await req(`/api/notas/${nota2}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [p3.id] }) })).status).toBe(200);
+    // 4) ...e depois ensina 1403 para o refrigerante: a regra do NCM passa a 1403.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'c.xml', conteudo: mesmoNcm('44') }]);
+    expect((await corrigir(itensDa('44')[1].id, '1403')).status).toBe(200);
+    // A linha conferida continua 1102, e agora a tela diz que a regra hoje é 1403.
+    n2 = await abrir(nota2);
+    expect(n2.itens.find((i: any) => i.n_item === 3)).toMatchObject({ cfop_novo: '1102', procedencia: { fonte: 'parecido', regraAgora: '1403' } });
+    // E a janela "de onde veio" mostra a regra de NCM com as duas decisões.
+    const d = await (await req(`/api/itens/${p3.id}/de-onde-veio`)).json() as any;
+    expect([4, 6]).toContain(d.regra.nivel);
+    expect(d.regra.valor).toBe('1403');
+    expect(d.decisoes.map((x: any) => x.cfop_novo)).toEqual(expect.arrayContaining(['1403', '1102']));
+  });
+
+  it('15/10 (auditoria): produtos de um CFOP sem abrir nota, e o mesmo produto decidido com CFOPs diferentes', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'a.xml', conteudo: comCfop('11', '5102') },
+      { nome: 'b.xml', conteudo: comCfop('33', '5102') },
+    ]);
+    const comp = (db.consultar(`SELECT competencia FROM notas LIMIT 1`)[0] as any).competencia;
+    const [a1, a2, a3] = itensDa('11');
+    await corrigir(a1.id, '1101'); await corrigir(a2.id, '1102'); await corrigir(a3.id, '1102');
+    const [b1, b2] = itensDa('33');
+    await corrigir(b1.id, '1102'); // o mesmo produto do a1, agora 1102: divergência
+    await corrigir(b2.id, '1102'); // igual ao a2: não é divergência
+    const base = `/api/empresas/${empresaId}`;
+    // Por produto, só o 1101.
+    const p1101 = await (await req(`${base}/relatorios/produtos?competencia=${comp}&cfop=1101`)).json() as any;
+    expect(p1101.linhas).toHaveLength(1);
+    expect(p1101.linhas[0].cfops).toBe('1101');
+    expect(p1101.cfopsDoPeriodo.map((x: any) => x.cfop)).toEqual(expect.arrayContaining(['1101', '1102']));
+    expect((await req(`${base}/relatorios/produtos?competencia=${comp}&cfop=11`)).status).toBe(400);
+    const csv = await req(`${base}/relatorios/produtos?competencia=${comp}&cfop=1101&formato=csv`);
+    expect(csv.headers.get('content-disposition')).toContain('-cfop-1101.csv');
+    // Divergências: só o produto do item 1, com as duas decisões.
+    const d = await (await req(`${base}/auditoria/divergencias?competencia=${comp}`)).json() as any;
+    expect(d.grupos).toHaveLength(1);
+    expect(d.grupos[0]).toMatchObject({ codigo: a1.c_prod, saida: '5102', cfops: { '1101': 1, '1102': 1 } });
+    expect(d.grupos[0].itens.map((x: any) => x.itemId).sort()).toEqual([a1.id, b1.id].sort());
+  });
+
+  it('15/10: "vieram prontas" conta só o que veio de regra do próprio produto (não a de NCM) e ainda vale', async () => {
+    const lista = async () => (await (await req(`/api/empresas/${empresaId}/notas`)).json()) as any[];
+    const mesmoNcm = (sufixo: string) => comCfop(sufixo, '5102').replace('<NCM>34022000</NCM>', '<NCM>22021000</NCM>');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: mesmoNcm('11') }]);
+    // Ela trata só os itens 1 e 2. O 3 (mesmo NCM do 2) fica sem decisão própria.
+    const [a1, a2] = itensDa('11');
+    await corrigir(a1.id, '1101'); await corrigir(a2.id, '1102');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: mesmoNcm('33') }]);
+    const nota = (await lista()).find((n: any) => n.chave.endsWith('33'));
+    // 1 e 2 vieram de regra do próprio produto; o 3, do NCM (outro produto): não conta.
+    expect(nota).toMatchObject({ total_itens: 3, itens_revisados: 0, itens_prontos: 2 });
+    // Ela trata o item 3 numa terceira nota: agora todos vêm prontos.
+    await corrigir(itensDa('11')[2].id, '1556');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'c.xml', conteudo: mesmoNcm('44') }]);
+    expect((await lista()).find((n: any) => n.chave.endsWith('44'))).toMatchObject({ total_itens: 3, itens_prontos: 3 });
+  });
+
   it('13/10: a mesma regra criada por duas gravações simultâneas não estoura a unicidade, e a fixada continua mandando', async () => {
     const criar = (valor: string, fixada = false) => [{ tipo: 'criar' as const, nivel: 4 as const, chave: '83646984003044|04039000#5102', campo: 'cfop' as const, valor, fixada }];
     // As duas leem "não existe" antes de qualquer uma gravar - é a corrida do D1.
@@ -5298,5 +5372,71 @@ describe('09/10: antecipação e DIFAL — lista, marca e relatório para o clie
     expect(ao).toContain('<h1>DANFE</h1>');
     expect(ao).not.toContain('window.print(); }, 400');
     expect(await (await chamar(`/api/notas/${notaId}/danfe`)).text()).toContain('window.print(); }, 400');
+  });
+});
+
+describe('15/10: acesso "Somente leitura" e "manter conectado por 30 dias"', () => {
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  const entrar = async (email: string, lembrar?: boolean) => app.fetch(new Request('http://x/api/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, senha: 'uma frase de senha longa', ...(lembrar === undefined ? {} : { lembrar }) }),
+  }), ambiente());
+  const como = (ck: string) => (c: string, o: RequestInit = {}) => app.fetch(new Request(`http://x${c}`, {
+    ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+  }), ambiente());
+
+  it('o papel existe e só tem permissões de ver', () => {
+    const p = (db.consultar(`SELECT permissao FROM papel_permissoes WHERE papel_id = 'papel-leitura' ORDER BY permissao`) as any[]).map((r) => r.permissao);
+    expect(p).toEqual(['auditoria.visualizar', 'empresas.todas', 'empresas.visualizar', 'notas.visualizar', 'regras.visualizar']);
+  });
+
+  it('sessão de 12 horas por padrão e de 30 dias quando marca "manter conectado"', async () => {
+    const idade = (r: Response) => Number(/Max-Age=(\d+)/.exec(r.headers.get('Set-Cookie') ?? '')?.[1]);
+    expect(idade(await entrar('contadora@alfacontabil.net'))).toBe(12 * 3600);
+    expect(idade(await entrar('contadora@alfacontabil.net', false))).toBe(12 * 3600);
+    const r = await entrar('contadora@alfacontabil.net', true);
+    expect(idade(r)).toBe(30 * 24 * 3600);
+    const s = db.consultar('SELECT criada_em, expira_em FROM sessoes ORDER BY criada_em DESC LIMIT 1')[0] as any;
+    expect((Date.parse(s.expira_em) - Date.parse(s.criada_em)) / 3600_000).toBeCloseTo(30 * 24, 0);
+  });
+
+  it('quem é "Somente leitura" vê todas as empresas e as notas, não altera nada, e abrir a nota não muda palpite', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'EMPRESA TESTE', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '71') }]);
+    await db.prepare('INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, criado_em) VALUES (?,?,?,?,?,?)')
+      .bind('u-leitura', 'alfa', 'leitura@alfacontabil.net', 'Claude (somente leitura)',
+        await gerarHashSenha('uma frase de senha longa'), new Date().toISOString()).run();
+    await db.prepare('INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES (?,?)').bind('u-leitura', 'papel-leitura').run();
+    const ck = ((await entrar('leitura@alfacontabil.net', true)).headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    const req = como(ck);
+
+    const empresas = await (await req('/api/empresas')).json() as any[];
+    expect(empresas.map((e) => e.id)).toContain(empresaId);
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    // Palpite "velho" num item não conferido: quem pode editar atualizaria ao abrir.
+    db.consultar(`UPDATE itens SET cfop_novo = '9999', cfop_origem = 'perfil' WHERE nota_id = ?`, nota);
+    db.consultar(`INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, criada_em)
+                  SELECT 'r-teste', 'alfa', ?, 1, n.emit_cnpj || '|' || UPPER(TRIM(i.c_prod)) || '#' || TRIM(i.cfop_original), 'cfop', '1101', '2026-10-01'
+                    FROM itens i JOIN notas n ON n.id = i.nota_id WHERE i.nota_id = ? AND i.n_item = 1`, empresaId, nota);
+    const antes = JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'));
+    expect((await req(`/api/notas/${nota}`)).status).toBe(200);
+    expect(JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'))).toBe(antes);
+    expect((await req(`/api/empresas/${empresaId}/relatorios/cfop?competencia=2026-08`)).status).toBe(200);
+    expect((await req(`/api/pendencias`)).status).toBe(200);
+
+    const item = (db.consultar('SELECT id FROM itens WHERE nota_id = ? ORDER BY n_item', nota)[0] as any).id;
+    expect((await req(`/api/itens/${item}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1102' }] }) })).status).toBe(403);
+    expect((await req(`/api/notas/${nota}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [item] }) })).status).toBe(403);
+    expect((await req('/api/regras-icms/1102', { method: 'PUT', body: JSON.stringify({ regra: 'outras', grupo: 'presumido' }) })).status).toBe(403);
+    expect(JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'))).toBe(antes);
+
+    // Quem pode editar, ao abrir, recebe o palpite atualizado (o comportamento de 13/10 continua).
+    const ckAdmin = ((await entrar('contadora@alfacontabil.net')).headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    await como(ckAdmin)(`/api/notas/${nota}`);
+    expect((db.consultar('SELECT cfop_novo FROM itens WHERE nota_id = ? AND n_item = 1', nota)[0] as any).cfop_novo).toBe('1101');
   });
 });

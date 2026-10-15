@@ -22,6 +22,7 @@
       <label class="fl" for="login-senha">Senha</label>
       <input type="password" id="login-senha" autocomplete="current-password" required>
     </div>
+    <label class="lembrar"><input type="checkbox" id="login-lembrar"> Manter conectado neste computador por 30 dias</label>
     <button class="btn primary" style="width:100%;justify-content:center" id="btn-entrar">Entrar</button>
 
     <!-- Segunda etapa. Só aparece quando o servidor pede o código: a senha
@@ -293,7 +294,8 @@
             <div class="toolbar" style="padding:10px 14px 4px">
               <div class="filters" id="filtros-notas">
                 <button data-fn="todas" class="on">Todas</button>
-                <button data-fn="tratar">A tratar</button>
+                <button data-fn="tratar" title="Notas com algum item que precisa do seu olho: produto novo, palpite, aviso ou CFOP que veio de outro produto">Precisam de você</button>
+                <button data-fn="prontas" title="Notas em que todos os itens que faltam vieram do que vocês ensinaram para o próprio produto">Vieram prontas</button>
                 <button data-fn="tratadas">Tratadas</button>
               </div>
               <div class="sep"></div>
@@ -312,6 +314,7 @@
               <button class="btn sm" id="btn-agrupar" title="Dobra a lista por fornecedor: a decisão de CFOP costuma ser por fornecedor">▤ Agrupar por fornecedor</button>
             </div>
             <div id="periodo-notas" class="placar sutil hidden" style="margin:0 14px 10px"></div>
+            <div id="barra-prontas" class="barra-prontas hidden"></div>
             <div id="detalhe-importacao" class="log hidden" style="margin:0 14px 10px;max-height:260px"></div>
             <div class="scroll"><table id="tbl-notas">
               <thead><tr>
@@ -520,8 +523,10 @@
               <button data-rel="cfop" class="on">Por CFOP</button>
               <button data-rel="produtos">Por produto</button>
               <button data-rel="nota" title="Cada nota com a capa, os itens e o total por CFOP — para conferir com o Questor nota a nota">Por nota</button>
+              <button data-rel="divergencias" title="O mesmo produto, do mesmo fornecedor e na mesma operação, tratado com CFOPs diferentes">⚠ Divergências</button>
             </div>
             <select id="rel-competencia" style="font-size:12px;width:210px"></select>
+            <select id="rel-cfop-prod" class="hidden" style="font-size:12px;width:240px" title="Só os produtos que estão neste CFOP de entrada"></select>
             <label class="tiny" for="rel-de">Emissão de</label>
             <input type="date" id="rel-de" style="font-size:12px;width:140px">
             <label class="tiny" for="rel-ate">até</label>

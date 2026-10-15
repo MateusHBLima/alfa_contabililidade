@@ -301,10 +301,18 @@ async function registrarTentativa(db: D1Database, ipBruto: string | null, sucess
   ]);
 }
 
+/**
+ * "Manter conectado neste computador" (15/10): 30 dias em vez de 12 horas. Desmarcado
+ * por padrão. Pedido do Mateus: o acesso de leitura do Claude caía todo dia. Desativar o
+ * usuário ou trocar a senha continua derrubando a sessão na hora.
+ */
+const DURACAO_LEMBRAR_H = 30 * 24;
+
 /** Abre a sessão e devolve o cabeçalho do cookie. Um lugar só, usado por todos. */
-async function abrirSessao(c: any, u: { id: string }): Promise<void> {
+async function abrirSessao(c: any, u: { id: string }, lembrar = false): Promise<void> {
+  const horas = lembrar ? DURACAO_LEMBRAR_H : DURACAO_H;
   const sessaoId = crypto.randomUUID();
-  const expira = new Date(Date.now() + DURACAO_H * 3600_000).toISOString();
+  const expira = new Date(Date.now() + horas * 3600_000).toISOString();
   await c.env.DB.batch([
     c.env.DB
       .prepare(
@@ -320,7 +328,7 @@ async function abrirSessao(c: any, u: { id: string }): Promise<void> {
   const valor = `${sessaoId}.${await assinar(sessaoId, c.env.SESSION_SECRET)}`;
   c.header(
     'Set-Cookie',
-    `${COOKIE}=${encodeURIComponent(valor)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${DURACAO_H * 3600}`,
+    `${COOKIE}=${encodeURIComponent(valor)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${horas * 3600}`,
   );
 }
 
@@ -478,8 +486,8 @@ app.post('/api/esqueci', async (c) => {
 });
 
 app.post('/api/login', async (c) => {
-  const { email, senha } = z
-    .object({ email: z.string().email(), senha: z.string().min(1) })
+  const { email, senha, lembrar } = z
+    .object({ email: z.string().email(), senha: z.string().min(1), lembrar: z.boolean().optional() })
     .parse(await c.req.json());
 
   const ip = c.req.header('CF-Connecting-IP') ?? null;
@@ -574,7 +582,7 @@ app.post('/api/login', async (c) => {
     return c.json({ ok: true, mfaRequerido: true, desafio });
   }
 
-  await abrirSessao(c, u);
+  await abrirSessao(c, u, lembrar === true);
   await registrarTentativa(c.env.DB, ip, true);
   return c.json({ ok: true, nome: u.nome, deveTrocarSenha: u.deve_trocar_senha === 1 });
 });
@@ -586,8 +594,8 @@ app.post('/api/login', async (c) => {
  * quem roubou só o código de seis dígitos não entra — precisa da senha também.
  */
 app.post('/api/login/mfa', async (c) => {
-  const { desafio, codigo } = z
-    .object({ desafio: z.string().uuid(), codigo: z.string().min(1) })
+  const { desafio, codigo, lembrar } = z
+    .object({ desafio: z.string().uuid(), codigo: z.string().min(1), lembrar: z.boolean().optional() })
     .parse(await c.req.json());
 
   const ip = c.req.header('CF-Connecting-IP') ?? null;
@@ -675,7 +683,7 @@ app.post('/api/login/mfa', async (c) => {
   }
 
   await c.env.DB.prepare('UPDATE desafios_mfa SET usado = 1 WHERE id = ?').bind(desafio).run();
-  await abrirSessao(c, u);
+  await abrirSessao(c, u, lembrar === true);
   await registrarTentativa(c.env.DB, ip, true);
   return c.json({ ok: true, nome: u.nome, deveTrocarSenha: u.deve_trocar_senha === 1 });
 });
@@ -1893,7 +1901,9 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   let rel: any =
     qual === 'cfop'
       ? aplicarRegrasIcms(montarRelatorioCfop(await repo.relatorioCfop(empresaId, competencia, periodo)), await repo.regrasIcms(grupoIcms(empresa?.regime)))
-      : montarRelatorioProdutos(await repo.relatorioProdutos(empresaId, competencia, periodo));
+      : montarRelatorioProdutos(await repo.relatorioProdutos(empresaId, competencia, periodo, cfopFiltro));
+  // Opções do filtro "CFOP de entrada" do relatório por produto (15/10).
+  if (qual === 'produtos') rel = { ...rel, cfopsDoPeriodo: await repo.cfopsDoPeriodo(empresaId, competencia, periodo) };
 
   // Produtos marcados "não fechou" no mês (28/09). Com soNaoFechou=1, o relatório
   // (e a planilha) vem só com eles - o "relatório do que não fechou".
@@ -1915,9 +1925,18 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   }
 
   if (csv) {
-    return csvResposta(qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any), `relatorio-${qual}-${sufixo}.csv`);
+    const doCfop = qual === 'produtos' && cfopFiltro ? `-cfop-${cfopFiltro.replace(/\D/g, '') || 'sem'}` : '';
+    return csvResposta(qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any), `relatorio-${qual}-${sufixo}${doCfop}.csv`);
   }
   return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, canceladas, estornos, naoFecharam, ...rel });
+});
+
+/** Auditoria: mesmo produto, mesmo fornecedor, mesma operação, CFOPs diferentes (15/10). Só leitura. */
+app.get('/api/empresas/:id/auditoria/divergencias', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const competencia = c.req.query('competencia') || undefined;
+  if (competencia && !/^\d{4}(-\d{2})?$/.test(competencia)) return c.json({ erro: 'competência inválida' }, 400);
+  return c.json({ competencia: competencia ?? null, grupos: await c.get('repo').divergencias(c.req.param('id'), competencia) });
 });
 
 /** Regras de ICMS por CFOP (28/09, planilha da Taís): uma por grupo de regime desde 13/10 (grupoIcms). */
@@ -2359,8 +2378,9 @@ ${folhas.join('\n')}
 
 /** Marca/desmarca um produto do relatório como "não fechou" (28/09). */
 app.put('/api/empresas/:id/relatorios/produtos/marca', async (c) => {
-  // Anotação de conferência, não dado fiscal: quem vê o relatório pode marcar.
+  // Anotação de conferência, não dado fiscal - mas é trabalho gravado: pede poder editar nota.
   exigir(c.get('sessao'), 'notas.visualizar');
+  exigirAlguma(c.get('sessao'), EDITAR_NOTA);
   const corpo = z.object({
     competencia: z.string().regex(/^\d{4}-\d{2}$/),
     descricao: z.string().min(1).max(300),
@@ -2398,7 +2418,8 @@ app.get('/api/notas/:id', async (c) => {
   }
 
   // O que foi ensinado depois da importação vale para o que ainda não foi conferido (13/10).
-  if (await atualizarPalpitesDaNota(repo, r.nota, r.itens)) {
+  // Só para quem pode editar CFOP: abrir a nota com o papel "Somente leitura" não muda nada.
+  if (c.get('sessao').permissoes.has('notas.editar_cfop') && await atualizarPalpitesDaNota(repo, r.nota, r.itens)) {
     r = (await repo.obterNotaComItens(r.nota.id))!;
   }
 
@@ -2421,7 +2442,7 @@ app.get('/api/notas/:id', async (c) => {
   // que ela de fato decide; a descricao acompanha. Sem isto a tela nao tem como
   // diferenciar o padrao que ela fixou do chute do perfil da empresa - e foi
   // exatamente isso que ela pediu no primeiro uso real.
-  const procedenciaDe = (origem: string | null): Procedencia => {
+  const procedenciaDe = (origem: string | null, valorLinha?: string | null): Procedencia => {
     if (typeof origem !== 'string') return { fonte: 'nenhuma' };
     if (origem === 'perfil') return { fonte: 'perfil' };
     // 'manual' e 'manual:fixada' sao o que alguem digitou nesta nota. Sem este
@@ -2432,7 +2453,14 @@ app.get('/api/notas/:id', async (c) => {
     if (!origem.startsWith('regra:')) return { fonte: 'nenhuma' };
     const ficha = fichas.get(origem.slice('regra:'.length));
     if (!ficha) return { fonte: 'nenhuma' };
-    return ficha.fixada ? { fonte: 'fixada' } : { fonte: 'aprendida', usos: ficha.usos };
+    // A regra pode ter mudado depois que a linha foi conferida (caso da Sprite, 15/10):
+    // a linha diz 1102, a regra hoje diz 1403. A tela precisa dizer isso, nao so "ensinaram".
+    const linha = String(valorLinha ?? '').trim();
+    const mudou = linha !== '' && ficha.valor !== '' && ficha.valor !== linha ? { regraAgora: ficha.valor } : {};
+    if (ficha.fixada) return { fonte: 'fixada', ...mudou };
+    // Niveis 4 e 6 = outro produto com o mesmo NCM (do mesmo fornecedor ou de qualquer um).
+    if (ficha.nivel === 4 || ficha.nivel === 6) return { fonte: 'parecido', usos: ficha.usos, ...mudou };
+    return { fonte: 'aprendida', usos: ficha.usos, ...mudou };
   };
 
   const itens = r.itens.map((i: any) => {
@@ -2457,7 +2485,7 @@ app.get('/api/notas/:id', async (c) => {
 
     // O valor da linha E o padrao que a contabilidade fixou para este produto nesta
     // operacao: isso e o que a marca precisa dizer, venha de onde vier o valor.
-    const procedencia: Procedencia = ehPadraoFixado ? { fonte: 'fixada' } : procedenciaDe(i.cfop_origem);
+    const procedencia: Procedencia = ehPadraoFixado ? { fonte: 'fixada' } : procedenciaDe(i.cfop_origem, i.cfop_novo);
 
     // Descricao padronizada ainda igual a do fornecedor = ninguem ensinou.
     // Nao trava a linha (quem decide e o CFOP), mas nao some da tela.
@@ -2737,9 +2765,17 @@ app.post('/api/notas/:id/aplicar-cfop', async (c) => {
   return c.json({ ok: true, ...res });
 });
 
+/**
+ * Conferir, desconferir e marcar "não fechou" gravam trabalho: pedem alguma permissão de
+ * edição de nota (15/10). Antes bastava ver a nota - e o papel "Somente leitura" poderia
+ * conferir. Quem confere sem poder editar CFOP continua conferindo sem ensinar.
+ */
+const EDITAR_NOTA: Permissao[] = ['notas.editar_cfop', 'notas.editar_descricao', 'notas.editar_escrituracao'];
+
 app.post('/api/notas/:id/conferir', async (c) => {
   const sessao = c.get('sessao');
   exigir(sessao, 'notas.visualizar');
+  exigirAlguma(sessao, EDITAR_NOTA);
 
   const corpo = z
     .object({ itens: z.array(z.string()).max(500).optional() })
@@ -2769,6 +2805,7 @@ app.post('/api/notas/:id/conferir', async (c) => {
 /** Desfaz a conferência de um item — o "me arrependi, quero olhar de novo". */
 app.post('/api/itens/:id/desconferir', async (c) => {
   exigir(c.get('sessao'), 'notas.visualizar');
+  exigirAlguma(c.get('sessao'), EDITAR_NOTA);
   await c.get('repo').desconferirItem(c.req.param('id'));
   return c.json({ ok: true });
 });

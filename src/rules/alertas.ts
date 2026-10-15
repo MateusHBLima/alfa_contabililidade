@@ -442,9 +442,17 @@ export type EstiloLinha = {
  * invisivel para quem usa.
  */
 export type Procedencia = {
-  fonte: 'fixada' | 'aprendida' | 'manual' | 'perfil' | 'nenhuma';
-  /** quantas vezes a regra ja foi usada; so faz sentido em 'aprendida' */
+  /**
+   * 'parecido' (15/10, caso da Sprite): regra aprendida de OUTRO produto com o mesmo NCM
+   * (niveis 4 e 6). Antes tinha o mesmo selo "VOCES ENSINARAM" do proprio produto e entrava
+   * no "Conferir os que vieram certos" - a Sprite foi conferida 1102 por causa de outro
+   * refrigerante, e ela achou que tinha ensinado errado.
+   */
+  fonte: 'fixada' | 'aprendida' | 'parecido' | 'manual' | 'perfil' | 'nenhuma';
+  /** quantas vezes a regra ja foi usada; so faz sentido em 'aprendida' e 'parecido' */
   usos?: number;
+  /** o que a regra diz hoje, quando difere do valor da linha (a regra mudou depois) */
+  regraAgora?: string;
 };
 
 export function estiloDaLinha(
