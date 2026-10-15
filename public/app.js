@@ -121,7 +121,13 @@ $('#form-login').addEventListener('submit', async (e) => {
     await iniciar();
     if (r && r.deveTrocarSenha) abrirTrocaDeSenha(true);
   } catch (err) {
-    $('#login-erro').textContent = err.message || 'não foi possível entrar';
+    // 15/10 (Taís): depois de 5 senhas erradas a entrada fica bloqueada 15 minutos e,
+    // nesse tempo, até a senha certa recebe a mesma resposta. O servidor não diz "conta
+    // bloqueada" de propósito (revelaria que o e-mail existe); a tela explica o que fazer.
+    const msg = err.message || 'não foi possível entrar';
+    $('#login-erro').textContent = msg === 'e-mail ou senha inválidos'
+      ? 'E-mail ou senha inválidos. Se você errou a senha várias vezes, a entrada fica bloqueada por 15 minutos, mesmo com a senha certa: espere e tente de novo, ou use "Esqueci minha senha".'
+      : msg;
     $('#login-erro').classList.remove('hidden');
   } finally {
     btn.disabled = false;
@@ -432,6 +438,7 @@ function preencherDemo() {
 function mostrarLogin() {
   $('#tela-app').classList.add('hidden');
   $('#tela-login').classList.remove('hidden');
+  if (destinoDepoisDoLogin()) $('#form-login .sub').textContent = 'Entre para abrir a tela nova';
   // Desfaz a segunda etapa: voltar ao login com os campos travados e o botão
   // sumido deixaria a tela num beco sem saída.
   estado.desafioMfa = null;
@@ -705,6 +712,16 @@ async function iniciar() {
   montarSeletorCfop();
   carregarRegrasIcmsCache();
   await restaurarEndereco();
+  // Veio da tela nova sem estar logado: entrou, volta para ela.
+  const destino = destinoDepoisDoLogin();
+  if (destino) location.replace(destino);
+}
+
+/* Tela nova (/v2), 15/10: quem abre /v2 sem sessão é mandado para cá com ?voltar=/v2/…
+   e, depois de entrar, volta para lá. Só aceita caminho da própria v2, nunca outro site. */
+function destinoDepoisDoLogin() {
+  const v = new URLSearchParams(location.search).get('voltar') ?? '';
+  return /^\/v2\/(#[\w=&%.-]*)?$/.test(v) ? v : null;
 }
 
 async function carregarEmpresas() {

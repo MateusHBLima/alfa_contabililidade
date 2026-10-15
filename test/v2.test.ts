@@ -61,3 +61,28 @@ describe('v2: as mesmas regras de lista da tela de sempre', () => {
     expect(v2.nomeCompetencia('')).toBe('todos os meses');
   });
 });
+
+describe('15/10: entrar pela tela nova e voltar para ela', () => {
+  it('depois do login volta só para caminho da própria v2, nunca para outro site', async () => {
+    const { readFileSync } = await import('node:fs');
+    const APP = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+    const ini = APP.indexOf('function destinoDepoisDoLogin');
+    const fonte = APP.slice(ini, APP.indexOf('\n}', ini) + 2);
+    const destino = (search: string) => new Function('location', `${fonte}; return destinoDepoisDoLogin();`)({ search });
+    expect(destino('?voltar=' + encodeURIComponent('/v2/#t=nota&e=abc-1&m=2026-10&n=x_2'))).toBe('/v2/#t=nota&e=abc-1&m=2026-10&n=x_2');
+    expect(destino('?voltar=%2Fv2%2F')).toBe('/v2/');
+    expect(destino('')).toBeNull();
+    expect(destino('?voltar=' + encodeURIComponent('https://outro.site/v2/'))).toBeNull();
+    expect(destino('?voltar=' + encodeURIComponent('//outro.site/v2/'))).toBeNull();
+    expect(destino('?voltar=' + encodeURIComponent('/v2/../api/logout'))).toBeNull();
+    expect(destino('?voltar=' + encodeURIComponent('/v2/#x"><script>'))).toBeNull();
+  });
+
+  it('a tela nova manda para a entrada com o caminho de volta, e a entrada explica o bloqueio de 15 minutos', async () => {
+    const { readFileSync } = await import('node:fs');
+    const API = readFileSync(new URL('../public/v2/api.js', import.meta.url), 'utf8');
+    const APP = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+    expect(API).toContain("location.href = '/?voltar=' + encodeURIComponent(location.pathname + location.hash)");
+    expect(APP).toContain('a entrada fica bloqueada por 15 minutos, mesmo com a senha certa');
+  });
+});
