@@ -190,6 +190,7 @@
         <button data-view="vPapeis"><span class="num">P</span><span>Papéis<span class="sub">conjuntos de permissões</span></span></button>
         <button data-view="vCertificados"><span class="num">C</span><span>Certificados<span class="sub">A1 para buscar notas no SAT</span></span></button>
         <button data-view="vCaptura"><span class="num">S</span><span>Busca na SEF<span class="sub">teste e histórico</span></span></button>
+        <button data-view="vConversas"><span class="num">A</span><span>Conversas do assistente<span class="sub">o que a IA falou e os ajustes</span></span></button>
       </div>
     </nav>
     <div class="side-foot">
@@ -220,6 +221,7 @@
         <label class="fl" for="sel-mes">Mês</label>
         <select id="sel-mes"><option value="">todos</option></select>
       </div>
+      <button type="button" id="btn-assistente" class="btn assistente-btn" title="Converse para marcar produtos: automático (não precisa olhar) ou sempre conferir">✦ Assistente</button>
       <div class="who"><b id="usuario-nome">—</b><span id="usuario-email"></span></div>
     </div>
 
@@ -516,12 +518,13 @@
       <!-- ------------------------------------------------- RELATÓRIOS -->
       <section id="vRelatorios" class="hidden">
         <h1>Relatórios <span class="escopo-empresa" id="escopo-relatorios"></span></h1>
-        <p class="page-desc">Como as notas ficaram depois do tratamento, para bater com o outro sistema. No relatório por CFOP, clique numa linha para ver as notas daquele CFOP. O relatório por nota mostra cada nota com os itens, do jeito da capa e do detalhamento do Questor.</p>
+        <p class="page-desc">Como as notas ficaram depois do tratamento, para bater com o outro sistema. No relatório por CFOP, clique numa linha para ver as notas daquele CFOP. O relatório por fornecedor mostra cada produto de cada fornecedor com o CFOP que veio na nota ao lado do CFOP de entrada. O relatório por nota mostra cada nota com os itens, do jeito da capa e do detalhamento do Questor.</p>
         <div class="card">
           <div class="toolbar">
             <div class="filters" id="rel-qual">
               <button data-rel="cfop" class="on">Por CFOP</button>
               <button data-rel="produtos">Por produto</button>
+              <button data-rel="fornecedores" title="Cada fornecedor com os produtos dele, o CFOP que veio na nota e o CFOP de entrada que ficou">Por fornecedor</button>
               <button data-rel="nota" title="Cada nota com a capa, os itens e o total por CFOP — para conferir com o Questor nota a nota">Por nota</button>
               <button data-rel="divergencias" title="O mesmo produto, do mesmo fornecedor e na mesma operação, tratado com CFOPs diferentes">⚠ Divergências</button>
             </div>
@@ -728,6 +731,34 @@
         </div>
       </section>
 
+      <!-- --------------------------------------------------- CONVERSAS DO ASSISTENTE (19/10) -->
+      <section id="vConversas" class="hidden">
+        <h1>Conversas do assistente</h1>
+        <p class="page-desc">Tudo o que foi conversado com o assistente: o que foi escrito, o que a IA procurou e propôs,
+          o que foi confirmado ou deixado de lado e os ajustes pedidos, cada um preso à resposta a que se refere. Só leitura.</p>
+        <div class="card">
+          <header><h2>Conversas</h2>
+            <div class="conv-filtro">
+              <label>de <input type="date" id="conv-de"></label>
+              <label>até <input type="date" id="conv-ate"></label>
+              <label><input type="checkbox" id="conv-ajuste"> só com ajuste</label>
+              <button class="btn sm" type="button" id="conv-ver">Ver</button>
+            </div>
+          </header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-conversas">
+              <thead><tr><th>Última mensagem</th><th>Empresa</th><th>Quem</th><th>Começou com</th><th class="num">Perguntas</th>
+                <th class="num">Propostas</th><th class="num">Confirmadas</th><th class="num">De lado</th><th class="num">Ajustes</th><th class="num">Erros</th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+        <div class="card hidden" id="conv-detalhe">
+          <header><h2 id="conv-titulo"></h2><button class="btn sm" type="button" id="conv-fechar" style="margin-left:auto">Fechar</button></header>
+          <div class="body" id="conv-msgs"></div>
+        </div>
+      </section>
+
       <!-- --------------------------------------------------- REGRAS -->
       <section id="vRegras" class="hidden">
         <h1>Padrões aprendidos <span class="escopo-empresa" id="escopo-regras"></span></h1>
@@ -764,6 +795,21 @@
     </footer>
   </div>
 </div>
+
+<!-- Assistente (16/10, pedido da Taís): ela conversa e a IA propõe marcas de produto.
+     Nada muda sem o clique dela em "Confirmar". -->
+<aside id="assistente" class="assistente hidden" aria-label="Assistente">
+  <header>
+    <div><b>Assistente</b><span class="tiny" id="ass-empresa"></span></div>
+    <button type="button" class="btn sm" id="ass-fechar" title="Fechar">✕</button>
+  </header>
+  <div id="ass-msgs" class="ass-msgs"></div>
+  <form id="ass-form" class="ass-form">
+    <textarea id="ass-texto" rows="2" maxlength="2000" placeholder="Ex.: o guaraná da Bebidas Modelo é sempre 1403, não precisa olhar"></textarea>
+    <button class="btn primary" id="ass-enviar">Enviar</button>
+  </form>
+  <p class="ass-rodape">A IA só sugere. Nada muda sem você confirmar.</p>
+</aside>
 
 <script src="/periodo.js"></script>
 <script src="/app.js"></script>

@@ -649,6 +649,441 @@ export class Repo {
    * Devolve quantos itens foram marcados.
    */
   /**
+   * Grava (ou promove a fixa) as regras de CFOP de uma lista de ações, em lote. Saiu de
+   * dentro do fixarPadraoDeItens (16/10) para o assistente usar o mesmo caminho: o
+   * "automático" que a contadora confirma é a mesma regra fixa do botão "fixar".
+   */
+  private async gravarRegrasFixas(empresaId: string, acoes: { nivel: Nivel; chave: string; valor: string }[]): Promise<void> {
+    // Dois itens da MESMA nota podem gerar a mesma regra - e geram, sempre que
+    // o mesmo produto aparece duas vezes (lotes diferentes, precos diferentes)
+    // ou quando dois itens dividem o codigo de barras. Sem juntar aqui, o lote
+    // manda dois INSERT com a mesma chave e o banco derruba a operacao inteira,
+    // levando junto os 900 itens que estavam certos. O ultimo vale, que e como
+    // se comporta o caminho de um item so: cada gravacao sobrescreve a anterior.
+    const porChave = new Map<string, { nivel: Nivel; chave: string; valor: string }>();
+    for (const a of acoes) porChave.set(`${a.nivel}\x00${a.chave}`, a);
+    const unicas = [...porChave.values()];
+
+    // Quais dessas regras ja existem? Uma consulta a cada 40 pares, nao uma por
+    // regra. Cada par gasta 2 parametros; mais 3 fixos deixa folga no teto de 100.
+    const POR_BUSCA = 40;
+    const existentes = new Map<string, string>();
+    for (let i = 0; i < unicas.length; i += POR_BUSCA) {
+      const fatia = unicas.slice(i, i + POR_BUSCA);
+      const onde = fatia.map(() => '(nivel = ? AND chave = ?)').join(' OR ');
+      const binds: unknown[] = [this.tenant, empresaId, 'cfop'];
+      for (const a of fatia) binds.push(a.nivel, a.chave);
+      const { results } = await this.db
+        .prepare(
+          `SELECT id, nivel, chave FROM regras
+            WHERE tenant_id = ? AND empresa_id = ? AND campo = ? AND (${onde})`,
+        )
+        .bind(...binds)
+        .all<any>();
+      for (const r of results) existentes.set(`${r.nivel}\x00${r.chave}`, r.id);
+    }
+
+    // Escrever em lotes. `batch` e uma ida e volta so, nao uma por comando.
+    const quem = this.ctx.sessao.usuarioId;
+    const quando = agora();
+    const comandos = unicas.map((a) => {
+      const id0 = existentes.get(`${a.nivel}\x00${a.chave}`);
+      return id0
+        ? this.db
+            .prepare(
+              `UPDATE regras SET valor = ?, fixada = 1, fixada_por = ?, fixada_em = ?,
+                 atualizada_em = ?, suspeita = 0, erros_seguidos = 0
+               WHERE tenant_id = ? AND id = ?`,
+            )
+            .bind(a.valor, quem, quando, quando, this.tenant, id0)
+        : this.db
+            .prepare(
+              `INSERT INTO regras
+                 (id, tenant_id, empresa_id, nivel, chave, campo, valor, confianca, ativa,
+                  fixada, fixada_por, fixada_em, criada_em, criada_por)
+               VALUES (?,?,?,?,?,?,?,0.5,1,1,?,?,?,?) ${SE_A_REGRA_JA_EXISTE}`,
+            )
+            .bind(id(), this.tenant, empresaId, a.nivel, a.chave, 'cfop', a.valor,
+                  quem, quando, quando, quem);
+    });
+
+    const POR_LOTE = 100;
+    for (let i = 0; i < comandos.length; i += POR_LOTE) {
+      await this.db.batch(comandos.slice(i, i + POR_LOTE));
+    }
+  }
+
+  // ---------------------------------------------------------------- assistente (16/10)
+  //
+  // A Taís pediu "a inteligência artificial para eu conversar": dizer quais produtos
+  // ficam como "precisa atenção" e quais "não têm que mudar porque já são automáticos".
+  // Daqui saem só a busca (leitura) e as duas marcas, que só gravam depois que ELA
+  // confirma no botão. A IA nunca chama estes métodos sozinha.
+
+  /** Produtos desta empresa que batem com o texto, por fornecedor, código e CFOP que veio. */
+  async produtosParaAssistente(empresaId: string, texto: string): Promise<any[]> {
+    this.exigirEmpresa(empresaId);
+    const colunas = `n.emit_cnpj AS cnpj, MAX(n.emit_nome) AS fornecedor, TRIM(i.c_prod) AS c_prod,
+                TRIM(COALESCE(i.cfop_original, '')) AS cfop_veio,
+                MAX(COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original)) AS descricao,
+                MAX(i.x_prod_original) AS descricao_original, MAX(i.c_ean) AS c_ean,
+                GROUP_CONCAT(COALESCE(NULLIF(TRIM(i.cfop_novo), ''), '(sem CFOP)'), '|') AS entradas,
+                COUNT(*) AS itens, MAX(n.dh_emi) AS ultima`;
+    const onde = `n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0
+            AND TRIM(COALESCE(i.c_prod, '')) <> ''`;
+    const grupo = `GROUP BY n.emit_cnpj, TRIM(i.c_prod), TRIM(COALESCE(i.cfop_original, ''))`;
+    const f = filtroDeBusca(texto);
+    let { results } = await this.db
+      .prepare(
+        `SELECT ${colunas}
+           FROM itens i JOIN notas n ON n.id = i.nota_id
+          WHERE ${onde} AND ${f.sql}
+          ${grupo}
+          ORDER BY ultima DESC
+          LIMIT 25`,
+      )
+      .bind(this.tenant, empresaId, ...f.binds)
+      .all<any>();
+    // 16/10 (bateria): nas notas o nome vem abreviado ("REFRIG", "DET", "PAP TOALHA") e ela
+    // escreve por extenso. Sem nada exato, uma segunda volta aproximada sobre os produtos da
+    // empresa: cada palavra vale 2 se aparece inteira e 1 se uma palavra do produto é o
+    // começo dela ("REFRIG" é o começo de "refrigerante"). Os 25 melhores.
+    let aproximado = false;
+    if (results.length === 0) {
+      const palavras = palavrasAproximadas(texto);
+      if (palavras.length) {
+        const { results: todos } = await this.db
+          .prepare(`SELECT ${colunas} FROM itens i JOIN notas n ON n.id = i.nota_id WHERE ${onde} ${grupo}`)
+          .bind(this.tenant, empresaId)
+          .all<any>();
+        results = todos
+          .map((r: any) => ({ r, pontos: pontosAproximados(palavras, r) }))
+          .filter((x) => x.pontos > 0)
+          .sort((a, b) => b.pontos - a.pontos || String(b.r.ultima).localeCompare(String(a.r.ultima)))
+          .slice(0, 25)
+          .map((x) => x.r);
+        aproximado = results.length > 0;
+      }
+    }
+    if (results.length === 0) return [];
+    const atencao = await this.atencoesDaEmpresa(empresaId);
+    const fixas = new Map<string, string>();
+    for (const cnpj of new Set(results.map((r: any) => String(r.cnpj)))) {
+      for (const x of await this.regrasFixadasDoFornecedor(empresaId, cnpj)) fixas.set(`${x.nivel} ${x.chave}`, x.valor);
+    }
+    return results.map((r: any) => {
+      const conta = new Map<string, number>();
+      for (const c of String(r.entradas ?? '').split('|').filter(Boolean)) conta.set(c, (conta.get(c) ?? 0) + 1);
+      const entradas = [...conta.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      const item = { cProd: r.c_prod, cEAN: r.c_ean, CFOP: r.cfop_veio } as any;
+      const chave = chaveDoNivel(item, String(r.cnpj), 1, 'cfop');
+      const fixado = chave ? fixas.get(`1 ${chave}`) ?? null : null;
+      const marca = atencao.get(`${r.cnpj}|${r.c_prod}`);
+      return {
+        fornecedor: r.fornecedor, cnpj: r.cnpj, codigo: r.c_prod, produto: r.descricao,
+        na_nota: r.descricao_original !== r.descricao ? r.descricao_original : undefined,
+        cfop_que_veio: r.cfop_veio || '(vazio)',
+        entradas: entradas.map(([c, n]) => `${c} (${n}x)`).join(', '),
+        cfop_mais_usado: entradas.find(([c]) => /^\d{4}$/.test(c))?.[0] ?? null,
+        itens: Number(r.itens), ultima_nota: String(r.ultima ?? '').slice(0, 10),
+        ja_automatico: fixado !== null, cfop_fixado: fixado ?? undefined,
+        em_atencao: !!marca, observacao_atencao: marca?.observacao ?? undefined,
+        ...(aproximado ? { aproximado: true } : {}),
+      };
+    });
+  }
+
+  /**
+   * Confere uma marca proposta contra o banco: o produto existe nesta empresa, com este
+   * fornecedor, código e CFOP que veio. Para "automático", o CFOP de entrada é o que ela
+   * disse ou, sem isso, o mais usado. Devolve a proposta completa ou o motivo da recusa.
+   */
+  async validarMarcaProduto(empresaId: string, p: {
+    tipo: string; cnpj: string; codigo: string; cfopVeio?: string; cfop?: string; observacao?: string;
+  }): Promise<{ ok: true; proposta: any } | { ok: false; erro: string }> {
+    this.exigirEmpresa(empresaId);
+    if (!['automatico', 'atencao', 'tirar_atencao'].includes(p.tipo)) return { ok: false, erro: 'tipo desconhecido' };
+    const cnpj = String(p.cnpj ?? '').replace(/\D/g, '');
+    const codigo = String(p.codigo ?? '').trim();
+    if (!cnpj || !codigo) return { ok: false, erro: 'falta fornecedor ou código' };
+    const saida = p.cfopVeio === undefined || p.cfopVeio === '(vazio)' ? null : String(p.cfopVeio).trim();
+    const linha = await this.db
+      .prepare(
+        `SELECT MAX(n.emit_nome) AS fornecedor, COUNT(*) AS itens,
+                MAX(COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original)) AS descricao,
+                GROUP_CONCAT(COALESCE(NULLIF(TRIM(i.cfop_novo), ''), ''), '|') AS entradas
+           FROM itens i JOIN notas n ON n.id = i.nota_id
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.emit_cnpj = ? AND TRIM(i.c_prod) = ?
+            AND (? IS NULL OR TRIM(COALESCE(i.cfop_original, '')) = ?)
+            AND n.cancelada_em IS NULL AND n.estorno = 0`,
+      )
+      .bind(this.tenant, empresaId, cnpj, codigo, saida, saida ?? '')
+      .first<any>();
+    if (!linha || Number(linha.itens) === 0) return { ok: false, erro: `produto ${codigo} do fornecedor ${cnpj} não encontrado nesta empresa` };
+    let cfop: string | undefined;
+    if (p.tipo === 'automatico') {
+      if (saida === null) return { ok: false, erro: 'automático precisa do CFOP que veio na nota' };
+      const conta = new Map<string, number>();
+      for (const c of String(linha.entradas ?? '').split('|').filter((x) => /^\d{4}$/.test(x))) conta.set(c, (conta.get(c) ?? 0) + 1);
+      cfop = String(p.cfop ?? '').trim() || [...conta.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (!cfop || !/^[123]\d{3}$/.test(cfop)) return { ok: false, erro: 'automático precisa de um CFOP de entrada (1xxx, 2xxx ou 3xxx)' };
+    }
+    return {
+      ok: true,
+      proposta: {
+        tipo: p.tipo, cnpj, fornecedor: linha.fornecedor ?? '', codigo, produto: linha.descricao ?? '',
+        cfopVeio: saida, cfop, observacao: String(p.observacao ?? '').trim().slice(0, 300) || undefined,
+        itens: Number(linha.itens),
+      },
+    };
+  }
+
+  /** "Automático, não precisa olhar": a regra fixa do produto, como o botão "fixar" (níveis 1 e 2). */
+  async fixarProduto(empresaId: string, cnpj: string, codigo: string, cfopVeio: string, cfop: string): Promise<boolean> {
+    this.exigirEmpresa(empresaId);
+    const l = await this.db
+      .prepare(
+        `SELECT i.*, n.emit_nome FROM itens i JOIN notas n ON n.id = i.nota_id
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.emit_cnpj = ? AND TRIM(i.c_prod) = ?
+            AND TRIM(COALESCE(i.cfop_original, '')) = ?
+          ORDER BY n.dh_emi DESC LIMIT 1`,
+      )
+      .bind(this.tenant, empresaId, cnpj, codigo, cfopVeio)
+      .first<any>();
+    if (!l) return false;
+    const item = {
+      nItem: l.n_item, cProd: l.c_prod, cEAN: l.c_ean, xProd: l.x_prod_original,
+      NCM: l.ncm, CEST: l.cest, CFOP: l.cfop_original, uCom: l.unidade,
+      qCom: l.quantidade, vUnCom: l.valor_unitario, vProd: l.valor_total,
+      cstIcms: null, temIbsCbs: false,
+    };
+    const acoes: { nivel: Nivel; chave: string; valor: string }[] = [];
+    for (const a of aprender({
+      item: item as any, emitCnpj: cnpj, campo: 'cfop', valorFinal: cfop,
+      sugestao: null, fixar: true, apenasNiveis: [1, 2],
+    })) {
+      if (a.tipo === 'criar') acoes.push({ nivel: a.nivel, chave: a.chave, valor: a.valor });
+    }
+    if (acoes.length === 0) return false;
+    // Já está fixado assim (ela confirmou de novo): não regrava nem repete a trilha.
+    const fixas = new Map((await this.regrasFixadasDoFornecedor(empresaId, cnpj)).map((r) => [`${r.nivel}\x00${r.chave}`, r.valor]));
+    if (acoes.every((a) => fixas.get(`${a.nivel}\x00${a.chave}`) === a.valor)) return false;
+    await this.gravarRegrasFixas(empresaId, acoes);
+    await this.aud.registrarLote([
+      this.evento({
+        acao: 'alterar', entidade: 'empresa', entidadeId: empresaId, campo: 'produto_automatico',
+        valorAntes: null,
+        valorDepois: `${l.emit_nome ?? cnpj} cód. ${codigo} (veio ${cfopVeio}) sempre ${cfop} — pelo assistente`,
+        origem: 'manual',
+      }),
+    ]);
+    return true;
+  }
+
+  /** Liga ou desliga o "precisa atenção" de um produto de um fornecedor. Devolve se mudou. */
+  async marcarAtencao(
+    empresaId: string, cnpj: string, codigo: string, descricao: string, observacao: string | undefined, ligar: boolean,
+  ): Promise<boolean> {
+    this.exigirEmpresa(empresaId);
+    const quando = agora();
+    const r = ligar
+      ? await this.db
+        .prepare(
+          `INSERT INTO produto_atencao
+             (id, tenant_id, empresa_id, emit_cnpj, c_prod, descricao, observacao, criado_por, criado_em)
+           VALUES (?,?,?,?,?,?,?,?,?)
+           ON CONFLICT (tenant_id, empresa_id, emit_cnpj, c_prod) DO UPDATE SET
+             descricao = excluded.descricao, observacao = excluded.observacao,
+             criado_por = excluded.criado_por, criado_em = excluded.criado_em, removido_em = NULL
+           WHERE produto_atencao.removido_em IS NOT NULL OR COALESCE(produto_atencao.observacao, '') <> COALESCE(excluded.observacao, '')`,
+        )
+        .bind(id(), this.tenant, empresaId, cnpj, codigo, descricao, observacao ?? null, this.ctx.sessao.usuarioId, quando)
+        .run()
+      : await this.db
+        .prepare(
+          `UPDATE produto_atencao SET removido_em = ?
+            WHERE tenant_id = ? AND empresa_id = ? AND emit_cnpj = ? AND c_prod = ? AND removido_em IS NULL`,
+        )
+        .bind(quando, this.tenant, empresaId, cnpj, codigo)
+        .run();
+    const mudou = Number(r.meta?.changes ?? 0) > 0;
+    if (mudou) {
+      const desc = `${descricao} (cód. ${codigo}, fornecedor ${cnpj})${observacao ? ` — ${observacao}` : ''}`;
+      await this.aud.registrarLote([
+        this.evento({
+          acao: 'alterar', entidade: 'empresa', entidadeId: empresaId, campo: 'produto_atencao',
+          valorAntes: ligar ? null : desc, valorDepois: ligar ? `${desc} — pelo assistente` : null, origem: 'manual',
+        }),
+      ]);
+    }
+    return mudou;
+  }
+
+  /** Produtos com "precisa atenção" ligado: `cnpj|código` -> observação. */
+  async atencoesDaEmpresa(empresaId: string, cnpj?: string): Promise<Map<string, { observacao: string | null; descricao: string | null }>> {
+    this.exigirEmpresa(empresaId);
+    const { results } = await this.db
+      .prepare(
+        `SELECT emit_cnpj, c_prod, descricao, observacao FROM produto_atencao
+          WHERE tenant_id = ? AND empresa_id = ? AND removido_em IS NULL ${cnpj ? 'AND emit_cnpj = ?' : ''}`,
+      )
+      .bind(this.tenant, empresaId, ...(cnpj ? [cnpj] : []))
+      .all<any>();
+    return new Map(results.map((r: any) => [`${r.emit_cnpj}|${r.c_prod}`, { observacao: r.observacao, descricao: r.descricao }]));
+  }
+
+  // ---------------------------------------------------------------- conversas do assistente (19/10)
+
+  /**
+   * Grava uma troca do painel: o que ela escreveu e a resposta da IA (com as buscas que a IA
+   * fez, as propostas, o gasto, o tempo e o erro, se houve). A conversa só continua para a
+   * mesma pessoa na mesma empresa; um id que não é dela abre uma conversa nova.
+   *
+   * O ajuste anotado pela IA aponta para a resposta ANTERIOR da IA: é ela que a contadora
+   * corrigiu. Se não houver anterior, aponta para esta.
+   */
+  async gravarTrocaAssistente(empresaId: string, conversaId: string | undefined, t: {
+    ela: string; texto: string; passos?: unknown[]; propostas?: unknown[]; uso?: unknown; modelo?: string;
+    ms: number; erro?: string; ajustes?: { oQueMudar: string; sobre?: string }[];
+  }): Promise<{ conversaId: string; mensagemId: string }> {
+    this.exigirEmpresa(empresaId);
+    const s = this.ctx.sessao;
+    const quando = agora();
+    const existe = conversaId
+      ? await this.db
+        .prepare('SELECT id FROM assistente_conversa WHERE id = ? AND tenant_id = ? AND empresa_id = ? AND usuario_id = ?')
+        .bind(conversaId, this.tenant, empresaId, s.usuarioId)
+        .first<any>()
+      : null;
+    const cid: string = existe?.id ?? id();
+    const ultima = existe
+      ? await this.db
+        .prepare(
+          `SELECT MAX(ordem) AS ordem,
+                  (SELECT id FROM assistente_mensagem WHERE conversa_id = ? AND papel = 'assistente' ORDER BY ordem DESC LIMIT 1) AS resposta
+             FROM assistente_mensagem WHERE conversa_id = ?`,
+        )
+        .bind(cid, cid)
+        .first<any>()
+      : null;
+    const ordem = Number(ultima?.ordem ?? 0);
+    const idEla = id();
+    const idIa = id();
+    const json = (v: unknown) => (v == null ? null : JSON.stringify(v));
+    const lote: D1PreparedStatement[] = [
+      existe
+        ? this.db.prepare('UPDATE assistente_conversa SET atualizada_em = ? WHERE id = ?').bind(quando, cid)
+        : this.db
+          .prepare(
+            `INSERT INTO assistente_conversa (id, tenant_id, empresa_id, usuario_id, usuario_nome, iniciada_em, atualizada_em)
+             VALUES (?,?,?,?,?,?,?)`,
+          )
+          .bind(cid, this.tenant, empresaId, s.usuarioId, s.nome ?? null, quando, quando),
+      this.db
+        .prepare(`INSERT INTO assistente_mensagem (id, conversa_id, ordem, papel, texto, criada_em) VALUES (?,?,?,'ela',?,?)`)
+        .bind(idEla, cid, ordem + 1, t.ela, quando),
+      this.db
+        .prepare(
+          `INSERT INTO assistente_mensagem (id, conversa_id, ordem, papel, texto, passos, propostas, uso, modelo, ms, erro, criada_em)
+           VALUES (?,?,?,'assistente',?,?,?,?,?,?,?,?)`,
+        )
+        .bind(idIa, cid, ordem + 2, t.texto, json(t.passos?.length ? t.passos : null), json(t.propostas?.length ? t.propostas : null),
+          json(t.uso), t.modelo ?? null, Math.round(t.ms), t.erro ?? null, quando),
+    ];
+    for (const a of t.ajustes ?? []) {
+      lote.push(this.db
+        .prepare(
+          `INSERT INTO assistente_evento (id, conversa_id, mensagem_id, tipo, origem, texto, sobre, usuario_id, usuario_nome, criado_em)
+           VALUES (?,?,?,'ajuste','ia',?,?,?,?,?)`,
+        )
+        .bind(id(), cid, ultima?.resposta ?? idIa, a.oQueMudar, a.sobre ?? null, s.usuarioId, s.nome ?? null, quando));
+    }
+    await this.db.batch(lote);
+    return { conversaId: cid, mensagemId: idIa };
+  }
+
+  /**
+   * O que aconteceu depois com uma resposta da IA: ela confirmou ou deixou de lado uma
+   * proposta, ou escreveu no "Ajustar" o que estava errado. Sempre preso à resposta.
+   */
+  async eventoAssistente(mensagemId: string, e: { tipo: 'confirmou' | 'descartou' | 'ajuste'; proposta?: unknown; texto?: string }): Promise<boolean> {
+    const m = await this.db
+      .prepare(
+        `SELECT m.id, m.conversa_id, c.empresa_id FROM assistente_mensagem m
+           JOIN assistente_conversa c ON c.id = m.conversa_id
+          WHERE m.id = ? AND c.tenant_id = ? AND m.papel = 'assistente'`,
+      )
+      .bind(mensagemId, this.tenant)
+      .first<any>();
+    if (!m) return false;
+    this.exigirEmpresa(m.empresa_id);
+    const s = this.ctx.sessao;
+    await this.db
+      .prepare(
+        `INSERT INTO assistente_evento (id, conversa_id, mensagem_id, tipo, origem, proposta, texto, usuario_id, usuario_nome, criado_em)
+         VALUES (?,?,?,?,'tela',?,?,?,?,?)`,
+      )
+      .bind(id(), m.conversa_id, m.id, e.tipo, e.proposta == null ? null : JSON.stringify(e.proposta), e.texto ?? null,
+        s.usuarioId, s.nome ?? null, agora())
+      .run();
+    return true;
+  }
+
+  /** Conversas mexidas no intervalo (ISO, [de, ate)), as mais recentes primeiro, com os números de cada uma. */
+  async conversasDoAssistente(de: string, ate: string, soComAjuste = false): Promise<any[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT c.id, c.empresa_id, e.razao_social, c.usuario_nome, c.iniciada_em, c.atualizada_em,
+                (SELECT COUNT(*) FROM assistente_mensagem m WHERE m.conversa_id = c.id AND m.papel = 'ela') AS perguntas,
+                (SELECT COUNT(*) FROM assistente_mensagem m WHERE m.conversa_id = c.id AND m.erro IS NOT NULL) AS erros,
+                (SELECT COALESCE(SUM(json_array_length(m.propostas)), 0) FROM assistente_mensagem m WHERE m.conversa_id = c.id) AS propostas,
+                (SELECT COUNT(*) FROM assistente_evento v WHERE v.conversa_id = c.id AND v.tipo = 'confirmou') AS confirmadas,
+                (SELECT COUNT(*) FROM assistente_evento v WHERE v.conversa_id = c.id AND v.tipo = 'descartou') AS descartadas,
+                (SELECT COUNT(*) FROM assistente_evento v WHERE v.conversa_id = c.id AND v.tipo = 'ajuste') AS ajustes,
+                (SELECT texto FROM assistente_mensagem m WHERE m.conversa_id = c.id AND m.papel = 'ela' ORDER BY m.ordem LIMIT 1) AS primeira
+           FROM assistente_conversa c
+           LEFT JOIN empresas e ON e.id = c.empresa_id
+          WHERE c.tenant_id = ? AND c.atualizada_em >= ? AND c.atualizada_em < ?
+          ORDER BY c.atualizada_em DESC
+          LIMIT 300`,
+      )
+      .bind(this.tenant, de, ate)
+      .all<any>();
+    return results.filter((r: any) => podeVerEmpresa(this.ctx.sessao, r.empresa_id) && (!soComAjuste || Number(r.ajustes) > 0));
+  }
+
+  /** Uma conversa inteira, em ordem, com o que aconteceu em cada resposta. */
+  async conversaDoAssistente(conversaId: string): Promise<any | null> {
+    const c = await this.db
+      .prepare(
+        `SELECT c.id, c.empresa_id, e.razao_social, c.usuario_nome, c.iniciada_em, c.atualizada_em
+           FROM assistente_conversa c LEFT JOIN empresas e ON e.id = c.empresa_id
+          WHERE c.id = ? AND c.tenant_id = ?`,
+      )
+      .bind(conversaId, this.tenant)
+      .first<any>();
+    if (!c) return null;
+    this.exigirEmpresa(c.empresa_id);
+    const ler = (v: unknown) => { if (v == null) return null; try { return JSON.parse(String(v)); } catch { return null; } };
+    const [{ results: msgs }, { results: evs }] = await Promise.all([
+      this.db.prepare('SELECT * FROM assistente_mensagem WHERE conversa_id = ? ORDER BY ordem').bind(conversaId).all<any>(),
+      this.db.prepare('SELECT * FROM assistente_evento WHERE conversa_id = ? ORDER BY criado_em, id').bind(conversaId).all<any>(),
+    ]);
+    const eventos = evs.map((v: any) => ({
+      id: v.id, mensagemId: v.mensagem_id, tipo: v.tipo, origem: v.origem, proposta: ler(v.proposta),
+      texto: v.texto, sobre: v.sobre, usuario: v.usuario_nome, quando: v.criado_em,
+    }));
+    return {
+      ...c,
+      mensagens: msgs.map((m: any) => ({
+        id: m.id, ordem: m.ordem, papel: m.papel, texto: m.texto, quando: m.criada_em, ms: m.ms, modelo: m.modelo, erro: m.erro,
+        passos: ler(m.passos) ?? [], propostas: ler(m.propostas) ?? [], uso: ler(m.uso),
+        eventos: eventos.filter((v) => v.mensagemId === m.id),
+      })),
+    };
+  }
+
+  /**
    * Fixa o padrao de VARIOS itens de uma vez, cada um com o SEU proprio CFOP.
    *
    * E a diferenca para "Fixar para o fornecedor": aquele aplica UM CFOP a tudo
@@ -724,63 +1159,7 @@ export class Repo {
 
     if (acoes.length === 0) return { fixados: 0, semCfop };
 
-    // Dois itens da MESMA nota podem gerar a mesma regra - e geram, sempre que
-    // o mesmo produto aparece duas vezes (lotes diferentes, precos diferentes)
-    // ou quando dois itens dividem o codigo de barras. Sem juntar aqui, o lote
-    // manda dois INSERT com a mesma chave e o banco derruba a operacao inteira,
-    // levando junto os 900 itens que estavam certos. O ultimo vale, que e como
-    // se comporta o caminho de um item so: cada gravacao sobrescreve a anterior.
-    const porChave = new Map<string, { nivel: Nivel; chave: string; valor: string }>();
-    for (const a of acoes) porChave.set(`${a.nivel}\x00${a.chave}`, a);
-    const unicas = [...porChave.values()];
-
-    // Quais dessas regras ja existem? Uma consulta a cada 40 pares, nao uma por
-    // regra. Cada par gasta 2 parametros; mais 3 fixos deixa folga no teto de 100.
-    const POR_BUSCA = 40;
-    const existentes = new Map<string, string>();
-    for (let i = 0; i < unicas.length; i += POR_BUSCA) {
-      const fatia = unicas.slice(i, i + POR_BUSCA);
-      const onde = fatia.map(() => '(nivel = ? AND chave = ?)').join(' OR ');
-      const binds: unknown[] = [this.tenant, empresaId, 'cfop'];
-      for (const a of fatia) binds.push(a.nivel, a.chave);
-      const { results } = await this.db
-        .prepare(
-          `SELECT id, nivel, chave FROM regras
-            WHERE tenant_id = ? AND empresa_id = ? AND campo = ? AND (${onde})`,
-        )
-        .bind(...binds)
-        .all<any>();
-      for (const r of results) existentes.set(`${r.nivel}\x00${r.chave}`, r.id);
-    }
-
-    // Escrever em lotes. `batch` e uma ida e volta so, nao uma por comando.
-    const quem = this.ctx.sessao.usuarioId;
-    const quando = agora();
-    const comandos = unicas.map((a) => {
-      const id0 = existentes.get(`${a.nivel}\x00${a.chave}`);
-      return id0
-        ? this.db
-            .prepare(
-              `UPDATE regras SET valor = ?, fixada = 1, fixada_por = ?, fixada_em = ?,
-                 atualizada_em = ?, suspeita = 0, erros_seguidos = 0
-               WHERE tenant_id = ? AND id = ?`,
-            )
-            .bind(a.valor, quem, quando, quando, this.tenant, id0)
-        : this.db
-            .prepare(
-              `INSERT INTO regras
-                 (id, tenant_id, empresa_id, nivel, chave, campo, valor, confianca, ativa,
-                  fixada, fixada_por, fixada_em, criada_em, criada_por)
-               VALUES (?,?,?,?,?,?,?,0.5,1,1,?,?,?,?) ${SE_A_REGRA_JA_EXISTE}`,
-            )
-            .bind(id(), this.tenant, empresaId, a.nivel, a.chave, 'cfop', a.valor,
-                  quem, quando, quando, quem);
-    });
-
-    const POR_LOTE = 100;
-    for (let i = 0; i < comandos.length; i += POR_LOTE) {
-      await this.db.batch(comandos.slice(i, i + POR_LOTE));
-    }
+    await this.gravarRegrasFixas(empresaId, acoes);
 
     const fixados = linhas.length - semCfop;
 
@@ -1192,7 +1571,7 @@ export class Repo {
    */
   async buscarItens(
     empresaId: string,
-    filtro: { texto?: string; produto?: string; unidade?: string; competencia?: string; periodo?: Periodo },
+    filtro: { texto?: string; produto?: string; unidade?: string; competencia?: string; periodo?: Periodo; cnpj?: string; saida?: string },
   ): Promise<any[]> {
     this.exigirEmpresa(empresaId);
     const onde: string[] = [];
@@ -1207,6 +1586,15 @@ export class Repo {
       binds.push(filtro.produto);
       onde.push("UPPER(TRIM(COALESCE(i.unidade, ''))) = UPPER(TRIM(?))");
       binds.push(filtro.unidade ?? '');
+    }
+    // Do relatório por fornecedor (16/10): só os itens daquele fornecedor e daquele CFOP que veio.
+    if (filtro.cnpj) {
+      onde.push('n.emit_cnpj = ?');
+      binds.push(filtro.cnpj);
+    }
+    if (filtro.saida !== undefined) {
+      onde.push("TRIM(COALESCE(i.cfop_original, '')) = ?");
+      binds.push(filtro.saida);
     }
     const r = this.recorteCompetencia(filtro.competencia, filtro.periodo);
     const { results } = await this.db
@@ -1391,7 +1779,12 @@ export class Repo {
                 (SELECT COUNT(*) FROM itens i JOIN regras r ON r.id = substr(i.cfop_origem, 7)
                   WHERE i.nota_id = n.id AND i.revisado = 0 AND i.cfop_origem LIKE 'regra:%'
                     AND r.ativa = 1 AND r.suspeita = 0 AND (r.fixada = 1 OR r.nivel IN (1, 2, 3, 5))
-                    AND r.valor = TRIM(i.cfop_novo)) AS itens_prontos
+                    AND r.valor = TRIM(i.cfop_novo)
+                    -- Produto que ela pediu para sempre olhar (16/10) nunca vem pronto.
+                    AND NOT EXISTS (SELECT 1 FROM produto_atencao a
+                                     WHERE a.tenant_id = n.tenant_id AND a.empresa_id = n.empresa_id
+                                       AND a.emit_cnpj = n.emit_cnpj AND a.c_prod = TRIM(i.c_prod)
+                                       AND a.removido_em IS NULL)) AS itens_prontos
          FROM notas n WHERE n.tenant_id = ? AND n.empresa_id = ? ${filtro}
          ORDER BY n.dh_emi DESC LIMIT 500`,
       )
@@ -2018,6 +2411,40 @@ export class Repo {
     return results;
   }
 
+  /**
+   * Relatório por fornecedor e produto (16/10, pedido da Taís): cada produto de cada
+   * fornecedor, separado pelo CFOP que veio na nota (5102, 5949...), com os CFOPs de
+   * entrada que ficaram. Ela trata e confere no fim por aqui, batendo o olho no CFOP
+   * que veio ao lado do que ficou. Só leitura.
+   */
+  async relatorioFornecedores(empresaId: string, competencia?: string, periodo?: Periodo): Promise<any[]> {
+    this.exigirEmpresa(empresaId);
+    const r = this.recorteCompetencia(competencia, periodo);
+    const { results } = await this.db
+      .prepare(
+        `SELECT n.emit_cnpj AS cnpj, MIN(n.emit_nome) AS fornecedor,
+                MIN(COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original)) AS descricao,
+                UPPER(TRIM(COALESCE(i.unidade, ''))) AS unidade,
+                TRIM(COALESCE(i.cfop_original, '')) AS cfop_veio,
+                SUM(i.quantidade) AS quantidade, SUM(i.valor_total) AS valor,
+                COUNT(*) AS itens, SUM(i.revisado) AS conferidos,
+                COUNT(DISTINCT n.id) AS notas,
+                GROUP_CONCAT(DISTINCT i.c_prod) AS codigos,
+                GROUP_CONCAT(COALESCE(NULLIF(TRIM(i.cfop_novo), ''), '(sem CFOP)'), '|') AS entradas,
+                MIN(i.x_prod_original) AS descricao_original,
+                COUNT(DISTINCT i.x_prod_original) AS descricoes_originais
+           FROM itens i JOIN notas n ON n.id = i.nota_id
+          WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0 ${r.sql}
+          GROUP BY n.emit_cnpj,
+                   UPPER(TRIM(COALESCE(NULLIF(TRIM(i.x_prod_novo), ''), i.x_prod_original))),
+                   UPPER(TRIM(COALESCE(i.unidade, ''))),
+                   TRIM(COALESCE(i.cfop_original, ''))`,
+      )
+      .bind(this.tenant, empresaId, ...r.binds)
+      .all<any>();
+    return results;
+  }
+
   /** Os CFOPs de entrada do período, com quantos itens - as opções do filtro de CFOP (15/10). */
   async cfopsDoPeriodo(empresaId: string, competencia?: string, periodo?: Periodo): Promise<{ cfop: string; itens: number }[]> {
     this.exigirEmpresa(empresaId);
@@ -2393,6 +2820,31 @@ function filtroDeBusca(texto: string): { sql: string; binds: unknown[] } {
     e.push(`(${ou.join(' OR ')})`);
   }
   return { sql: e.length ? `(${e.join(' AND ')})` : '1', binds };
+}
+
+/** Palavras da busca aproximada: sem acento, maiúsculas; "de", "o", "e" ficam de fora. */
+function palavrasAproximadas(texto: string): string[] {
+  return texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase()
+    .split(/[^A-Z0-9,./]+/).filter((p) => p.length >= 3 || /\d/.test(p)).slice(0, 6);
+}
+
+/**
+ * Pontos de um produto na busca aproximada (16/10): 2 por palavra que aparece inteira
+ * (produto, fornecedor ou código); 1 se uma palavra do produto, de 3 letras ou mais, é o
+ * começo da palavra dela ("REFRIG" para "refrigerante", "PAP" para "papel").
+ */
+export function pontosAproximados(palavras: string[], r: { descricao?: string; descricao_original?: string; fornecedor?: string; c_prod?: string }): number {
+  const norm = (v: unknown) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  const prod = `${norm(r.descricao)} ${norm(r.descricao_original)}`;
+  const forn = norm(r.fornecedor);
+  const cod = norm(r.c_prod);
+  const tokens = prod.split(/[^A-Z0-9]+/).filter((t) => t.length >= 3 && /^[A-Z]+$/.test(t));
+  let pontos = 0;
+  for (const w of palavras) {
+    if (prod.includes(w) || forn.includes(w) || cod.includes(w)) pontos += 2;
+    else if (w.length >= 4 && tokens.some((t) => w.startsWith(t))) pontos += 1;
+  }
+  return pontos;
 }
 
 /** "1.234,56" / "1234,56" / "1234.56" / "289" -> numero; o resto -> null. */

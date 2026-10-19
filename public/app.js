@@ -491,7 +491,7 @@ function marcarEscopo() {
   }
 }
 
-const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vApuracao', 'vRegrasIcms', 'vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura'];
+const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vApuracao', 'vRegrasIcms', 'vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura', 'vConversas'];
 
 function telaAtual() {
   return TELAS.find((v) => !$('#' + v).classList.contains('hidden')) ?? 'v1';
@@ -522,6 +522,8 @@ async function restaurarEndereco() {
   if (n && (t === 'v2' || t === 'vOriginal')) {
     try { await abrirNota(n); return; } catch { /* nota apagada ou sem acesso: fica na lista */ }
   }
+  // Link direto para uma conversa do assistente e uma resposta dela (#t=vConversas&c=…&m=…).
+  if (t === 'vConversas' && p.get('c')) convs.pedida = { id: p.get('c'), msg: p.get('m') };
   if (t && TELAS.includes(t) && t !== 'v2' && t !== 'vOriginal') irPara(t);
 }
 
@@ -542,6 +544,7 @@ function irPara(view) {
   if (view === 'vPapeis') carregarPapeis();
   if (view === 'vCertificados') carregarCertificados();
   if (view === 'vCaptura') carregarCaptura();
+  if (view === 'vConversas') carregarConversas();
 }
 
 /* Trocar de empresa pede OK (reunião 25/09). Escolher no seletor sozinho
@@ -702,12 +705,14 @@ async function iniciar() {
   $('#btn-novo-usuario').classList.toggle('hidden', !pode('usuarios.criar'));
   $('#btn-convidar').classList.toggle('hidden', !pode('usuarios.convidar'));
   $('#btn-novo-papel').classList.toggle('hidden', !pode('papeis.gerenciar'));
-  for (const [botao, permissao] of [['vUsuarios', 'usuarios.visualizar'], ['vPapeis', 'papeis.gerenciar'], ['vCertificados', 'certificados.gerenciar'], ['vCaptura', 'captura.gerenciar']]) {
+  for (const [botao, permissao] of [['vUsuarios', 'usuarios.visualizar'], ['vPapeis', 'papeis.gerenciar'], ['vCertificados', 'certificados.gerenciar'], ['vCaptura', 'captura.gerenciar'], ['vConversas', 'auditoria.visualizar']]) {
     const b = document.querySelector(`#nav button[data-view="${botao}"]`);
     if (b) b.classList.toggle('hidden', !pode(permissao));
   }
 
   $('#btn-ultimas')?.classList.toggle('hidden', !pode('auditoria.visualizar'));
+  // O assistente só serve para marcar produto: quem não pode marcar nada não vê o botão.
+  $('#btn-assistente')?.classList.toggle('hidden', !['notas.editar_cfop', 'notas.editar_descricao', 'notas.editar_escrituracao', 'regras.fixar'].some(pode));
   await carregarEmpresas();
   montarSeletorCfop();
   carregarRegrasIcmsCache();
@@ -3646,7 +3651,10 @@ function linhaPassaNoFiltro(l, filtro, qual) {
     : qual === 'nota'
       ? [l.x_prod_novo, l.x_prod_original, l.c_prod, l.ncm, l.unidade, l.cfop_novo, l.cfop_original,
           l.numero, l.emit_nome, l.emit_cnpj].join(' ')
-      : [l.descricao, l.descricaoOriginal, l.unidade, l.cfops, l.codigos].join(' '));
+      : qual === 'fornecedores'
+        ? [l.fornecedor, l.cnpj, l.descricao, l.descricaoOriginal, l.unidade, l.codigos, l.cfopVeio,
+            (l.entradas ?? []).map((e) => e.cfop).join(' ')].join(' ')
+        : [l.descricao, l.descricaoOriginal, l.unidade, l.cfops, l.codigos].join(' '));
   const valores = (qual === 'cfop'
     ? [l.valorContabil, l.baseIcms, l.icms, l.outras, l.st, l.ipi]
     : qual === 'nota'
@@ -3710,6 +3718,8 @@ function desenharRelatorio() {
           baseIcms: soma('baseIcms'), icms: soma('icms'), outras: soma('outras'), st: soma('st'), ipi: soma('ipi') }
       : r.totais;
     pe.innerHTML = `<tr><th>${filtro ? rotuloFiltro : 'Total'}</th><th></th><th class="num">${t.notas}</th><th class="num">${t.itens}</th><th class="num">${t.conferidos}</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.baseIcms)}</th><th class="num">${moeda(t.icms)}</th><th class="num">${moeda(t.outras ?? 0)}</th><th class="num">${moeda(t.st)}</th><th class="num">${moeda(t.ipi)}</th><th></th></tr>`;
+  } else if (qual === 'fornecedores') {
+    desenharPorFornecedor(r, linhas, filtro, rotuloFiltro);
   } else {
     cab.innerHTML = '<tr><th>Produto</th><th>Un.</th><th class="num">Quantidade</th><th class="num">Unitário médio</th><th class="num">Valor total</th><th>CFOP</th><th>Cód. fornecedor</th><th class="num">Notas</th></tr>';
     corpo.innerHTML = linhas.map((l) => `<tr class="rel-cfop${l.naoFechou ? ' nao-fechou' : ''}" data-rel-produto="${esc(l.descricao)}" data-rel-unidade="${esc(l.unidade)}" title="Clique para ver as notas deste produto">
@@ -3733,6 +3743,55 @@ function desenharRelatorio() {
       ? '<tr><td class="vazio" colspan="12">Nenhum produto marcado como “não fechou” neste mês. Marque no ✗ de cada linha.</td></tr>'
       : `<tr><td class="vazio" colspan="12">Nada com “${esc(filtro)}”${soNf ? ' entre os que não fecharam' : ''} neste relatório. Tente só um pedaço do nome, o código ou o valor.</td></tr>`;
   }
+}
+
+/* ---- Relatório "Por fornecedor" (16/10, pedido da Taís) ----
+   "aquele relatório por fornecedor/produto... e do ladinho o CFOP que veio, o 5102 ou
+   o 5949, que aí eu já consigo dar uma olhada rápida no olho para ver o que tá errado."
+   Cada fornecedor com os produtos dele; cada produto separado pelo CFOP que veio.
+   Fora do 5102 vem em âmbar (como na lista de itens). Mais de um CFOP de entrada para
+   o mesmo produto, fornecedor e CFOP que veio vem em alerta: é onde mora o erro. */
+function desenharPorFornecedor(r, linhas, filtro, rotuloFiltro) {
+  const tabela = $('#tbl-relatorio');
+  const [cab, corpo, pe] = [tabela.querySelector('thead'), tabela.querySelector('tbody'), tabela.querySelector('tfoot')];
+  const cnpj = (d) => String(d ?? '').replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+  cab.innerHTML = '<tr><th>Produto</th><th>Un.</th><th class="num">Quantidade</th><th class="num">Valor total</th><th>CFOP que veio</th><th>CFOP de entrada</th><th>Cód. fornecedor</th><th class="num">Notas</th></tr>';
+  const porForn = new Map();
+  for (const l of linhas) {
+    const t = porForn.get(l.cnpj) ?? { produtos: 0, valor: 0, alertas: 0 };
+    t.produtos += 1; t.valor += Number(l.valor ?? 0); t.alertas += l.entradasDiferentes ? 1 : 0;
+    porForn.set(l.cnpj, t);
+  }
+  const entradas = (l) => {
+    if (!l.entradas?.length) return '—';
+    if (!l.entradasDiferentes) return `<b>${esc(l.entradas[0].cfop)}</b>`;
+    return `<span class="tag warn" title="O mesmo produto, do mesmo fornecedor e com o mesmo CFOP que veio, ficou com CFOPs de entrada diferentes. Confira qual está certo.">⚠ ${l.entradas.map((e) => `${esc(e.cfop)} · ${e.itens}x`).join(' / ')}</span>`;
+  };
+  let atual = null;
+  let html = '';
+  for (const l of linhas) {
+    if (l.cnpj !== atual) {
+      atual = l.cnpj;
+      const t = porForn.get(l.cnpj);
+      html += `<tr class="forn-cab"><td colspan="8"><b>${esc(l.fornecedor)}</b> <span class="tiny">CNPJ ${esc(cnpj(l.cnpj))}</span>
+        <span class="forn-cab-total">${t.produtos} ${t.produtos === 1 ? 'produto' : 'produtos'}${t.alertas ? ` · <span class="tag warn">⚠ ${t.alertas} com CFOPs diferentes</span>` : ''} · R$ ${moeda(t.valor)}</span></td></tr>`;
+    }
+    html += `<tr class="rel-cfop${l.entradasDiferentes ? ' forn-alerta' : ''}" data-rel-produto="${esc(l.descricao)}" data-rel-unidade="${esc(l.unidade)}" data-rel-cnpj="${esc(l.cnpj)}" data-rel-saida="${esc(l.cfopVeio)}" title="Clique para ver os itens deste produto deste fornecedor">
+      <td><span class="seta">▸</span> ${esc(l.descricao)}${l.descricaoOriginal && l.descricaoOriginal !== l.descricao
+        ? `<span class="porque">na nota: ${esc(l.descricaoOriginal)}</span>` : ''}</td>
+      <td class="tiny">${esc(l.unidade)}</td>
+      <td class="num">${qtdTela(l.quantidade)}</td>
+      <td class="num">${moeda(l.valor)}</td>
+      <td class="mono">${l.cfopVeioIncomum
+        ? `<span class="etiqueta etiqueta-cfop" title="O normal é 5102 (venda de mercadoria). Este CFOP que veio é outro: confira o tratamento.">◆ ${esc(l.cfopVeio)}</span>`
+        : esc(l.cfopVeio || '—')}</td>
+      <td class="mono">${entradas(l)}</td>
+      <td class="mono tiny">${esc(l.codigos)}</td>
+      <td class="num">${l.notas}</td></tr>`;
+  }
+  corpo.innerHTML = html;
+  const valor = filtro ? linhas.reduce((s, l) => s + Number(l.valor ?? 0), 0) : r.totais.valor;
+  pe.innerHTML = `<tr><th>${filtro ? rotuloFiltro : `Total · ${r.totais.fornecedores} fornecedores · ${r.linhas.length} produtos`}</th><th></th><th></th><th class="num">${moeda(valor)}</th><th></th><th></th><th></th><th></th></tr>`;
 }
 
 /* ---- Divergências (15/10, auditoria pedida na reunião) ----
@@ -3857,7 +3916,7 @@ function imprimirRelatorio() {
   if (!r || !rel.competencia) return alerta('Escolha uma empresa com notas importadas.');
   const emp = (estado.empresas || []).find((x) => x.id === estado.empresaId);
   const cnpj = (d) => String(d ?? '').replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
-  const nome = { cfop: 'por CFOP', produtos: 'por produto', nota: 'por nota (item a item)' }[r.qual] ?? '';
+  const nome = { cfop: 'por CFOP', produtos: 'por produto', fornecedores: 'por fornecedor e produto', nota: 'por nota (item a item)' }[r.qual] ?? '';
   const mes = `${MESES[Number(rel.competencia.slice(5)) - 1] ?? rel.competencia.slice(5)} de ${rel.competencia.slice(0, 4)}`;
   const copia = $('#tbl-relatorio').cloneNode(true);
   copia.removeAttribute('id');
@@ -4002,6 +4061,8 @@ async function abrirNotaDoRelatorio(notaId, itemId, botao) {
     cfop: pai?.dataset.relCfop ?? null,
     produto: pai?.dataset.relProduto ?? null,
     unidade: pai?.dataset.relUnidade ?? null,
+    cnpj: pai?.dataset.relCnpj ?? null,
+    saida: pai?.dataset.relSaida ?? null,
     rolagem: window.scrollY,
   });
 }
@@ -4026,7 +4087,8 @@ async function voltarAoRelatorio() {
   const linhas = [...document.querySelectorAll('#tbl-relatorio tbody > tr')];
   const linha = v.cfop
     ? linhas.find((t) => t.dataset.relCfop === v.cfop)
-    : linhas.find((t) => t.dataset.relProduto === v.produto && t.dataset.relUnidade === v.unidade);
+    : linhas.find((t) => t.dataset.relProduto === v.produto && t.dataset.relUnidade === v.unidade
+      && (v.cnpj == null || t.dataset.relCnpj === v.cnpj) && (v.saida == null || t.dataset.relSaida === v.saida));
   if (!linha) return window.scrollTo(0, v.rolagem ?? 0);
   linha.click();
   // Espera a lista de notas daquele CFOP/produto chegar para destacar a nota.
@@ -4382,6 +4444,8 @@ async function abrirNotasDoProduto(linha) {
   linha.after(sub);
   try {
     const q = new URLSearchParams({ produto: linha.dataset.relProduto, unidade: linha.dataset.relUnidade, competencia: rel.competencia });
+    if (linha.dataset.relCnpj) q.set('cnpj', linha.dataset.relCnpj);
+    if (linha.dataset.relSaida !== undefined) q.set('saida', linha.dataset.relSaida);
     const r = await api(`/api/empresas/${estado.empresaId}/busca-itens?${q}${qsPeriodo()}`);
     sub.innerHTML = `<td colspan="8">${tabelaDeItensAchados(r.itens, `${r.itens.length} item(ns) de ${esc(linha.dataset.relProduto)}`)}</td>`;
     pintarVistas(sub);
@@ -4636,6 +4700,112 @@ async function carregarCaptura() {
       <td class="num">${b.documentos}</td></tr>`).join('')
     : '<tr><td colspan="5" class="vazio">Nenhuma consulta feita ainda.</td></tr>';
 }
+
+/* ---- Conversas do assistente (19/10, pedido do Mateus) ----
+   "isso tem que ficar gravado, para que possamos usar para ajustar a IA, ver o que ela
+   está falando e sugerindo". Só leitura. Cada resposta tem endereço próprio
+   (#t=vConversas&c=<conversa>&m=<resposta>) para ser citada na revisão. */
+const convs = { pedida: null };
+
+async function carregarConversas() {
+  if (!$('#conv-de').value) $('#conv-de').value = isoLocal(new Date());
+  if (!$('#conv-ate').value) $('#conv-ate').value = $('#conv-de').value;
+  const tb = $('#tbl-conversas tbody');
+  tb.innerHTML = '<tr><td colspan="10" class="vazio">carregando…</td></tr>';
+  const q = new URLSearchParams({ de: $('#conv-de').value, ate: $('#conv-ate').value });
+  if ($('#conv-ajuste').checked) q.set('comAjuste', '1');
+  let r;
+  try { r = await api(`/api/assistente/conversas?${q}`); } catch (e) {
+    tb.innerHTML = `<tr><td colspan="10" class="vazio">Não consegui carregar: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+  tb.innerHTML = r.conversas.length ? r.conversas.map((c) => `<tr class="clicavel" data-conv="${esc(c.id)}">
+      <td>${esc(dataHora(c.atualizada_em))}</td><td>${esc(c.razao_social || '—')}</td><td>${esc(c.usuario_nome || '—')}</td>
+      <td class="conv-primeira">${esc(String(c.primeira ?? '').slice(0, 90))}</td>
+      <td class="num">${c.perguntas}</td><td class="num">${c.propostas}</td><td class="num">${c.confirmadas}</td><td class="num">${c.descartadas}</td>
+      <td class="num">${c.ajustes ? `<span class="tag warn">${c.ajustes}</span>` : '0'}</td>
+      <td class="num">${c.erros ? `<span class="tag dan">${c.erros}</span>` : '0'}</td></tr>`).join('')
+    : '<tr><td colspan="10" class="vazio">Nenhuma conversa nesse período.</td></tr>';
+  if (convs.pedida) {
+    const { id, msg } = convs.pedida;
+    convs.pedida = null;
+    await abrirConversa(id, msg);
+  }
+}
+
+function passoDaIa(p) {
+  if (p.ferramenta === 'procurar_produtos') {
+    const achados = Array.isArray(p.achados) ? p.achados : [];
+    const aprox = achados.some((a) => a?.aproximado);
+    const linhas = achados.slice(0, 25).map((a) => `<tr><td>${esc(a?.codigo)}</td><td>${esc(a?.produto)}${a?.na_nota ? `<div class="tiny">na nota: ${esc(a.na_nota)}</div>` : ''}</td>
+      <td>${esc(a?.fornecedor)}</td><td>${esc(a?.cfop_que_veio ?? '—')}</td><td>${esc(a?.entradas ?? '')}</td>
+      <td>${a?.ja_automatico ? `sim${a.cfop_fixado ? ` (${esc(a.cfop_fixado)})` : ''}` : ''}</td><td>${a?.em_atencao ? 'sim' : ''}</td>
+      <td>${a?.aproximado ? 'sim' : ''}</td></tr>`).join('');
+    return `<div class="conv-passo">Procurou “${esc(p.texto)}”: ${achados.length ? `${achados.length} ${achados.length === 1 ? 'produto' : 'produtos'}${aprox ? ' (aproximado)' : ''}` : 'nada'}
+      ${achados.length ? `<details><summary>ver o que a IA viu</summary><table class="conv-achados"><thead><tr><th>Cód.</th><th>Produto</th><th>Fornecedor</th><th>Veio</th><th>Entradas</th><th>Automático</th><th>Atenção</th><th>Aproximado</th></tr></thead><tbody>${linhas}</tbody></table></details>` : ''}</div>`;
+  }
+  if (p.ferramenta === 'propor_marcas') {
+    return `<div class="conv-passo">Propôs ${(p.pedidas ?? []).length}, ${p.aceitas} ${p.aceitas === 1 ? 'foi para a tela' : 'foram para a tela'}${(p.recusadas ?? []).length ? `; recusadas pelo sistema: ${esc(p.recusadas.join('; '))}` : ''}</div>`;
+  }
+  if (p.ferramenta === 'anotar_ajuste') return '<div class="conv-passo">Anotou um ajuste, preso à resposta que ela corrigiu.</div>';
+  return `<div class="conv-passo">Chamou uma ferramenta que não existe: ${esc(p.ferramenta)}</div>`;
+}
+
+function propostaNaRevisao(p, eventos) {
+  const igual = (x) => x && x.tipo === p.tipo && x.cnpj === p.cnpj && x.codigo === p.codigo && (x.cfopVeio ?? null) === (p.cfopVeio ?? null);
+  const conf = eventos.find((v) => v.tipo === 'confirmou' && igual(v.proposta));
+  const lado = eventos.find((v) => v.tipo === 'descartou' && igual(v.proposta));
+  const situacao = conf ? `<span class="tag ok">confirmada${conf.proposta?.mudou === false ? ' (já estava assim)' : ''}</span>`
+    : lado ? '<span class="tag mut">deixada de lado</span>' : '<span class="tag mut">sem resposta</span>';
+  return `<div class="ass-prop ${esc(p.tipo)}">${textoProposta(p)}<div class="acoes">${situacao}</div></div>`;
+}
+
+async function abrirConversa(id, msgId) {
+  const caixa = $('#conv-msgs');
+  $('#conv-detalhe').classList.remove('hidden');
+  caixa.innerHTML = '<p class="tiny">carregando…</p>';
+  let c;
+  try { c = await api(`/api/assistente/conversas/${encodeURIComponent(id)}`); } catch (e) {
+    caixa.innerHTML = `<p class="tiny">Não consegui abrir: ${esc(e.message)}</p>`;
+    return;
+  }
+  $('#conv-titulo').textContent = `${c.razao_social || '—'} · ${c.usuario_nome || '—'} · começou ${dataHora(c.iniciada_em)}`;
+  caixa.innerHTML = c.mensagens.map((m) => {
+    if (m.papel === 'ela') return `<div class="conv-msg ela" id="m-${esc(m.id)}"><div class="conv-meta">${esc(dataHora(m.quando))} · ${esc(c.usuario_nome || 'ela')}</div><div class="conv-texto">${esc(m.texto)}</div></div>`;
+    const ajustes = m.eventos.filter((v) => v.tipo === 'ajuste');
+    const meta = [dataHora(m.quando), m.ms != null ? `${(m.ms / 1000).toFixed(1)} s` : '', m.uso ? `${m.uso.entrada} + ${m.uso.saida} tokens` : '']
+      .filter(Boolean).join(' · ');
+    return `<div class="conv-msg ia${m.erro ? ' erro' : ''}${ajustes.length ? ' com-ajuste' : ''}" id="m-${esc(m.id)}">
+      <div class="conv-meta">${esc(meta)} · <a href="#t=vConversas&c=${encodeURIComponent(c.id)}&m=${encodeURIComponent(m.id)}" class="conv-link">link desta resposta</a></div>
+      <div class="conv-texto">${esc(m.texto)}</div>
+      ${m.passos.length ? `<div class="conv-passos">${m.passos.map(passoDaIa).join('')}</div>` : ''}
+      ${m.propostas.length ? `<div class="ass-propostas">${m.propostas.map((p) => propostaNaRevisao(p, m.eventos)).join('')}</div>` : ''}
+      ${ajustes.map((v) => `<div class="conv-ajuste"><b>Ajuste ${v.origem === 'ia' ? 'anotado pela IA' : `escrito por ${esc(v.usuario || 'ela')}`}</b> · ${esc(dataHora(v.quando))}
+        <div>“${esc(v.texto)}”</div>${v.sobre ? `<div class="tiny">sobre: ${esc(v.sobre)}</div>` : ''}</div>`).join('')}
+    </div>`;
+  }).join('') || '<p class="tiny">Conversa sem mensagens.</p>';
+  try { history.replaceState(null, '', `#t=vConversas&c=${encodeURIComponent(c.id)}${msgId ? `&m=${encodeURIComponent(msgId)}` : ''}`); } catch { /* segue */ }
+  const alvo = msgId ? document.getElementById(`m-${msgId}`) : null;
+  if (alvo) { alvo.classList.add('apontada'); alvo.scrollIntoView({ block: 'center' }); }
+  else $('#conv-detalhe').scrollIntoView({ block: 'start' });
+}
+
+$('#conv-ver')?.addEventListener('click', carregarConversas);
+$('#conv-fechar')?.addEventListener('click', () => { $('#conv-detalhe').classList.add('hidden'); gravarEndereco('vConversas'); });
+$('#tbl-conversas')?.addEventListener('click', (ev) => {
+  const tr = ev.target.closest('[data-conv]');
+  if (tr) abrirConversa(tr.dataset.conv);
+});
+$('#conv-msgs')?.addEventListener('click', (ev) => {
+  const a = ev.target.closest('.conv-link');
+  if (!a) return;
+  ev.preventDefault();
+  const p = new URLSearchParams(a.getAttribute('href').slice(1));
+  $$('#conv-msgs .apontada').forEach((x) => x.classList.remove('apontada'));
+  document.getElementById(`m-${p.get('m')}`)?.classList.add('apontada');
+  try { history.replaceState(null, '', a.getAttribute('href')); } catch { /* segue */ }
+  navigator.clipboard?.writeText(location.href).catch(() => {});
+});
 
 /* ---- Buscar na SEF, em Notas recebidas (30/09) ----
    A SEF não filtra por data: o servidor baixa o que houver para uma caixa à parte
@@ -5229,4 +5399,213 @@ $('#ap-relatorio')?.addEventListener('click', async () => {
     if (!ok) return;
   }
   window.open(`/api/empresas/${estado.empresaId}/apuracao/${ap.tipo}/relatorio?competencia=${ap.competencia}`, '_blank', 'noopener');
+});
+
+
+/* ---- Assistente (16/10, pedido da Taís no áudio de 15/10) ----
+   "se tu colocar a inteligência artificial para eu conversar... eu consigo ir colocando
+   os produtos que eu quero que fique como precisa atenção e que eu consiga escrever que
+   alguns não têm que mudar porque eles já são automáticos".
+   A conversa vai para o servidor, que pergunta à IA. A IA só procura e PROPÕE; cada
+   proposta vira marca só no "Confirmar" dela (POST /marcas-produto, com permissão e
+   trilha). A conversa fica nesta aba, por empresa, e fica gravada no servidor (19/10)
+   para o Mateus revisar: o que ela escreveu, o que a IA procurou e propôs, o que ela
+   confirmou ou deixou de lado. O "Ajustar" embaixo de cada resposta grava o que ela
+   achou errado, preso àquela resposta. */
+const ass = { porEmpresa: new Map(), conversaId: new Map(), ocupado: false };
+const ASS_OI = 'Oi! Me diz quais produtos já são automáticos (não precisa olhar) e quais você quer sempre conferir. Pode falar do seu jeito: o produto, o fornecedor ou o código. Eu procuro e te mostro para confirmar.';
+
+function conversaAtual() {
+  if (!ass.porEmpresa.has(estado.empresaId)) ass.porEmpresa.set(estado.empresaId, [{ papel: 'assistente', texto: ASS_OI }]);
+  return ass.porEmpresa.get(estado.empresaId);
+}
+
+function abrirAssistente() {
+  if (!estado.empresaId) return alerta('Escolha a empresa primeiro.');
+  $('#assistente').classList.remove('hidden');
+  $('#ass-empresa').textContent = nomeEmpresaAtual() ?? '';
+  desenharAssistente();
+  $('#ass-texto').focus();
+}
+
+function textoProposta(p) {
+  const prod = `<b>${esc(p.produto)}</b> · ${esc(p.fornecedor)} · cód. ${esc(p.codigo)}`;
+  const obs = p.observacao ? `<div class="tiny">“${esc(p.observacao)}”</div>` : '';
+  if (p.tipo === 'automatico') {
+    return `<div><b>Automático</b>: ${prod}</div><div class="tiny">veio ${esc(p.cfopVeio ?? '—')} → fica sempre <b>${esc(p.cfop)}</b> · ${p.itens} ${p.itens === 1 ? 'item' : 'itens'} até hoje</div>${obs}`;
+  }
+  if (p.tipo === 'atencao') return `<div><b>Sempre conferir</b>: ${prod}</div>${obs}`;
+  return `<div><b>Parar de pedir atenção</b>: ${prod}</div>`;
+}
+
+function desenharAssistente() {
+  const caixa = $('#ass-msgs');
+  const conversa = conversaAtual();
+  caixa.innerHTML = conversa.map((m, i) => {
+    // Classe própria para o balão da IA: "assistente" já é o painel inteiro (position: fixed).
+    const balao = `<div class="ass-msg ${m.erro ? 'erro' : m.papel === 'ela' ? 'ela' : 'ia'}">${esc(m.texto)}</div>` + ajusteDaResposta(m, i);
+    if (!m.propostas?.length) return balao;
+    const pendentes = m.propostas.filter((p) => !p.estado).length;
+    return balao + `<div class="ass-propostas">${m.propostas.map((p, j) => `
+      <div class="ass-prop ${esc(p.tipo)}">${textoProposta(p)}
+        <div class="acoes">${p.estado === 'feito' ? '<span class="feito">✓ Feito</span>'
+          : p.estado === 'igual' ? '<span class="feito">✓ Já estava assim</span>'
+          : p.estado === 'nao' ? '<span class="tiny">Deixado de lado</span>'
+          : p.estado === 'erro' ? `<span class="falhou">${esc(p.erro ?? 'Não deu certo')}</span>${p.semPermissao ? '' : ` <button type="button" class="btn sm" data-ass-ok="${i}:${j}">Tentar de novo</button>`}`
+          : `<button type="button" class="btn sm primary" data-ass-ok="${i}:${j}">Confirmar</button>
+             <button type="button" class="btn sm" data-ass-nao="${i}:${j}">Agora não</button>`}</div>
+      </div>`).join('')}
+      ${pendentes > 1 ? `<button type="button" class="btn sm primary" data-ass-todas="${i}">Confirmar as ${pendentes}</button>` : ''}</div>`;
+  }).join('') + (ass.ocupado ? '<div class="ass-msg pensando">procurando…</div>' : '');
+  caixa.scrollTop = caixa.scrollHeight;
+  $('#ass-enviar').disabled = ass.ocupado;
+}
+
+/* "Ajustar" (19/10): ela diz o que a IA errou naquela resposta. Fica gravado preso a ela. */
+function ajusteDaResposta(m, i) {
+  if (m.papel !== 'assistente' || !m.mensagemId) return '';
+  const feitos = (m.ajustes ?? []).map((t) => `<div class="ass-ajuste-feito">Ajuste anotado: “${esc(t)}”</div>`).join('');
+  if (m.ajustando) {
+    return `${feitos}<form class="ass-ajuste" data-ass-ajuste-form="${i}">
+      <textarea rows="2" maxlength="1000" placeholder="O que estava errado ou como devia ser?"></textarea>
+      <div class="acoes"><button class="btn sm primary">Enviar ajuste</button>
+        <button type="button" class="btn sm" data-ass-ajuste-cancela="${i}">Cancelar</button></div>
+      ${m.erroAjuste ? `<div class="falhou tiny">${esc(m.erroAjuste)}</div>` : ''}</form>`;
+  }
+  return `${feitos}<button type="button" class="ass-ajustar" data-ass-ajustar="${i}" title="Dizer o que estava errado nesta resposta">Ajustar</button>`;
+}
+
+async function enviarAoAssistente(texto) {
+  const empresaId = estado.empresaId;
+  const conversa = conversaAtual();
+  conversa.push({ papel: 'ela', texto });
+  ass.ocupado = true;
+  desenharAssistente();
+  try {
+    // Só o fim da conversa vai para a IA: um dia inteiro de uso não pode travar o painel.
+    const mensagens = conversa.filter((m) => !m.erro).slice(-20).map((m) => ({ papel: m.papel, texto: m.texto }));
+    const conversaId = ass.conversaId.get(empresaId) || undefined;
+    const r = await api(`/api/empresas/${empresaId}/assistente`, { method: 'POST', body: JSON.stringify({ mensagens, conversaId }) });
+    if (r.conversaId) ass.conversaId.set(empresaId, r.conversaId);
+    conversa.push({ papel: 'assistente', texto: r.texto, propostas: r.propostas ?? [], mensagemId: r.mensagemId });
+  } catch (e) {
+    if (e.dados?.conversaId) ass.conversaId.set(empresaId, e.dados.conversaId);
+    conversa.push({ papel: 'assistente', texto: e.message, erro: true });
+  } finally {
+    ass.ocupado = false;
+    if (estado.empresaId === empresaId) desenharAssistente();
+  }
+}
+
+async function confirmarProposta(p, mensagemId) {
+  try {
+    const r = await api(`/api/empresas/${estado.empresaId}/marcas-produto`, {
+      method: 'POST',
+      body: JSON.stringify({ tipo: p.tipo, cnpj: p.cnpj, codigo: p.codigo, cfopVeio: p.cfopVeio, cfop: p.cfop, observacao: p.observacao, mensagemId: mensagemId || undefined }),
+    });
+    p.estado = r.mudou ? 'feito' : 'igual';
+  } catch (e) {
+    p.estado = 'erro';
+    p.semPermissao = e.status === 403;
+    p.erro = e.status === 403
+      ? (p.tipo === 'automatico' ? 'Seu usuário não pode deixar automático (fixar padrão). Peça para quem pode.' : 'Seu usuário não pode marcar produtos.')
+      : e.message;
+  }
+}
+
+/* A nota aberta atrás do painel acompanha o que ela confirmou (bateria 16/10: o CFOP
+   fixado só aparecia depois de reabrir a nota, e parecia que não tinha funcionado). */
+async function atualizarNotaAberta() {
+  const id = estado.notaAberta?.nota?.id;
+  if (!id || $('#v2').classList.contains('hidden')) return;
+  try {
+    estado.notaAberta = await api(`/api/notas/${id}`);
+    renderItens();
+  } catch { /* fica a da tela; ela reabre se quiser */ }
+}
+
+$('#ass-msgs')?.addEventListener('submit', async (ev) => {
+  const form = ev.target.closest('[data-ass-ajuste-form]');
+  if (!form) return;
+  ev.preventDefault();
+  const m = conversaAtual()[Number(form.dataset.assAjusteForm)];
+  const texto = form.querySelector('textarea').value.trim();
+  if (!m || !texto) return;
+  form.querySelector('button').disabled = true;
+  try {
+    await api(`/api/assistente/mensagens/${m.mensagemId}/eventos`, { method: 'POST', body: JSON.stringify({ tipo: 'ajuste', texto }) });
+    (m.ajustes ??= []).push(texto);
+    m.ajustando = false;
+  } catch (e) {
+    m.erroAjuste = `Não consegui gravar: ${e.message}`;
+  }
+  desenharAssistente();
+});
+$('#ass-msgs')?.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey && ev.target.closest('[data-ass-ajuste-form] textarea')) {
+    ev.preventDefault();
+    ev.target.closest('form').requestSubmit();
+  }
+});
+
+$('#btn-assistente')?.addEventListener('click', abrirAssistente);
+$('#ass-fechar')?.addEventListener('click', () => $('#assistente').classList.add('hidden'));
+$('#ass-form')?.addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const t = $('#ass-texto').value.trim();
+  if (!t || ass.ocupado) return;
+  $('#ass-texto').value = '';
+  enviarAoAssistente(t);
+});
+$('#ass-texto')?.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); $('#ass-form').requestSubmit(); }
+});
+$('#ass-msgs')?.addEventListener('click', async (ev) => {
+  const conversa = conversaAtual();
+  const alvo = (attr) => {
+    const [i, j] = ev.target.closest(`[${attr}]`).getAttribute(attr).split(':').map(Number);
+    return conversa[i]?.propostas?.[j];
+  };
+  const resposta = (attr) => conversa[Number(ev.target.closest(`[${attr}]`).getAttribute(attr).split(':')[0])];
+  if (ev.target.closest('[data-ass-ajustar]')) {
+    const m = resposta('data-ass-ajustar');
+    m.ajustando = true;
+    m.erroAjuste = '';
+    desenharAssistente();
+    $(`#ass-msgs [data-ass-ajuste-form] textarea`)?.focus();
+    return;
+  }
+  if (ev.target.closest('[data-ass-ajuste-cancela]')) {
+    resposta('data-ass-ajuste-cancela').ajustando = false;
+    return desenharAssistente();
+  }
+  if (ev.target.closest('[data-ass-ok]')) {
+    const p = alvo('data-ass-ok');
+    ev.target.disabled = true;
+    await confirmarProposta(p, resposta('data-ass-ok').mensagemId);
+    desenharAssistente();
+    if (p.estado === 'feito') await atualizarNotaAberta();
+    return;
+  }
+  if (ev.target.closest('[data-ass-nao]')) {
+    const p = alvo('data-ass-nao');
+    const m = resposta('data-ass-nao');
+    p.estado = 'nao';
+    // Só registro, para a revisão: se falhar, não incomoda.
+    if (m.mensagemId) {
+      const { estado: _e, erro: _x, semPermissao: _s, ...proposta } = p;
+      api(`/api/assistente/mensagens/${m.mensagemId}/eventos`, { method: 'POST', body: JSON.stringify({ tipo: 'descartou', proposta }) }).catch(() => {});
+    }
+    return desenharAssistente();
+  }
+  const todas = ev.target.closest('[data-ass-todas]');
+  if (todas) {
+    todas.disabled = true;
+    const m = conversa[Number(todas.dataset.assTodas)];
+    const lista = m.propostas.filter((x) => !x.estado);
+    for (const p of lista) await confirmarProposta(p, m.mensagemId);
+    desenharAssistente();
+    if (lista.some((p) => p.estado === 'feito')) await atualizarNotaAberta();
+    return;
+  }
 });

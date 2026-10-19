@@ -346,6 +346,94 @@ export function montarRelatorioProdutos(brutas: LinhaProdutoBruta[]): { linhas: 
   return { linhas, totais: somar(linhas) };
 }
 
+// ------------------------------------------------------------------ por fornecedor e produto
+//
+// Pedido da Taís (16/10): "aquele relatório por fornecedor/produto... e do ladinho o
+// CFOP que veio, o 5102 ou o 5949, que aí eu já consigo dar uma olhada rápida no olho
+// para ver o que tá errado". Cada linha é um produto de um fornecedor num CFOP que
+// veio; ao lado, os CFOPs de entrada que ficaram e quantas vezes cada um.
+
+export type LinhaFornecedorBruta = {
+  cnpj: string | null;
+  fornecedor: string | null;
+  descricao: string | null;
+  unidade: string | null;
+  cfop_veio: string | null;
+  quantidade: number | null;
+  valor: number | null;
+  itens: number;
+  conferidos: number | null;
+  notas: number;
+  codigos: string | null;
+  entradas: string | null;
+  descricao_original: string | null;
+  descricoes_originais: number;
+};
+
+export type LinhaFornecedor = {
+  cnpj: string;
+  fornecedor: string;
+  descricao: string;
+  unidade: string;
+  cfopVeio: string;
+  /** Fora de 5102 (venda de mercadoria): é o que ela quer ver colorido. */
+  cfopVeioIncomum: boolean;
+  quantidade: number;
+  valor: number;
+  itens: number;
+  conferidos: number;
+  notas: number;
+  codigos: string;
+  /** CFOP de entrada -> quantos itens, do mais usado para o menos usado. */
+  entradas: { cfop: string; itens: number }[];
+  /** Mais de um CFOP de entrada para o mesmo produto, fornecedor e CFOP que veio. */
+  entradasDiferentes: boolean;
+  descricaoOriginal: string;
+};
+
+export function montarRelatorioFornecedores(brutas: LinhaFornecedorBruta[]): {
+  linhas: LinhaFornecedor[];
+  totais: Totais & { fornecedores: number };
+} {
+  const lista = (s: string | null) =>
+    [...new Set(String(s ?? '').split(',').map((x) => x.trim()).filter(Boolean))].sort().join(', ');
+  const linhas = brutas
+    .map((b) => {
+      const conta = new Map<string, number>();
+      for (const c of String(b.entradas ?? '').split('|').map((x) => x.trim()).filter(Boolean)) {
+        conta.set(c, (conta.get(c) ?? 0) + 1);
+      }
+      const entradas = [...conta.entries()]
+        .map(([cfop, itens]) => ({ cfop, itens }))
+        .sort((a, z) => z.itens - a.itens || a.cfop.localeCompare(z.cfop));
+      const original = String(b.descricao_original ?? '');
+      const cfopVeio = String(b.cfop_veio ?? '').trim();
+      return {
+        cnpj: String(b.cnpj ?? ''),
+        fornecedor: String(b.fornecedor ?? '').trim() || '(sem nome)',
+        descricao: String(b.descricao ?? '').trim() || '(sem descrição)',
+        unidade: String(b.unidade ?? '').trim(),
+        cfopVeio,
+        cfopVeioIncomum: cfopVeio !== '' && cfopVeio !== '5102',
+        quantidade: Math.round(Number(b.quantidade ?? 0) * 10000) / 10000,
+        valor: centavos(Number(b.valor ?? 0)),
+        itens: Number(b.itens),
+        conferidos: Number(b.conferidos ?? 0),
+        notas: Number(b.notas),
+        codigos: lista(b.codigos),
+        entradas,
+        entradasDiferentes: entradas.length > 1,
+        descricaoOriginal:
+          Number(b.descricoes_originais) > 1 ? `${original} (+${Number(b.descricoes_originais) - 1})` : original,
+      };
+    })
+    .sort((a, b) =>
+      a.fornecedor.localeCompare(b.fornecedor, 'pt-BR') || a.cnpj.localeCompare(b.cnpj)
+      || a.descricao.localeCompare(b.descricao, 'pt-BR') || a.unidade.localeCompare(b.unidade)
+      || a.cfopVeio.localeCompare(b.cfopVeio));
+  return { linhas, totais: { ...somar(linhas), fornecedores: new Set(linhas.map((l) => l.cnpj)).size } };
+}
+
 function somar(linhas: { itens: number; conferidos: number; valor: number }[]): Totais {
   return {
     itens: linhas.reduce((s, l) => s + l.itens, 0),
@@ -407,6 +495,22 @@ export function csvAnalitico(linhas: any[]): string {
       'Conferido'],
     [...corpo, ['TOTAL', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', num(t.vp), '', '', '', '', num(t.st),
       num(t.ipi), num(t.vc), num(t.bc), num(t.icms), '']],
+  );
+}
+
+export function csvFornecedores(r: { linhas: LinhaFornecedor[]; totais: Totais }): string {
+  const cnpj = (d: string) => d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+  return csv(
+    ['Fornecedor', 'CNPJ', 'Produto', 'Unidade', 'Quantidade', 'Valor total', 'CFOP que veio', 'CFOP de entrada',
+      'Itens', 'Itens conferidos', 'Notas', 'Código no fornecedor', 'Descrição original do fornecedor'],
+    [
+      ...r.linhas.map((l) => [
+        l.fornecedor, cnpj(l.cnpj), l.descricao, l.unidade, num(l.quantidade, 4), num(l.valor), l.cfopVeio,
+        l.entradas.map((e) => (l.entradas.length > 1 ? `${e.cfop} (${e.itens})` : e.cfop)).join(', '),
+        l.itens, l.conferidos, l.notas, l.codigos, l.descricaoOriginal,
+      ]),
+      ['TOTAL', '', '', '', '', num(r.totais.valor), '', '', r.totais.itens, r.totais.conferidos, '', '', ''],
+    ],
   );
 }
 

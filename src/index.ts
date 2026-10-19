@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Repo, ForaDoEscopo, type ContextoRequisicao } from './db/repo';
 import { Auditoria } from './db/auditoria';
 import {
-  SemPermissao, exigir, exigirAlguma, resolverPermissoes, permissoesQuePodeConceder,
+  SemPermissao, exigir, exigirAlguma, resolverPermissoes, permissoesQuePodeConceder, podeVerEmpresa,
   PERMISSOES, TODAS_PERMISSOES, type Sessao, type Permissao,
 } from './auth/permissoes';
 import { conferirSenha, gerarHashSenha, avaliarSenha, HashIncompativel, HASH_INEXISTENTE } from './auth/senha';
@@ -27,9 +27,10 @@ import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
 import { baixarDaSef, executarBuscaAutomatica, mesesDaSef, coberturaDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
 import { ErroSef } from './captura/sefsc';
-import { montarRelatorioCfop, montarRelatorioProdutos, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, grupoIcms, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
+import { montarRelatorioCfop, montarRelatorioProdutos, montarRelatorioFornecedores, csvFornecedores, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, grupoIcms, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 import { lerPaginasQuestor, conferirComQuestor, ErroQuestor } from './relatorios/questor';
+import { conversar, ErroAssistente, MODELO_PADRAO } from './assistente/assistente';
 
 type Env = {
   DB: D1Database;
@@ -63,6 +64,15 @@ type Env = {
    */
   SEF_PONTE_URL?: string;
   SEF_PONTE_TOKEN?: string;
+  /**
+   * Assistente da contadora (16/10): chave da API da OpenAI, segredo no painel
+   * (wrangler secret put OPENAI_API_KEY). Sem ela, a tela diz que o assistente não
+   * está ligado. IA_MODELO (variável) troca o modelo; sem ela vale o padrão do código.
+   */
+  OPENAI_API_KEY?: string;
+  IA_MODELO?: string;
+  /** Opcional: outro endereço para a API da IA (teste local). Sem ela, a da OpenAI. */
+  IA_URL?: string;
   // Os certificados ligados no wrangler.jsonc (`mtls_certificates`) chegam como
   // MTLS_<id no cofre>. São lidos pelo nome em src/captura/captura.ts.
 };
@@ -1858,9 +1868,14 @@ app.get('/api/empresas/:id/busca-itens', async (c) => {
   if (texto.length > 80) return c.json({ erro: 'busca longa demais' }, 400);
   const { periodo, erro } = lerPeriodo(c);
   if (erro) return c.json({ erro }, 400);
+  // Do relatório por fornecedor (16/10): só daquele fornecedor e daquele CFOP que veio.
+  const cnpj = c.req.query('cnpj') || undefined;
+  const saida = c.req.query('saida');
+  if (cnpj && !/^\d{8,14}$/.test(cnpj)) return c.json({ erro: 'CNPJ inválido' }, 400);
+  if (saida !== undefined && saida !== '' && !/^\d{4}$/.test(saida)) return c.json({ erro: 'CFOP inválido' }, 400);
   const repo = c.get('repo');
   const itens = await repo.buscarItens(c.req.param('id'), {
-    texto: texto || undefined, produto, unidade: c.req.query('unidade') ?? '', competencia, periodo,
+    texto: texto || undefined, produto, unidade: c.req.query('unidade') ?? '', competencia, periodo, cnpj, saida,
   });
   // Nada aqui: diz se existe em outra empresa (a busca e por empresa selecionada).
   const outras = itens.length === 0 && texto ? await repo.buscarEmOutrasEmpresas(c.req.param('id'), texto) : [];
@@ -1877,7 +1892,7 @@ app.get('/api/empresas/:id/ultimas-alteracoes', async (c) => {
 app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   exigir(c.get('sessao'), 'notas.visualizar');
   const qual = c.req.param('qual');
-  if (!['cfop', 'produtos', 'analitico', 'notas'].includes(qual)) return c.json({ erro: 'relatório desconhecido' }, 404);
+  if (!['cfop', 'produtos', 'fornecedores', 'analitico', 'notas'].includes(qual)) return c.json({ erro: 'relatório desconhecido' }, 404);
 
   const competencia = c.req.query('competencia') || undefined;
   if (competencia && !/^\d{4}(-\d{2})?$/.test(competencia)) {
@@ -1898,7 +1913,7 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
   const sufixo = `${empresa?.cnpj ?? 'empresa'}-${competencia ?? 'tudo'}`
     + (periodo ? `-emissao-${periodo.de ?? 'inicio'}-a-${periodo.ate ?? 'fim'}` : '');
 
-  if (qual !== 'produtos') await garantirValoresFiscais(c, empresaId, competencia);
+  if (qual !== 'produtos' && qual !== 'fornecedores') await garantirValoresFiscais(c, empresaId, competencia);
   const canceladas = await repo.contarCanceladas(empresaId, competencia, periodo);
   const estornos = await repo.estornos(empresaId, competencia, periodo);
 
@@ -1914,6 +1929,13 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
     // item a item, igual ao relatório por CFOP, para os dois baterem.
     const regras = Object.fromEntries(await repo.regrasIcms(grupoIcms(empresa?.regime)));
     return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, cfop: cfopFiltro ?? null, canceladas, estornos, regras, linhas });
+  }
+
+  // Por fornecedor e produto, com o CFOP que veio ao lado (16/10, pedido da Taís).
+  if (qual === 'fornecedores') {
+    const relF = montarRelatorioFornecedores(await repo.relatorioFornecedores(empresaId, competencia, periodo));
+    if (csv) return csvResposta(csvFornecedores(relF), `relatorio-fornecedores-${sufixo}.csv`);
+    return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, canceladas, estornos, ...relF });
   }
 
   let rel: any =
@@ -2435,6 +2457,147 @@ app.put('/api/empresas/:id/relatorios/produtos/marca', async (c) => {
 });
 
 /**
+ * Assistente (16/10, pedido da Taís): ela conversa e a IA procura os produtos e PROPÕE
+ * marcas ("automático" / "precisa atenção"). Nada é gravado aqui: as propostas voltam
+ * para a tela e só viram marca no POST /marcas-produto, com o clique dela.
+ */
+app.post('/api/empresas/:id/assistente', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const corpo = z.object({
+    mensagens: z.array(z.object({ papel: z.enum(['ela', 'assistente']), texto: z.string().max(2000) })).min(1).max(200),
+    // 19/10: a conversa fica gravada; a tela devolve o id que recebeu na primeira resposta.
+    conversaId: z.string().max(60).optional(),
+  }).parse(await c.req.json());
+  // Conversa longa (um dia inteiro de uso): a IA recebe só o fim dela.
+  corpo.mensagens = corpo.mensagens.slice(-30);
+  if (!c.env.OPENAI_API_KEY) {
+    return c.json({ erro: 'O assistente ainda não foi ligado no servidor (falta a chave da IA). Avise o Mateus.', desligado: true }, 503);
+  }
+  const repo = c.get('repo');
+  const empresaId = c.req.param('id');
+  // Antes de gastar com a IA: a empresa tem que ser dela.
+  if (!podeVerEmpresa(c.get('sessao'), empresaId)) throw new ForaDoEscopo();
+  const empresa = await repo.obterEmpresa(empresaId);
+  if (!empresa) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const modelo = c.env.IA_MODELO || MODELO_PADRAO;
+  const ela = [...corpo.mensagens].reverse().find((m) => m.papel === 'ela')?.texto ?? '';
+  const inicio = Date.now();
+  /* 19/10: grava a troca (o que ela escreveu, o que a IA procurou, viu, propôs e
+     respondeu). Se a gravação falhar, a resposta dela não para por isso. */
+  const gravar = async (t: Omit<Parameters<Repo['gravarTrocaAssistente']>[2], 'ela' | 'ms' | 'modelo'>) => {
+    try {
+      return await repo.gravarTrocaAssistente(empresaId, corpo.conversaId, { ela, ms: Date.now() - inicio, modelo, ...t });
+    } catch (e) {
+      console.log(JSON.stringify({ assistente: 'nao_gravou', erro: String((e as Error)?.message ?? e).slice(0, 200) }));
+      return null;
+    }
+  };
+  try {
+    const r = await conversar({
+      chave: c.env.OPENAI_API_KEY, modelo: c.env.IA_MODELO, url: c.env.IA_URL, empresa: empresa.razao_social,
+      mensagens: corpo.mensagens,
+      ferramentas: {
+        procurar: (texto) => repo.produtosParaAssistente(empresaId, texto),
+        validar: (p) => repo.validarMarcaProduto(empresaId, p),
+      },
+    });
+    // Medir o gasto e o cache: aparece nos logs do Worker (nada da conversa, só números).
+    console.log(JSON.stringify({ assistente: 'uso', modelo, ...r.uso, propostas: r.propostas.length, ajustes: r.ajustes.length }));
+    const g = await gravar({ texto: r.texto, passos: r.passos, propostas: r.propostas, uso: r.uso, ajustes: r.ajustes });
+    // `uso` (só números: tokens e quanto veio do cache) vai junto para medir o custo no teste.
+    return c.json({ texto: r.texto, propostas: r.propostas, uso: r.uso, conversaId: g?.conversaId ?? null, mensagemId: g?.mensagemId ?? null });
+  } catch (e) {
+    if (e instanceof ErroAssistente) {
+      const g = await gravar({ texto: e.message, erro: e.message });
+      return c.json({ erro: e.message, conversaId: g?.conversaId ?? null }, 502);
+    }
+    throw e;
+  }
+});
+
+/**
+ * O que ela fez com uma resposta da IA (19/10): deixou uma proposta de lado ou escreveu,
+ * no "Ajustar", o que estava errado. Confirmar é gravado na própria rota da marca.
+ */
+app.post('/api/assistente/mensagens/:id/eventos', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const corpo = z.discriminatedUnion('tipo', [
+    z.object({ tipo: z.literal('descartou'), proposta: z.record(z.unknown()) }),
+    z.object({ tipo: z.literal('ajuste'), texto: z.string().trim().min(1).max(1000) }),
+  ]).parse(await c.req.json());
+  const ok = await c.get('repo').eventoAssistente(c.req.param('id'), corpo);
+  if (!ok) return c.json({ erro: 'resposta não encontrada' }, 404);
+  return c.json({ ok: true });
+});
+
+/**
+ * Conversas do assistente para revisar (19/10): por dia (horário de Brasília), com os
+ * números de cada uma. Só leitura, para quem consulta a trilha.
+ */
+const diaBrasilia = (d: Date) => new Date(d.getTime() - 3 * 3600_000).toISOString().slice(0, 10);
+app.get('/api/assistente/conversas', async (c) => {
+  exigir(c.get('sessao'), 'auditoria.visualizar');
+  const dia = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+  const hoje = diaBrasilia(new Date());
+  const de = dia.catch(hoje).parse(c.req.query('de') ?? hoje);
+  const ate = dia.catch(de).parse(c.req.query('ate') ?? de);
+  const inicio = new Date(`${de}T00:00:00-03:00`);
+  const fim = new Date(new Date(`${ate}T00:00:00-03:00`).getTime() + 24 * 3600_000);
+  if (Number.isNaN(inicio.getTime()) || Number.isNaN(fim.getTime()) || fim <= inicio) return c.json({ erro: 'período inválido' }, 400);
+  const conversas = await c.get('repo').conversasDoAssistente(inicio.toISOString(), fim.toISOString(), c.req.query('comAjuste') === '1');
+  return c.json({ de, ate, conversas });
+});
+
+app.get('/api/assistente/conversas/:id', async (c) => {
+  exigir(c.get('sessao'), 'auditoria.visualizar');
+  const r = await c.get('repo').conversaDoAssistente(c.req.param('id'));
+  if (!r) return c.json({ erro: 'conversa não encontrada' }, 404);
+  return c.json(r);
+});
+
+/** Produtos com "precisa atenção" ligado nesta empresa. */
+app.get('/api/empresas/:id/marcas-produto', async (c) => {
+  exigir(c.get('sessao'), 'notas.visualizar');
+  const m = await c.get('repo').atencoesDaEmpresa(c.req.param('id'));
+  return c.json({
+    atencao: [...m.entries()].map(([k, v]) => ({ cnpj: k.split('|')[0], codigo: k.slice(k.indexOf('|') + 1), ...v })),
+  });
+});
+
+/**
+ * Aplica UMA marca que ela confirmou. Confere tudo de novo no banco (a proposta veio do
+ * navegador): o produto existe nesta empresa, e cada tipo pede a permissão de sempre -
+ * "automático" é fixar padrão (regras.fixar), "atenção" é trabalho de nota.
+ */
+app.post('/api/empresas/:id/marcas-produto', async (c) => {
+  const sessao = c.get('sessao');
+  exigir(sessao, 'notas.visualizar');
+  const corpo = z.object({
+    tipo: z.enum(['automatico', 'atencao', 'tirar_atencao']),
+    cnpj: z.string().min(8).max(20), codigo: z.string().min(1).max(60),
+    cfopVeio: z.string().max(4).nullable().optional(), cfop: z.string().max(4).optional(),
+    observacao: z.string().max(300).optional(),
+    // 19/10: a resposta da IA de onde veio a proposta (para a revisão saber o que ela confirmou).
+    mensagemId: z.string().max(60).optional(),
+  }).parse(await c.req.json());
+  if (corpo.tipo === 'automatico') exigir(sessao, 'regras.fixar');
+  else exigirAlguma(sessao, EDITAR_NOTA);
+  const repo = c.get('repo');
+  const empresaId = c.req.param('id');
+  const v = await repo.validarMarcaProduto(empresaId, { ...corpo, cfopVeio: corpo.cfopVeio ?? undefined });
+  if (!v.ok) return c.json({ erro: v.erro }, 400);
+  const p = v.proposta;
+  const mudou = p.tipo === 'automatico'
+    ? await repo.fixarProduto(empresaId, p.cnpj, p.codigo, p.cfopVeio!, p.cfop!)
+    : await repo.marcarAtencao(empresaId, p.cnpj, p.codigo, p.produto, p.observacao, p.tipo === 'atencao');
+  if (corpo.mensagemId) {
+    // Só registro: se falhar, a marca já foi feita e ela não precisa saber.
+    await repo.eventoAssistente(corpo.mensagemId, { tipo: 'confirmou', proposta: { ...p, mudou } }).catch(() => false);
+  }
+  return c.json({ ok: true, mudou, proposta: p });
+});
+
+/**
  * A nota com os itens, os alertas de divergência e o resumo do topo da tela.
  *
  * É aqui que "quando não bater, chamar a atenção" vira dado. A tela não decide o que
@@ -2468,6 +2631,8 @@ app.get('/api/notas/:id', async (c) => {
   const historico = await repo.carregarHistoricoProdutos(
     r.nota.empresa_id, r.nota.emit_cnpj, r.nota.id,
   );
+  // Produtos deste fornecedor que ela pediu para sempre olhar (16/10, assistente).
+  const atencoes = await repo.atencoesDaEmpresa(r.nota.empresa_id, r.nota.emit_cnpj);
 
   const idsRegra = r.itens
     .flatMap((i: any) => [i.cfop_origem, i.x_prod_origem])
@@ -2542,6 +2707,14 @@ app.get('/api/notas/:id', async (c) => {
         !i.x_prod_novo || String(i.x_prod_novo).trim() === String(i.x_prod_original ?? '').trim(),
     };
     const alertas = detectarAlertas(item, ctxAlerta);
+    const pediu = atencoes.get(`${r!.nota.emit_cnpj}|${String(i.c_prod ?? '').trim()}`);
+    if (pediu) {
+      alertas.push({
+        codigo: 'pediu-atencao', severidade: 'atencao', titulo: 'Você pediu para sempre olhar',
+        detalhe: pediu.observacao ? `Marcado pelo assistente: ${pediu.observacao}` : 'Marcado pelo assistente para sempre conferir.',
+        bloqueia: false,
+      });
+    }
 
     return {
       ...i,
@@ -2952,6 +3125,7 @@ app.delete('/api/empresas/:id', async (c) => {
     c.env.DB.prepare('DELETE FROM fornecedores WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM lotes_importacao WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM produtos_nao_fecharam WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM produto_atencao WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM apuracao_marcas WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM usuario_empresas WHERE empresa_id = ?').bind(id),
     c.env.DB.prepare('DELETE FROM empresas WHERE tenant_id = ? AND id = ?').bind(s.tenantId, id),
