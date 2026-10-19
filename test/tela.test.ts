@@ -411,7 +411,7 @@ describe('tela: reunião 25/09', () => {
   it('menu: Empresas primeiro, Relatórios dentro da Escrituração, Administração por último', () => {
     const ordem = [...HTML.matchAll(/data-view="(\w+)"/g)].map((m) => m[1]);
     expect(ordem.slice(0, 5)).toEqual(['vEmpresas', 'v1', 'v2', 'v3', 'vRelatorios']);
-    expect(ordem.slice(-4)).toEqual(['vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura']);
+    expect(ordem.slice(-5)).toEqual(['vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura', 'vConversas']); // + Conversas do assistente (19/10)
     expect(HTML.match(/class="nav-grupo/g)).toHaveLength(5); // + Regras de impostos (28/09)
   });
   it('trocar de empresa pede OK e a empresa aberta aparece grande', () => {

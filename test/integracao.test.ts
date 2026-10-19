@@ -90,7 +90,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(30); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026)
+    expect(tabelas.length).toBe(34); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026), produto_atencao (0031), conversas do assistente (0032: conversa, mensagem, evento)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(4); // + Somente leitura (0029)
   });
@@ -3258,6 +3258,50 @@ describe('relatórios por CFOP e por produto — o instrumento da comparação d
     expect(texto).toContain(`"'=HYPERLINK(""http://x"")"`);
   });
 
+  it('por fornecedor (16/10, pedido da Taís): cada produto do fornecedor, separado pelo CFOP que veio, com o CFOP de entrada ao lado', async () => {
+    const url = `/api/empresas/${empresaId}/relatorios/fornecedores?competencia=2026-08`;
+    const r0: any = await (await req(url)).json();
+    const cru = db.consultar(`SELECT COUNT(*) AS n, SUM(i.valor_total) AS v, COUNT(DISTINCT n.emit_cnpj) AS f
+                                FROM itens i JOIN notas n ON n.id = i.nota_id WHERE n.competencia = '2026-08'`)[0] as any;
+    expect(r0.totais.itens).toBe(cru.n);
+    expect(r0.totais.valor).toBeCloseTo(cru.v, 2);
+    expect(r0.totais.fornecedores).toBe(cru.f);
+    expect(r0.linhas).toHaveLength(3); // o mesmo fornecedor, 3 produtos, em 2 notas cada
+    const l1 = r0.linhas.find((l: any) => l.entradas.some((e: any) => e.cfop === '1556'));
+    expect(l1).toMatchObject({ itens: 2, notas: 2, entradasDiferentes: false, entradas: [{ cfop: '1556', itens: 2 }] });
+
+    // Uma das notas trouxe o produto 2 em 5949: vira outra linha, em destaque.
+    const [a] = db.consultar(`SELECT i.id FROM itens i JOIN notas n ON n.id = i.nota_id
+                               WHERE n.competencia = '2026-08' AND i.n_item = 2 ORDER BY n.numero`) as any[];
+    db.consultar(`UPDATE itens SET cfop_original = '5949' WHERE id = '${a.id}'`);
+    // E o produto 3 ficou com CFOPs de entrada diferentes na mesma operação.
+    const [c3, d3] = db.consultar(`SELECT i.id FROM itens i JOIN notas n ON n.id = i.nota_id
+                                    WHERE n.competencia = '2026-08' AND i.n_item = 3 ORDER BY n.numero`) as any[];
+    db.consultar(`UPDATE itens SET cfop_novo = '1102' WHERE id = '${c3.id}'`);
+    db.consultar(`UPDATE itens SET cfop_novo = '1403' WHERE id = '${d3.id}'`);
+    const r: any = await (await req(url)).json();
+    expect(r.linhas).toHaveLength(4);
+    expect(r.linhas.reduce((s: number, l: any) => s + l.itens, 0)).toBe(cru.n);
+    const veio5949 = r.linhas.find((l: any) => l.cfopVeio === '5949');
+    expect(veio5949).toMatchObject({ itens: 1, cfopVeioIncomum: true });
+    expect(r.linhas.filter((l: any) => l.entradasDiferentes)).toHaveLength(1);
+    expect(r.linhas.find((l: any) => l.entradasDiferentes).entradas).toEqual([{ cfop: '1102', itens: 1 }, { cfop: '1403', itens: 1 }]);
+
+    // Clicar na linha lista só os itens daquele produto, daquele fornecedor, naquele CFOP que veio.
+    const q = new URLSearchParams({ produto: veio5949.descricao, unidade: veio5949.unidade, competencia: '2026-08', cnpj: veio5949.cnpj, saida: '5949' });
+    const achados: any = await (await req(`/api/empresas/${empresaId}/busca-itens?${q}`)).json();
+    expect(achados.itens.map((i: any) => i.item_id)).toEqual([a.id]);
+    expect((await req(`/api/empresas/${empresaId}/busca-itens?produto=x&cnpj=abc`)).status).toBe(400);
+
+    // A planilha sai da mesma conta.
+    const texto = await (await req(`${url}&formato=csv`)).text();
+    const linhas = texto.trim().split('\r\n');
+    expect(linhas[0]).toContain('Fornecedor;CNPJ;Produto;Unidade;Quantidade;Valor total;CFOP que veio;CFOP de entrada');
+    expect(linhas).toHaveLength(1 + 4 + 1);
+    expect(linhas.at(-1)).toContain(`;${r.totais.valor.toFixed(2).replace('.', ',')};`);
+    expect(texto).toContain('1102 (1), 1403 (1)');
+  });
+
   it('outra empresa não aparece, e competência malformada é recusada', async () => {
     const outra = await repo.criarEmpresa({ cnpj: '99888777000166', razaoSocial: 'OUTRA', uf: 'SC', perfil: 'revenda' });
     const r: any = await (await req(`/api/empresas/${outra}/relatorios/cfop?competencia=2026-08`)).json();
@@ -5601,5 +5645,306 @@ describe('15/10: acesso "Somente leitura" e "manter conectado por 30 dias"', () 
     const ckAdmin = ((await entrar('contadora@alfacontabil.net')).headers.get('Set-Cookie') ?? '').split(';')[0]!;
     await como(ckAdmin)(`/api/notas/${nota}`);
     expect((db.consultar('SELECT cfop_novo FROM itens WHERE nota_id = ? AND n_item = 1', nota)[0] as any).cfop_novo).toBe('1101');
+  });
+});
+
+describe('16/10: assistente — ela conversa, a IA propõe, só o clique dela grava', () => {
+  /* Pedido da Taís no áudio de 15/10: conversar com uma IA para marcar produtos como
+     "precisa atenção" ou "automático, não precisa olhar". A IA é trocada por respostas
+     gravadas; o resto (rotas, banco, permissões, trilha) é o de verdade. */
+  const ambiente = (extra: Record<string, unknown> = {}) => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao', ...extra,
+  }) as never;
+  const entrar = async (email: string) => ((await app.fetch(new Request('http://x/api/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, senha: 'uma frase de senha longa' }),
+  }), ambiente())).headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  const como = (ck: string, extra: Record<string, unknown> = {}) => (c: string, o: RequestInit = {}) => app.fetch(new Request(`http://x${c}`, {
+    ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+  }), ambiente(extra));
+
+  let empresaId = '';
+  let nota = '';
+  let itens: any[] = [];
+  let cnpj = '';
+  let req: ReturnType<typeof como>;
+
+  beforeEach(async () => {
+    empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '72') }]);
+    nota = (db.consultar('SELECT id, emit_cnpj FROM notas')[0] as any).id;
+    cnpj = (db.consultar('SELECT emit_cnpj FROM notas')[0] as any).emit_cnpj;
+    itens = db.consultar('SELECT id, n_item, TRIM(c_prod) AS c_prod, TRIM(cfop_original) AS saida, x_prod_original FROM itens WHERE nota_id = ? ORDER BY n_item', nota) as any[];
+    req = como(await entrar('contadora@alfacontabil.net'));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const marcar = (corpo: object, r = req) => r(`/api/empresas/${empresaId}/marcas-produto`, { method: 'POST', body: JSON.stringify(corpo) });
+  const alertasDo = async (codigo: string) =>
+    ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.c_prod.trim() === codigo);
+
+  it('sem a chave da IA no servidor, diz que não está ligado e não chama ninguém', async () => {
+    const f = vi.fn();
+    vi.stubGlobal('fetch', f);
+    const r = await req(`/api/empresas/${empresaId}/assistente`, { method: 'POST', body: JSON.stringify({ mensagens: [{ papel: 'ela', texto: 'oi' }] }) });
+    expect(r.status).toBe(503);
+    expect(((await r.json()) as any).desligado).toBe(true);
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('a IA procura nos produtos DESTA empresa e propõe; nada muda até ela confirmar', async () => {
+    const [a, b] = itens;
+    const palavra = String(a.x_prod_original).split(/\s+/)[0];
+    const pedidos: any[] = [];
+    const chamada = (call_id: string, name: string, args: unknown) => ({ type: 'function_call', call_id, name, arguments: JSON.stringify(args) });
+    const roteiro = [
+      { output: [chamada('c1', 'procurar_produtos', { texto: palavra })] },
+      { output: [chamada('c2', 'propor_marcas', { acoes: [
+        { tipo: 'automatico', cnpj, codigo: a.c_prod, cfop_que_veio: a.saida, cfop_entrada: '1403' },
+        { tipo: 'atencao', cnpj, codigo: b.c_prod, observacao: 'às vezes é uso e consumo' },
+        { tipo: 'atencao', cnpj, codigo: 'NAO-EXISTE' },
+      ] })] },
+      { output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Separei dois para você confirmar.' }] }] },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (_u: any, init: any) => {
+      pedidos.push(JSON.parse(init.body));
+      return new Response(JSON.stringify(roteiro.shift()), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    const antes = JSON.stringify([db.consultar('SELECT * FROM regras ORDER BY id'), db.consultar('SELECT * FROM itens ORDER BY id')]);
+    const r = await como(await entrar('contadora@alfacontabil.net'), { OPENAI_API_KEY: 'k-teste' })(
+      `/api/empresas/${empresaId}/assistente`,
+      { method: 'POST', body: JSON.stringify({ mensagens: [{ papel: 'assistente', texto: 'Oi!' }, { papel: 'ela', texto: `o ${palavra} é sempre 1403` }] }) },
+    );
+    expect(r.status).toBe(200);
+    const j: any = await r.json();
+    expect(j.texto).toBe('Separei dois para você confirmar.');
+    expect(j.propostas.map((p: any) => [p.tipo, p.codigo, p.cfop ?? null])).toEqual([['automatico', a.c_prod, '1403'], ['atencao', b.c_prod, null]]);
+    expect(pedidos[0].input).toEqual([
+      { role: 'developer', content: expect.stringContaining('Empresa aberta:') },
+      { role: 'user', content: `o ${palavra} é sempre 1403` },
+    ]);
+    const busca = pedidos[1].input.at(-1);
+    expect(busca).toMatchObject({ type: 'function_call_output', call_id: 'c1' });
+    expect(busca.output).toContain(a.c_prod);
+    expect(JSON.parse(pedidos[2].input.at(-1).output).recusadas).toHaveLength(1);
+    // Nada gravado: nem regra, nem item, nem marca.
+    expect(JSON.stringify([db.consultar('SELECT * FROM regras ORDER BY id'), db.consultar('SELECT * FROM itens ORDER BY id')])).toBe(antes);
+    expect(db.consultar('SELECT * FROM produto_atencao')).toHaveLength(0);
+  });
+
+  // Bateria 16/10 ("como a contadora faria"): o que ela escreve por extenso tem que achar o
+  // nome abreviado da nota; confirmar de novo não repete nada; conversa longa não trava.
+  const iaGravada = (roteiro: any[], pedidos: any[]) => vi.fn(async (_u: any, init: any) => {
+    pedidos.push(JSON.parse(init.body));
+    return new Response(JSON.stringify(roteiro.shift() ?? { output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  const buscaPelaIa = async (texto: string) => {
+    const pedidos: any[] = [];
+    vi.stubGlobal('fetch', iaGravada([{ output: [{ type: 'function_call', call_id: 'c1', name: 'procurar_produtos', arguments: JSON.stringify({ texto }) }] }], pedidos));
+    const r = await como(await entrar('contadora@alfacontabil.net'), { OPENAI_API_KEY: 'k' })(
+      `/api/empresas/${empresaId}/assistente`, { method: 'POST', body: JSON.stringify({ mensagens: [{ papel: 'ela', texto }] }) });
+    expect(r.status).toBe(200);
+    return JSON.parse(pedidos[1].input.at(-1).output);
+  };
+
+  it('busca da IA: "refrigerante" acha "REFRIG" da nota (aproximada), e o que não existe não acha', async () => {
+    const [a] = itens;
+    db.consultar(`UPDATE itens SET x_prod_original = 'REFRIG GUARANA LATA 350ML', x_prod_novo = NULL WHERE id = ?`, a.id);
+    const exata = await buscaPelaIa('refrig guarana');
+    expect(exata.map((x: any) => x.codigo)).toContain(a.c_prod);
+    expect(exata.every((x: any) => !x.aproximado)).toBe(true);
+    const aprox = await buscaPelaIa('refrigerante de lata');
+    expect(aprox[0]).toMatchObject({ codigo: a.c_prod, aproximado: true });
+    expect(await buscaPelaIa('margarina')).toEqual({ nada: 'nenhum produto com esse texto nesta empresa' });
+  });
+
+  it('confirmar de novo o mesmo "automático" responde que já estava assim e não repete a trilha', async () => {
+    const [a] = itens;
+    const corpo = { tipo: 'automatico', cnpj, codigo: a.c_prod, cfopVeio: a.saida, cfop: '1403' };
+    expect(((await (await marcar(corpo)).json()) as any).mudou).toBe(true);
+    expect(((await (await marcar(corpo)).json()) as any).mudou).toBe(false);
+    expect(db.consultar(`SELECT 1 FROM auditoria WHERE campo = 'produto_automatico'`)).toHaveLength(1);
+    // Outro CFOP muda de verdade.
+    expect(((await (await marcar({ ...corpo, cfop: '1102' })).json()) as any).mudou).toBe(true);
+  });
+
+  it('conversa longa (mais de 30 mensagens) não trava: a IA recebe só o fim', async () => {
+    const pedidos: any[] = [];
+    vi.stubGlobal('fetch', iaGravada([], pedidos));
+    const mensagens = Array.from({ length: 45 }, (_, k) => ({ papel: k % 2 ? 'assistente' : 'ela', texto: `mensagem ${k}` }));
+    const r = await como(await entrar('contadora@alfacontabil.net'), { OPENAI_API_KEY: 'k' })(
+      `/api/empresas/${empresaId}/assistente`, { method: 'POST', body: JSON.stringify({ mensagens }) });
+    expect(r.status).toBe(200);
+    const conversa = pedidos[0].input.filter((x: any) => x.role !== 'developer');
+    expect(conversa.length).toBeLessThanOrEqual(30);
+    expect(conversa[0].role).toBe('user');
+    expect(conversa.at(-1)).toEqual({ role: 'user', content: 'mensagem 44' });
+  });
+
+  it('"sempre conferir" acende o aviso na linha e tira do "veio pronta"; tirar desliga sem apagar', async () => {
+    const [a] = itens;
+    // O item vem "pronto": CFOP de regra do próprio produto, ativa e igual.
+    db.consultar(`INSERT INTO regras (id, tenant_id, empresa_id, nivel, chave, campo, valor, ativa, criada_em)
+                  VALUES ('r-pronto', 'alfa', ?, 1, ?, 'cfop', '1101', 1, '2026-10-01')`, empresaId, `${cnpj}|${a.c_prod.toUpperCase()}#${a.saida}`);
+    db.consultar(`UPDATE itens SET cfop_novo = '1101', cfop_origem = 'regra:r-pronto' WHERE id = ?`, a.id);
+    const prontos = async () => ((await (await req(`/api/empresas/${empresaId}/notas`)).json()) as any[])[0].itens_prontos;
+    expect(await prontos()).toBe(1);
+
+    const r = await marcar({ tipo: 'atencao', cnpj, codigo: a.c_prod, observacao: 'varia conforme o uso' });
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as any).mudou).toBe(true);
+    expect((await alertasDo(a.c_prod)).alertas).toContainEqual(expect.objectContaining({ codigo: 'pediu-atencao', detalhe: expect.stringContaining('varia conforme o uso') }));
+    expect(await prontos()).toBe(0);
+    expect(((await (await req(`/api/empresas/${empresaId}/marcas-produto`)).json()) as any).atencao).toEqual([
+      expect.objectContaining({ cnpj, codigo: a.c_prod, observacao: 'varia conforme o uso' }),
+    ]);
+
+    expect(((await (await marcar({ tipo: 'tirar_atencao', cnpj, codigo: a.c_prod })).json()) as any).mudou).toBe(true);
+    expect((await alertasDo(a.c_prod)).alertas.some((x: any) => x.codigo === 'pediu-atencao')).toBe(false);
+    expect(await prontos()).toBe(1);
+    const linhas = db.consultar('SELECT removido_em FROM produto_atencao') as any[];
+    expect(linhas).toHaveLength(1);
+    expect(linhas[0].removido_em).toBeTruthy();
+    expect(db.consultar(`SELECT 1 FROM auditoria WHERE campo = 'produto_atencao'`)).toHaveLength(2);
+  });
+
+  it('"automático" fixa o padrão do produto naquela operação, e a nota aberta já vem com ele', async () => {
+    const [a] = itens;
+    const r = await marcar({ tipo: 'automatico', cnpj, codigo: a.c_prod, cfopVeio: a.saida, cfop: '1403' });
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as any).mudou).toBe(true);
+    const regra = db.consultar(`SELECT valor, fixada FROM regras WHERE nivel = 1 AND chave = ?`, `${cnpj}|${a.c_prod.toUpperCase()}#${a.saida}`)[0] as any;
+    expect(regra).toEqual({ valor: '1403', fixada: 1 });
+    const linha = await alertasDo(a.c_prod);
+    expect(linha.cfop_novo).toBe('1403');
+    expect(linha.procedencia.fonte).toBe('fixada');
+    expect(db.consultar(`SELECT 1 FROM auditoria WHERE campo = 'produto_automatico'`)).toHaveLength(1);
+  });
+
+  it('a proposta é conferida de novo no servidor, e cada marca pede a permissão de sempre', async () => {
+    const [a] = itens;
+    expect((await marcar({ tipo: 'atencao', cnpj, codigo: 'NAO-EXISTE' })).status).toBe(400);
+    expect((await marcar({ tipo: 'automatico', cnpj, codigo: a.c_prod, cfop: '1403' })).status).toBe(400); // sem o CFOP que veio
+    expect((await marcar({ tipo: 'automatico', cnpj, codigo: a.c_prod, cfopVeio: a.saida, cfop: '5102' })).status).toBe(400); // CFOP de saída não serve
+    await db.prepare('INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, criado_em) VALUES (?,?,?,?,?,?)')
+      .bind('u-leitura', 'alfa', 'leitura@alfacontabil.net', 'Leitura', await gerarHashSenha('uma frase de senha longa'), new Date().toISOString()).run();
+    await db.prepare('INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES (?,?)').bind('u-leitura', 'papel-leitura').run();
+    const leitura = como(await entrar('leitura@alfacontabil.net'));
+    expect((await marcar({ tipo: 'atencao', cnpj, codigo: a.c_prod }, leitura)).status).toBe(403);
+    expect((await marcar({ tipo: 'automatico', cnpj, codigo: a.c_prod, cfopVeio: a.saida, cfop: '1403' }, leitura)).status).toBe(403);
+    expect(db.consultar('SELECT * FROM produto_atencao')).toHaveLength(0);
+    expect(db.consultar('SELECT 1 FROM regras WHERE fixada = 1')).toHaveLength(0);
+  });
+  /* 19/10 (Mateus): "isso tem que ficar gravado, para que possamos usar para ajustar a IA,
+     ver o que ela está falando e sugerindo. Ela deve também poder falar o que deve ser
+     ajustado, e conseguir referenciar o que". */
+  const fala = (t: string) => ({ output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: t }] }] });
+  const ferramenta = (call_id: string, name: string, args: unknown) => ({ output: [{ type: 'function_call', call_id, name, arguments: JSON.stringify(args) }] });
+  const conversarCom = async (roteiro: any[], mensagens: any[], conversaId?: string, r?: ReturnType<typeof como>) => {
+    vi.stubGlobal('fetch', iaGravada(roteiro, []));
+    const quem = r ?? como(await entrar('contadora@alfacontabil.net'), { OPENAI_API_KEY: 'k' });
+    return quem(`/api/empresas/${empresaId}/assistente`, { method: 'POST', body: JSON.stringify({ mensagens, conversaId }) });
+  };
+
+  it('grava a conversa: o que ela escreveu, o que a IA procurou e viu, o que propôs; a segunda mensagem segue na mesma', async () => {
+    const [a] = itens;
+    const palavra = String(a.x_prod_original).split(/\s+/)[0];
+    const r1 = await conversarCom([
+      ferramenta('c1', 'procurar_produtos', { texto: palavra }),
+      ferramenta('c2', 'propor_marcas', { acoes: [{ tipo: 'atencao', cnpj, codigo: a.c_prod }, { tipo: 'atencao', cnpj, codigo: 'NAO-EXISTE' }] }),
+      fala('Separei um para você confirmar.'),
+    ], [{ papel: 'assistente', texto: 'Oi!' }, { papel: 'ela', texto: `o ${palavra} sempre conferir` }]);
+    expect(r1.status).toBe(200);
+    const j1: any = await r1.json();
+    expect(j1.conversaId).toBeTruthy();
+    expect(j1.mensagemId).toBeTruthy();
+    const msgs = db.consultar('SELECT * FROM assistente_mensagem ORDER BY ordem') as any[];
+    expect(msgs.map((m) => [m.ordem, m.papel, m.texto])).toEqual([[1, 'ela', `o ${palavra} sempre conferir`], [2, 'assistente', 'Separei um para você confirmar.']]);
+    const passos = JSON.parse(msgs[1].passos);
+    expect(passos[0]).toMatchObject({ ferramenta: 'procurar_produtos', texto: palavra });
+    expect(passos[0].achados.map((x: any) => x.codigo)).toContain(a.c_prod);
+    expect(passos[1]).toMatchObject({ ferramenta: 'propor_marcas', aceitas: 1, recusadas: [expect.stringContaining('NAO-EXISTE')] });
+    expect(JSON.parse(msgs[1].propostas).map((x: any) => x.codigo)).toEqual([a.c_prod]);
+    expect(JSON.parse(msgs[1].uso)).toMatchObject({ chamadas: 3 });
+    expect(msgs[1].id).toBe(j1.mensagemId);
+
+    const r2 = await conversarCom([fala('Certo.')], [
+      { papel: 'ela', texto: `o ${palavra} sempre conferir` }, { papel: 'assistente', texto: j1.texto }, { papel: 'ela', texto: 'obrigada' },
+    ], j1.conversaId);
+    expect(((await r2.json()) as any).conversaId).toBe(j1.conversaId);
+    expect(db.consultar('SELECT * FROM assistente_conversa')).toHaveLength(1);
+    expect((db.consultar('SELECT ordem, texto FROM assistente_mensagem ORDER BY ordem') as any[]).slice(2))
+      .toEqual([{ ordem: 3, texto: 'obrigada' }, { ordem: 4, texto: 'Certo.' }]);
+    // Nada disso marcou produto.
+    expect(db.consultar('SELECT * FROM produto_atencao')).toHaveLength(0);
+  });
+
+  it('erro da IA também fica gravado, e a conversa de outra pessoa não é continuada', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 429 })));
+    const r = await como(await entrar('contadora@alfacontabil.net'), { OPENAI_API_KEY: 'k' })(
+      `/api/empresas/${empresaId}/assistente`, { method: 'POST', body: JSON.stringify({ mensagens: [{ papel: 'ela', texto: 'oi' }] }) });
+    expect(r.status).toBe(502);
+    const j: any = await r.json();
+    expect(j.conversaId).toBeTruthy();
+    expect((db.consultar(`SELECT erro FROM assistente_mensagem WHERE papel = 'assistente'`)[0] as any).erro).toContain('sem crédito');
+
+    // Outra pessoa mandando o id dela abre conversa própria, não escreve na dela.
+    await db.prepare('INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, criado_em) VALUES (?,?,?,?,?,?)')
+      .bind('u-op', 'alfa', 'operador@alfacontabil.net', 'Operador', await gerarHashSenha('uma frase de senha longa'), new Date().toISOString()).run();
+    await db.prepare('INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES (?,?)').bind('u-op', 'papel-operador').run();
+    await db.prepare('INSERT INTO usuario_empresas (usuario_id, empresa_id) VALUES (?,?)').bind('u-op', empresaId).run();
+    const op = como(await entrar('operador@alfacontabil.net'), { OPENAI_API_KEY: 'k' });
+    const r2 = await conversarCom([fala('Oi.')], [{ papel: 'ela', texto: 'oi' }], j.conversaId, op);
+    expect(r2.status).toBe(200);
+    expect(((await r2.json()) as any).conversaId).not.toBe(j.conversaId);
+    expect(db.consultar('SELECT * FROM assistente_conversa')).toHaveLength(2);
+    // E o operador não vê a tela de revisão (é de quem consulta a trilha).
+    expect((await op('/api/assistente/conversas')).status).toBe(403);
+  });
+
+  it('confirmar, deixar de lado e "Ajustar" ficam presos à resposta; a IA anota o ajuste quando ela corrige', async () => {
+    const [a, b] = itens;
+    const r1 = await conversarCom([
+      ferramenta('c1', 'propor_marcas', { acoes: [{ tipo: 'atencao', cnpj, codigo: a.c_prod }, { tipo: 'atencao', cnpj, codigo: b.c_prod }] }),
+      fala('Separei dois.'),
+    ], [{ papel: 'ela', texto: 'esses dois sempre conferir' }]);
+    const j1: any = await r1.json();
+    // Confirmou o primeiro (pela rota de sempre, dizendo de qual resposta veio) e deixou o segundo de lado.
+    expect((await marcar({ tipo: 'atencao', cnpj, codigo: a.c_prod, mensagemId: j1.mensagemId })).status).toBe(200);
+    const evento = (corpo: object, id = j1.mensagemId) => req(`/api/assistente/mensagens/${id}/eventos`, { method: 'POST', body: JSON.stringify(corpo) });
+    expect((await evento({ tipo: 'descartou', proposta: j1.propostas[1] })).status).toBe(200);
+    expect((await evento({ tipo: 'ajuste', texto: 'não precisava perguntar, era óbvio' })).status).toBe(200);
+    expect((await evento({ tipo: 'ajuste', texto: '   ' })).status).toBe(400);
+    expect((await evento({ tipo: 'ajuste', texto: 'x' }, 'nao-existe')).status).toBe(404);
+
+    // Na mensagem seguinte ela corrige; a IA anota, e o ajuste aponta para a resposta que ela corrigiu.
+    const r2 = await conversarCom([
+      ferramenta('c1', 'anotar_ajuste', { o_que_mudar: 'o segundo não era esse', sobre: 'propus o código ' + b.c_prod }),
+      fala('Anotado. Qual era?'),
+    ], [{ papel: 'ela', texto: 'esses dois sempre conferir' }, { papel: 'assistente', texto: 'Separei dois.' }, { papel: 'ela', texto: 'errou, o segundo não era esse' }], j1.conversaId);
+    const j2: any = await r2.json();
+    expect(j2.texto).toBe('Anotado. Qual era?');
+    const evs = db.consultar('SELECT mensagem_id, tipo, origem, texto, sobre FROM assistente_evento ORDER BY criado_em, rowid') as any[];
+    expect(evs.map((v) => [v.mensagem_id === j1.mensagemId, v.tipo, v.origem])).toEqual([
+      [true, 'confirmou', 'tela'], [true, 'descartou', 'tela'], [true, 'ajuste', 'tela'], [true, 'ajuste', 'ia'],
+    ]);
+    expect(evs[3]).toMatchObject({ texto: 'o segundo não era esse', sobre: expect.stringContaining(b.c_prod) });
+
+    // A revisão mostra tudo isso, por dia, e o filtro "com ajuste".
+    const hoje = new Date(Date.now() - 3 * 3600_000).toISOString().slice(0, 10);
+    const lista: any = await (await req(`/api/assistente/conversas?de=${hoje}&comAjuste=1`)).json();
+    expect(lista.conversas).toHaveLength(1);
+    expect(lista.conversas[0]).toMatchObject({ id: j1.conversaId, perguntas: 2, propostas: 2, confirmadas: 1, descartadas: 1, ajustes: 2, erros: 0, primeira: 'esses dois sempre conferir' });
+    const ontem = new Date(Date.now() - 27 * 3600_000).toISOString().slice(0, 10);
+    expect(((await (await req(`/api/assistente/conversas?de=${ontem}&ate=${ontem}`)).json()) as any).conversas).toHaveLength(0);
+    const conversa: any = await (await req(`/api/assistente/conversas/${j1.conversaId}`)).json();
+    expect(conversa.mensagens.map((m: any) => m.papel)).toEqual(['ela', 'assistente', 'ela', 'assistente']);
+    expect(conversa.mensagens[1].eventos.map((v: any) => v.tipo)).toEqual(['confirmou', 'descartou', 'ajuste', 'ajuste']);
+    expect(conversa.mensagens[3].passos[0]).toMatchObject({ ferramenta: 'anotar_ajuste' });
+    // Só registro: a marca é a do clique, nada a mais.
+    expect(db.consultar('SELECT c_prod FROM produto_atencao WHERE removido_em IS NULL')).toEqual([{ c_prod: a.c_prod }]);
   });
 });

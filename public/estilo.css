@@ -555,6 +555,7 @@ button.aviso-regime:hover{background:#ffeccc}
   #impressao-nota thead{display:table-header-group}
   #impressao-nota tbody.nota-grupo{break-inside:avoid}
   #impressao-nota tr.nota-capa td{background:#eee;border-top:2px solid #000}
+  #impressao-nota tr.forn-cab td{background:#eee;border-top:2px solid #000}
   #impressao-nota tr.nota-subtotal td{font-weight:bold;background:#f6f6f6}
   #impressao-nota tfoot{display:table-row-group} /* total do mês só no fim, não em toda página */
   #impressao-nota tfoot th{background:#ddd;color:#000;font-size:10px;text-transform:none}
@@ -699,6 +700,10 @@ tr.nota-estorno td{background:#faf5ff}
 
 /* Divergências (15/10) */
 #tbl-relatorio tr.div-grupo td{background:var(--warn-soft);border-top:2px solid var(--warn)}
+/* Relatório por fornecedor (16/10): cabeçalho de cada fornecedor e produto com CFOPs de entrada diferentes */
+#tbl-relatorio tr.forn-cab>td{background:#eaf1fa;border-top:2px solid #b9cde6;padding:7px 10px}
+#tbl-relatorio tr.forn-cab .forn-cab-total{float:right;font-size:12px}
+#tbl-relatorio tr.forn-alerta>td{background:var(--warn-soft)}
 #tbl-relatorio tr.div-itens>td{padding:0 0 8px 24px}
 .div-sub{width:auto;font-size:12.5px}
 .div-sub td{padding:3px 10px;border-bottom:1px solid var(--line-2)}
@@ -710,3 +715,59 @@ tr.nota-estorno td{background:#faf5ff}
 .itens-mini{width:100%;font-size:12.5px}
 .itens-mini td{padding:4px 8px;border-bottom:1px solid var(--line-2)}
 .itens-mini tr.mini-conferido td{color:var(--muted)}
+
+/* Assistente (16/10): painel à direita, conversa e propostas para confirmar */
+.topbar .assistente-btn{margin-left:auto}
+.topbar .assistente-btn + .who{margin-left:0}
+.assistente{position:fixed;top:0;right:0;bottom:0;width:400px;max-width:100vw;background:var(--surface);
+  border-left:1px solid var(--line);box-shadow:-6px 0 18px rgba(16,32,54,.12);display:flex;flex-direction:column;z-index:60}
+.assistente>header{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--line)}
+.assistente>header .tiny{display:block;color:var(--muted)}
+.ass-msgs{flex:1;overflow:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;background:var(--surface-2)}
+.ass-msg{max-width:88%;padding:8px 11px;border-radius:10px;white-space:pre-wrap;line-height:1.4;font-size:13.5px}
+.ass-msg.ela{align-self:flex-end;background:var(--primary);color:#fff}
+.ass-msg.ia{align-self:flex-start;background:#fff;border:1px solid var(--line)}
+.ass-msg.erro{align-self:flex-start;background:var(--danger-soft);color:var(--danger)}
+.ass-msg.pensando{align-self:flex-start;color:var(--muted);font-style:italic;background:none}
+.ass-propostas{align-self:stretch;display:flex;flex-direction:column;gap:6px}
+.ass-prop{background:#fff;border:1px solid var(--line);border-left:4px solid var(--primary);border-radius:8px;padding:8px 10px;font-size:13px}
+.ass-prop.atencao{border-left-color:var(--warn)}
+.ass-prop.tirar_atencao{border-left-color:var(--muted-2)}
+.ass-prop .acoes{display:flex;gap:6px;margin-top:6px;align-items:center}
+.ass-prop .feito{color:var(--ok);font-weight:600}
+.ass-prop .falhou{color:var(--danger)}
+.ass-form{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line)}
+.ass-form textarea{flex:1;resize:none;font:inherit;padding:8px;border:1px solid var(--line);border-radius:6px}
+.ass-rodape{margin:0;padding:0 14px 10px;font-size:11.5px;color:var(--muted)}
+@media print{.assistente,.assistente-btn{display:none!important}}
+
+/* Assistente: "Ajustar" embaixo de cada resposta (19/10) */
+.ass-ajustar{align-self:flex-start;margin-top:-6px;font:inherit;font-size:11.5px;color:var(--muted);background:none;border:0;padding:0 2px;cursor:pointer;text-decoration:underline}
+.ass-ajustar:hover{color:var(--primary)}
+.ass-ajuste{align-self:stretch;display:flex;flex-direction:column;gap:6px;margin-top:-4px}
+.ass-ajuste textarea{font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;resize:vertical}
+.ass-ajuste .acoes{display:flex;gap:6px}
+.ass-ajuste-feito{align-self:flex-start;margin-top:-4px;font-size:12px;color:var(--warn);background:var(--warn-soft);border-radius:6px;padding:4px 8px;max-width:88%}
+
+/* Conversas do assistente (19/10) */
+.conv-filtro{margin-left:auto;display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px}
+.conv-filtro input[type=date]{font:inherit;font-size:12.5px;padding:3px 6px;border:1px solid var(--line);border-radius:6px}
+#tbl-conversas tr.clicavel{cursor:pointer}
+#tbl-conversas tr.clicavel:hover td{background:var(--surface-2)}
+.conv-primeira{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#conv-msgs{display:flex;flex-direction:column;gap:10px}
+.conv-msg{padding:9px 12px;border-radius:10px;border:1px solid var(--line);line-height:1.45;font-size:13.5px;max-width:860px}
+.conv-texto{white-space:pre-wrap}
+.conv-msg.ela{align-self:flex-end;background:var(--primary-soft)}
+.conv-msg.ia{align-self:flex-start;background:#fff}
+.conv-msg.erro{background:var(--danger-soft)}
+.conv-msg.com-ajuste{border-left:4px solid var(--warn)}
+.conv-msg.apontada{outline:3px solid var(--warn);outline-offset:2px}
+.conv-meta{font-size:11.5px;color:var(--muted);margin-bottom:4px}
+.conv-passos{margin-top:8px;display:flex;flex-direction:column;gap:4px}
+.conv-passo{font-size:12px;color:var(--muted);background:var(--surface-2);border-radius:6px;padding:4px 8px}
+.conv-passo summary{cursor:pointer;color:var(--primary)}
+.conv-achados{margin-top:6px;font-size:11.5px;border-collapse:collapse}
+.conv-achados th,.conv-achados td{padding:2px 6px;border-bottom:1px solid var(--line-2);text-align:left}
+.conv-msg .ass-propostas{margin-top:8px}
+.conv-ajuste{margin-top:8px;background:var(--warn-soft);border-radius:6px;padding:6px 9px;font-size:13px}
