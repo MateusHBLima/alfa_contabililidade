@@ -1624,6 +1624,9 @@ app.post('/api/empresas', async (c) => {
       creditoPisPadrao: z.enum(['S', 'N']).nullish(),
       creditoCofinsPadrao: z.enum(['S', 'N']).nullish(),
       observacoes: z.string().nullish(),
+      // 22/10 (reunião de 15/10): segmento (restaurante, imobiliária...) e já liberar para todos.
+      segmento: z.string().max(60).nullish(),
+      liberarParaTodos: z.boolean().default(true),
     })
     .parse(await c.req.json());
 
@@ -1968,7 +1971,9 @@ app.get('/api/empresas/:id/relatorios/:qual', async (c) => {
     const doCfop = qual === 'produtos' && cfopFiltro ? `-cfop-${cfopFiltro.replace(/\D/g, '') || 'sem'}` : '';
     return csvResposta(qual === 'cfop' ? csvCfop(rel as any) : csvProdutos(rel as any), `relatorio-${qual}-${sufixo}${doCfop}.csv`);
   }
-  return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, canceladas, estornos, naoFecharam, ...rel });
+  // 22/10: o segmento da empresa e os CFOPs que não combinam com ele, para a linha avisar.
+  const segmento = await repo.segmentoDaEmpresa(empresaId);
+  return c.json({ competencia: competencia ?? null, periodo: periodo ?? null, canceladas, estornos, naoFecharam, segmento, ...rel });
 });
 
 /** Auditoria: mesmo produto, mesmo fornecedor, mesma operação, CFOPs diferentes (15/10). Só leitura. */
@@ -2456,6 +2461,62 @@ app.put('/api/empresas/:id/relatorios/produtos/marca', async (c) => {
   return c.json({ ok: true, mudou, naoFechou: corpo.naoFechou });
 });
 
+/* ------------------------------------------------------------------ segmentos (22/10)
+ * Reunião de 15/10, a Taís: "eu abro o segmento imobiliária lá em cima. Aí que eu posso
+ * escrever pra ela: imobiliária não tem compra de mercadoria, então não pode ter nada no
+ * 1102". O segmento fica no cadastro da empresa; as regras são por segmento e valem para
+ * todas as empresas dele. É conferência, não decide nada: a linha só avisa.
+ */
+app.get('/api/segmentos', async (c) => {
+  exigir(c.get('sessao'), 'empresas.visualizar');
+  return c.json({ segmentos: await c.get('repo').segmentos() });
+});
+
+app.post('/api/segmentos/regras', async (c) => {
+  // Mesma permissão das regras de ICMS: é regra de conferência de todas as empresas do segmento.
+  exigir(c.get('sessao'), 'empresas.editar');
+  const corpo = z.object({
+    segmento: z.string().trim().min(2).max(60),
+    cfop: z.string().regex(/^[123]\d{3}$/, 'use um CFOP de entrada (1xxx, 2xxx ou 3xxx)'),
+    observacao: z.string().max(300).nullish(),
+  }).parse(await c.req.json());
+  const r = await c.get('repo').criarRegraSegmento(corpo.segmento, corpo.cfop, corpo.observacao);
+  return c.json({ ok: true, ...r }, r.nova ? 201 : 200);
+});
+
+app.post('/api/segmentos/regras/:id/remover', async (c) => {
+  exigir(c.get('sessao'), 'empresas.editar');
+  const ok = await c.get('repo').removerRegraSegmento(c.req.param('id'));
+  if (!ok) return c.json({ erro: 'regra não encontrada' }, 404);
+  return c.json({ ok: true });
+});
+
+/* ------------------------------------------------------------------ aviso na linha (22/10)
+ * Reunião de 15/10: "Aí tu aperta nele: ó, chat, isso aqui tinha que ser 1910". Ela escreve
+ * na própria linha da nota o que está errado; o Mateus lê na tela de revisão e a conferência
+ * diária também. Só registro: não muda nada na nota.
+ */
+app.post('/api/itens/:id/avisos', async (c) => {
+  const sessao = c.get('sessao');
+  exigir(sessao, 'notas.visualizar');
+  exigirAlguma(sessao, EDITAR_NOTA);
+  const corpo = z.object({ texto: z.string().trim().min(1).max(1000) }).parse(await c.req.json());
+  const r = await c.get('repo').avisarNoItem(c.req.param('id'), corpo.texto);
+  return c.json({ ok: true, ...r }, 201);
+});
+
+app.get('/api/avisos', async (c) => {
+  exigir(c.get('sessao'), 'auditoria.visualizar');
+  const dia = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+  const hoje = diaBrasilia(new Date());
+  const de = dia.catch(hoje).parse(c.req.query('de') ?? hoje);
+  const ate = dia.catch(de).parse(c.req.query('ate') ?? de);
+  const inicio = new Date(`${de}T00:00:00-03:00`);
+  const fim = new Date(new Date(`${ate}T00:00:00-03:00`).getTime() + 24 * 3600_000);
+  if (Number.isNaN(inicio.getTime()) || Number.isNaN(fim.getTime()) || fim <= inicio) return c.json({ erro: 'período inválido' }, 400);
+  return c.json({ de, ate, avisos: await c.get('repo').avisosDoPeriodo(inicio.toISOString(), fim.toISOString()) });
+});
+
 /**
  * Assistente (16/10, pedido da Taís): ela conversa e a IA procura os produtos e PROPÕE
  * marcas ("automático" / "precisa atenção"). Nada é gravado aqui: as propostas voltam
@@ -2633,6 +2694,13 @@ app.get('/api/notas/:id', async (c) => {
   );
   // Produtos deste fornecedor que ela pediu para sempre olhar (16/10, assistente).
   const atencoes = await repo.atencoesDaEmpresa(r.nota.empresa_id, r.nota.emit_cnpj);
+  // 22/10: CFOPs que ela disse que não combinam com o segmento da empresa, e os avisos já escritos na nota.
+  const segmento = await repo.segmentoDaEmpresa(r.nota.empresa_id);
+  const avisosPorItem = new Map<string, any[]>();
+  for (const a of await repo.avisosDaNota(r.nota.id)) {
+    if (!avisosPorItem.has(a.item_id)) avisosPorItem.set(a.item_id, []);
+    avisosPorItem.get(a.item_id)!.push({ texto: a.texto, por: a.usuario_nome, em: a.criado_em });
+  }
 
   const idsRegra = r.itens
     .flatMap((i: any) => [i.cfop_origem, i.x_prod_origem])
@@ -2652,6 +2720,8 @@ app.get('/api/notas/:id', async (c) => {
   const procedenciaDe = (origem: string | null, valorLinha?: string | null): Procedencia => {
     if (typeof origem !== 'string') return { fonte: 'nenhuma' };
     if (origem === 'perfil') return { fonte: 'perfil' };
+    // 22/10: palpite pelo CFOP que veio (5910 → 1910, 5949 → 1949). Também ninguém ensinou.
+    if (origem === 'saida') return { fonte: 'saida' };
     // 'manual' e 'manual:fixada' sao o que alguem digitou nesta nota. Sem este
     // caso a linha que a contadora acabou de preencher voltava SEM marca nenhuma -
     // visto em producao: nota tratada por ela, sete linhas, procedencia "nenhuma"
@@ -2715,9 +2785,19 @@ app.get('/api/notas/:id', async (c) => {
         bloqueia: false,
       });
     }
+    const cfopLinha = String(i.cfop_novo ?? '').trim();
+    if (segmento.nome && cfopLinha && cfopLinha in segmento.proibidos && !r!.nota.cancelada_em) {
+      const motivo = segmento.proibidos[cfopLinha];
+      alertas.push({
+        codigo: 'segmento_cfop', severidade: 'atencao', titulo: `${cfopLinha} não combina com ${segmento.nome}`,
+        detalhe: `Regra do segmento ${segmento.nome}: o ${cfopLinha} não pode aparecer${motivo ? ` — ${motivo}` : ''}. Confira se o CFOP está certo.`,
+        bloqueia: false,
+      });
+    }
 
     return {
       ...i,
+      avisos: avisosPorItem.get(i.id) ?? [],
       alertas,
       procedencia,
       descricaoDoFornecedor: ctxAlerta.descricaoDoFornecedor,

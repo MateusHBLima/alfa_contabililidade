@@ -1,7 +1,7 @@
 import { parseNFe, lerEventoNFe, hashXml } from './parser';
 import { ErroParserNFe } from './tipos';
 import type { Repo } from '../db/repo';
-import { chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from '../rules/engine';
+import { chavesParaBuscar, regrasDoItem, sugerir, CFOP_PELA_SAIDA, type ContextoNota, type PerfilEmpresa } from '../rules/engine';
 import { TODOS_CAMPOS, type Campo } from '../rules/campos';
 
 /**
@@ -428,8 +428,11 @@ export async function atualizarPalpitesDaNota(repo: Repo, nota: any, itens: any[
   const candidatas = await repo.carregarRegrasCandidatas(
     empresa.id, pendentes.flatMap((i) => chavesParaBuscar(comoItem(i) as any, nota.emit_cnpj)),
   );
+  // Palpite do perfil (1102) em item que veio 5910/5949: o palpite pelo CFOP que veio (22/10)
+  // vale também para o que foi importado antes dele existir.
+  const temPelaSaida = pendentes.some((i) => i.cfop_origem === 'perfil' && CFOP_PELA_SAIDA[String(i.cfop_original ?? '').trim()]);
   // Sem nenhuma regra para estes produtos, não há o que atualizar.
-  if (candidatas.length === 0) return 0;
+  if (candidatas.length === 0 && !temPelaSaida) return 0;
 
   const contexto: ContextoNota = {
     perfil: (empresa.perfil ?? 'revenda') as PerfilEmpresa,
@@ -453,8 +456,10 @@ export async function atualizarPalpitesDaNota(repo: Repo, nota: any, itens: any[
       const col = COLUNAS_CAMPO[campo];
       if (!col || !doSistema(i[col.origem])) continue;
       const s = sug[campo]!;
-      // Só troca quando agora há uma regra aprendida; palpite por palpite, fica como está.
-      if (!s.regraId) continue;
+      // Só troca quando agora há uma regra aprendida; palpite por palpite, fica como está -
+      // menos o chute do perfil, que dá lugar ao palpite pelo CFOP que veio (22/10).
+      const pelaSaida = campo === 'cfop' && s.origem === 'saida' && i[col.origem] === 'perfil';
+      if (!s.regraId && !pelaSaida) continue;
       const valor = campo === 'cfop' || campo === 'descricao' ? s.valor : vazioParaNulo(s.valor);
       if ((i[col.valor] ?? null) === valor && i[col.origem] === s.origem) continue;
       sets.push(`${col.valor} = ?`, `${col.origem} = ?`);

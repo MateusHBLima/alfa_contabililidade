@@ -38,7 +38,7 @@ export type Regra = {
 export type Sugestao = {
   valor: string;
   campo: Campo;
-  /** manual | regra:<id> | perfil | importacao */
+  /** manual | regra:<id> | saida (palpite pelo CFOP que veio, 22/10) | perfil | importacao */
   origem: string;
   regraId: string | null;
   nivel: Nivel | null;
@@ -80,6 +80,24 @@ const CFOP_POR_PERFIL: Record<PerfilEmpresa, { dentroUF: string; foraUF: string 
   revenda: { dentroUF: '1102', foraUF: '2102' },
   industrializacao: { dentroUF: '1101', foraUF: '2101' },
   uso_consumo: { dentroUF: '1556', foraUF: '2556' },
+};
+
+/**
+ * CFOP de entrada pelo CFOP que veio na nota (22/10; pedido da Taís na reunião de 15/10:
+ * "sempre que vir 5910 é 1910, sempre que vir 5949 é 1949, não muda. Como é o mesmo
+ * produto, é fácil de eu tratar errado: é margarina, é comida, boto 1102, mas naquela
+ * nota a margarina era 1910").
+ *
+ * É palpite, não regra: fica no lugar do chute do perfil (que daria 1102) e sai em
+ * amarelo para ela confirmar. O que ela já ensinou para aquele produto NAQUELA operação
+ * (a chave de CFOP inclui o CFOP de saída) continua valendo por cima - é assim que o
+ * detergente da OESA em 5949 da Italiana segue em 1556.
+ */
+export const CFOP_PELA_SAIDA: Readonly<Record<string, { cfop: string; nome: string }>> = {
+  '5910': { cfop: '1910', nome: 'bonificação, doação ou brinde' },
+  '6910': { cfop: '2910', nome: 'bonificação, doação ou brinde' },
+  '5949': { cfop: '1949', nome: 'outra saída não especificada' },
+  '6949': { cfop: '2949', nome: 'outra saída não especificada' },
 };
 
 // ------------------------------------------------------------------ chaves
@@ -283,6 +301,19 @@ export function sugerir(
   if (regra) return sugestaoDeRegra(regra);
 
   if (campo === 'cfop') {
+    const saida = String(item.CFOP ?? '').trim();
+    const pelaSaida = CFOP_PELA_SAIDA[saida];
+    if (pelaSaida) {
+      return {
+        valor: pelaSaida.cfop,
+        campo,
+        origem: 'saida',
+        regraId: null,
+        nivel: 7,
+        confianca: 'media',
+        porque: `veio ${saida} (${pelaSaida.nome}) · entra ${pelaSaida.cfop} · confirme`,
+      };
+    }
     const mesmaUF =
       contexto.ufEmitente !== null &&
       contexto.ufDestinatario !== null &&

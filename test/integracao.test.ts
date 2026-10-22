@@ -90,7 +90,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(34); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026), produto_atencao (0031), conversas do assistente (0032: conversa, mensagem, evento)
+    expect(tabelas.length).toBe(36); // + segmento_regras e aviso_item (0033) // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026), produto_atencao (0031), conversas do assistente (0032: conversa, mensagem, evento)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(4); // + Somente leitura (0029)
   });
@@ -4382,7 +4382,8 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     }), ambiente());
     ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
     empresaId = (await json('/api/empresas', {
-      method: 'POST', body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'ITALIANA', uf: 'SC', perfil: 'revenda', regime: 'simples' }),
+      // Sem liberar para todos (22/10): estes testes partem de empresa sem ninguém vinculado.
+      method: 'POST', body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'ITALIANA', uf: 'SC', perfil: 'revenda', regime: 'simples', liberarParaTodos: false }),
     })).id;
   });
 
@@ -5265,7 +5266,7 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
 
   it('busca automática continua quando quem ligou vira responsável de outra empresa (13/10)', async () => {
     await automatica({ ligada: true, desde: '2026-10-01' });
-    const outra = await repo.criarEmpresa({ cnpj: '12.345.678/0001-95', razaoSocial: 'EMPRESA NOVA', uf: 'SC', perfil: 'revenda' });
+    const outra = await repo.criarEmpresa({ cnpj: '12.345.678/0001-95', razaoSocial: 'EMPRESA NOVA', uf: 'SC', perfil: 'revenda', liberarParaTodos: false });
     db.consultar("INSERT INTO usuario_empresas (usuario_id, empresa_id) VALUES ('u1', ?)", outra);
     respostas.push(() => new Response(retorno('117', 'nada', { ult: '0' })));
     const r = await rodar();
@@ -5946,5 +5947,118 @@ describe('16/10: assistente — ela conversa, a IA propõe, só o clique dela gr
     expect(conversa.mensagens[3].passos[0]).toMatchObject({ ferramenta: 'anotar_ajuste' });
     // Só registro: a marca é a do clique, nada a mais.
     expect(db.consultar('SELECT c_prod FROM produto_atencao WHERE removido_em IS NULL')).toEqual([{ c_prod: a.c_prod }]);
+  });
+});
+
+describe('22/10: pacote 2 da reunião de 15/10', () => {
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  const entrar = async (email: string) => ((await app.fetch(new Request('http://x/api/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, senha: 'uma frase de senha longa' }),
+  }), ambiente())).headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  const como = (ck: string) => (c: string, o: RequestInit = {}) => app.fetch(new Request(`http://x${c}`, {
+    ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+  }), ambiente());
+  const novoUsuario = async (id: string, email: string, papel: string, extra = '') => {
+    await db.prepare(`INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, criado_em${extra ? ', pendente' : ''}) VALUES (?,?,?,?,?,?${extra ? ', 1' : ''})`)
+      .bind(id, 'alfa', email, id, await gerarHashSenha('uma frase de senha longa'), new Date().toISOString()).run();
+    await db.prepare('INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES (?,?)').bind(id, papel).run();
+  };
+  let req: ReturnType<typeof como>;
+  beforeEach(async () => { req = como(await entrar('contadora@alfacontabil.net')); });
+  const post = (c: string, corpo: unknown, r = req) => r(c, { method: 'POST', body: JSON.stringify(corpo) });
+
+  it('empresa nova já vem liberada para todos os usuários ativos e com o segmento; mudar o segmento fica na trilha', async () => {
+    await novoUsuario('u-op', 'op@alfacontabil.net', 'papel-operador');
+    await novoUsuario('u-pend', 'pend@alfacontabil.net', 'papel-operador', 'pendente');
+    const r = await post('/api/empresas', { cnpj: '11222333000181', razaoSocial: 'RESTAURANTE NOVO LTDA', uf: 'SC', perfil: 'revenda', segmento: '  Restaurante ' });
+    expect(r.status).toBe(201);
+    const { id } = (await r.json()) as any;
+    const vinculados = (db.consultar('SELECT usuario_id FROM usuario_empresas WHERE empresa_id = ? ORDER BY usuario_id', id) as any[]).map((x) => x.usuario_id);
+    expect(vinculados).toEqual(['u-op', 'u1']);
+    expect((db.consultar('SELECT segmento FROM empresas WHERE id = ?', id)[0] as any).segmento).toBe('Restaurante');
+    expect((await req(`/api/empresas/${id}`, { method: 'PATCH', body: JSON.stringify({ segmento: 'Imobiliária' }) })).status).toBe(200);
+    expect(db.consultar(`SELECT valor_antes, valor_depois FROM auditoria WHERE entidade = 'empresa' AND campo = 'segmento'`)).toEqual([{ valor_antes: 'Restaurante', valor_depois: 'Imobiliária' }]);
+    // Quem desmarca na criação não libera.
+    const r2b = await post('/api/empresas', { cnpj: '11222333000262', razaoSocial: 'OUTRA LTDA', uf: 'SC', perfil: 'revenda', liberarParaTodos: false });
+    expect(db.consultar('SELECT 1 FROM usuario_empresas WHERE empresa_id = ?', ((await r2b.json()) as any).id)).toHaveLength(0);
+  });
+
+  it('regra por segmento: a linha avisa e o relatório marca; operador não cria; tirar não apaga', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'IMOBILIARIA PILOTO LTDA', uf: 'SC', perfil: 'revenda', segmento: 'Imobiliária' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '81') }]);
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    const r1 = await post('/api/segmentos/regras', { segmento: 'imobiliária', cfop: '1102', observacao: 'imobiliária não compra mercadoria' });
+    expect(r1.status).toBe(201);
+    expect((await post('/api/segmentos/regras', { segmento: 'IMOBILIÁRIA', cfop: '1102', observacao: 'imobiliária não compra mercadoria' })).status).toBe(200);
+    expect((await post('/api/segmentos/regras', { segmento: 'Imobiliária', cfop: '5102' })).status).toBe(400);
+
+    const itens = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens;
+    const em1102 = itens.filter((i: any) => i.cfop_novo === '1102');
+    expect(em1102.length).toBeGreaterThan(0);
+    for (const i of em1102) {
+      expect(i.alertas).toContainEqual(expect.objectContaining({ codigo: 'segmento_cfop', titulo: '1102 não combina com Imobiliária', detalhe: expect.stringContaining('não compra mercadoria') }));
+    }
+    expect(itens.filter((i: any) => i.cfop_novo !== '1102').every((i: any) => !i.alertas.some((a: any) => a.codigo === 'segmento_cfop'))).toBe(true);
+    const rel = (await (await req(`/api/empresas/${empresaId}/relatorios/cfop`)).json()) as any;
+    expect(rel.segmento).toEqual({ nome: 'Imobiliária', proibidos: { '1102': 'imobiliária não compra mercadoria' } });
+    const segs = ((await (await req('/api/segmentos')).json()) as any).segmentos;
+    expect(segs).toEqual([expect.objectContaining({ nome: 'Imobiliária', empresas: 1, regras: [expect.objectContaining({ cfop: '1102' })] })]);
+
+    await novoUsuario('u-op', 'op@alfacontabil.net', 'papel-operador');
+    const op = como(await entrar('op@alfacontabil.net'));
+    expect((await post('/api/segmentos/regras', { segmento: 'Restaurante', cfop: '1556' }, op)).status).toBe(403);
+
+    const regraId = ((await r1.json()) as any).id;
+    expect((await post(`/api/segmentos/regras/${regraId}/remover`, {})).status).toBe(200);
+    expect(db.consultar('SELECT removido_em FROM segmento_regras')).toEqual([{ removido_em: expect.any(String) }]);
+    const depois = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens;
+    expect(depois.some((i: any) => i.alertas.some((a: any) => a.codigo === 'segmento_cfop'))).toBe(false);
+    expect(db.consultar(`SELECT acao FROM auditoria WHERE entidade = 'segmento_regra' ORDER BY id`).map((x: any) => x.acao)).toEqual(['criar', 'excluir']);
+  });
+
+  it('palpite pelo CFOP que veio: 5910 entra 1910; nota já importada com o palpite do perfil se ajeita ao abrir', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '82', [['<CFOP>5102</CFOP>', '<CFOP>5910</CFOP>']]) }]);
+    const itens = db.consultar('SELECT id, TRIM(cfop_original) AS veio, cfop_novo, cfop_origem FROM itens ORDER BY n_item') as any[];
+    const brinde = itens.find((i) => i.veio === '5910');
+    expect(brinde).toMatchObject({ cfop_novo: '1910', cfop_origem: 'saida' });
+    expect(itens.find((i) => i.veio === '5102')).toMatchObject({ cfop_novo: '1102', cfop_origem: 'perfil' });
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    let tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela.procedencia).toEqual({ fonte: 'saida' });
+    // Como as notas importadas antes deste pacote estão: palpite do perfil (1102) num item 5910.
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'perfil' WHERE id = ?`, brinde.id);
+    tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela).toMatchObject({ cfop_novo: '1910', cfop_origem: 'saida' });
+    // O que alguém digitou não muda.
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'manual' WHERE id = ?`, brinde.id);
+    tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela).toMatchObject({ cfop_novo: '1102', cfop_origem: 'manual' });
+  });
+
+  it('aviso na linha: grava com a foto do momento, aparece na nota e na lista do dia; somente leitura não avisa', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '83') }]);
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    const item = db.consultar('SELECT id, x_prod_original, TRIM(cfop_original) AS veio, cfop_novo FROM itens ORDER BY n_item')[0] as any;
+    const antes = JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'));
+    const r = await post(`/api/itens/${item.id}/avisos`, { texto: 'isso aqui tinha que ser 1910, veio de bonificação' });
+    expect(r.status).toBe(201);
+    expect(JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'))).toBe(antes);
+    expect((await post(`/api/itens/${item.id}/avisos`, { texto: '  ' })).status).toBe(400);
+    const tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === item.id);
+    expect(tela.avisos).toEqual([{ texto: 'isso aqui tinha que ser 1910, veio de bonificação', por: 'Contadora', em: expect.any(String) }]);
+    const hoje = new Date(Date.now() - 3 * 3600_000).toISOString().slice(0, 10);
+    const lista = ((await (await req(`/api/avisos?de=${hoje}`)).json()) as any).avisos;
+    expect(lista).toEqual([expect.objectContaining({ produto: item.x_prod_original, cfop_original: item.veio, cfop_linha: item.cfop_novo, nota_id: nota, item_id: item.id })]);
+    await novoUsuario('u-leitura', 'leitura@alfacontabil.net', 'papel-leitura');
+    const leitura = como(await entrar('leitura@alfacontabil.net'));
+    expect((await post(`/api/itens/${item.id}/avisos`, { texto: 'x' }, leitura)).status).toBe(403);
+    expect((await leitura(`/api/avisos?de=${hoje}`)).status).toBe(200);
   });
 });

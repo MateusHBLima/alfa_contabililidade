@@ -36,6 +36,17 @@ function agora(): string {
   return new Date().toISOString();
 }
 
+/** Chave de comparação do segmento: sem acento e sem maiúscula ("Imobiliária" = "IMOBILIARIA"). */
+export function chaveSegmento(s: string | null | undefined): string {
+  return String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** Segmento da empresa (22/10): texto livre, sem espaço sobrando; vazio vira nulo. */
+export function limparSegmento(s: string | null | undefined): string | null {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  return t || null;
+}
+
 export type ContextoRequisicao = {
   sessao: Sessao;
   ip: string | null;
@@ -155,6 +166,9 @@ export class Repo {
     creditoPisPadrao?: string | null;
     creditoCofinsPadrao?: string | null;
     observacoes?: string | null;
+    segmento?: string | null;
+    /** 22/10 (reunião de 15/10): "já coloca todo mundo nesse primeiro momento". */
+    liberarParaTodos?: boolean;
   }): Promise<string> {
     const novoId = id();
     const cnpj = dados.cnpj.replace(/\D/g, '');
@@ -165,8 +179,8 @@ export class Repo {
           (id, tenant_id, cnpj, razao_social, nome_fantasia, uf, perfil, regime,
            cnae_principal, cnaes_secundarios, cfop_padrao_dentro_uf, cfop_padrao_fora_uf,
            cst_entrada_padrao, credito_icms_padrao, credito_pis_padrao, credito_cofins_padrao,
-           observacoes, ativo, criado_em)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
+           observacoes, segmento, ativo, criado_em)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
       )
       .bind(
         novoId, this.tenant, cnpj, dados.razaoSocial, dados.nomeFantasia ?? null,
@@ -175,14 +189,32 @@ export class Repo {
         dados.cfopPadraoDentroUF ?? null, dados.cfopPadraoForaUF ?? null,
         dados.cstEntradaPadrao ?? null, dados.creditoIcmsPadrao ?? null,
         dados.creditoPisPadrao ?? null, dados.creditoCofinsPadrao ?? null,
-        dados.observacoes ?? null, agora(),
+        dados.observacoes ?? null, limparSegmento(dados.segmento), agora(),
       )
       .run();
+
+    // Empresa nova já liberada para todos os usuários ativos (pedido da Taís, 15/10: "é só
+    // eu, vocês e mais uma menina que tão mexendo"). Quem tem "ver todos os clientes" já via.
+    let liberados = 0;
+    if (dados.liberarParaTodos !== false) {
+      const r = await this.db
+        .prepare(
+          `INSERT INTO usuario_empresas (usuario_id, empresa_id)
+           SELECT u.id, ? FROM usuarios u
+            WHERE u.tenant_id = ? AND COALESCE(u.ativo, 1) = 1 AND COALESCE(u.pendente, 0) = 0
+              AND NOT EXISTS (SELECT 1 FROM usuario_empresas ue WHERE ue.usuario_id = u.id AND ue.empresa_id = ?)`,
+        )
+        .bind(novoId, this.tenant, novoId)
+        .run();
+      liberados = Number(r.meta?.changes ?? 0);
+    }
 
     await this.aud.registrar(
       this.evento({
         acao: 'criar', entidade: 'empresa', entidadeId: novoId,
-        valorDepois: `${cnpj} · ${dados.razaoSocial} · perfil ${dados.perfil}`,
+        valorDepois: `${cnpj} · ${dados.razaoSocial} · perfil ${dados.perfil}`
+          + (limparSegmento(dados.segmento) ? ` · segmento ${limparSegmento(dados.segmento)}` : '')
+          + (liberados ? ` · liberada para ${liberados} usuário(s)` : ''),
         origem: 'manual',
       }),
     );
@@ -199,15 +231,16 @@ export class Repo {
       'razao_social', 'nome_fantasia', 'uf', 'perfil', 'regime', 'cnae_principal',
       'cnaes_secundarios', 'cfop_padrao_dentro_uf', 'cfop_padrao_fora_uf',
       'cst_entrada_padrao', 'credito_icms_padrao', 'credito_pis_padrao',
-      'credito_cofins_padrao', 'observacoes',
+      'credito_cofins_padrao', 'observacoes', 'segmento',
     ];
 
     const eventos: EventoAuditoria[] = [];
     const sets: string[] = [];
     const valores: unknown[] = [];
 
-    for (const [campo, valor] of Object.entries(mudancas)) {
+    for (const [campo, bruto] of Object.entries(mudancas)) {
       if (!permitidas.includes(campo)) continue;
+      const valor = campo === 'segmento' ? limparSegmento(bruto) : bruto;
       if (String(atual[campo] ?? '') === String(valor ?? '')) continue;
       sets.push(`${campo} = ?`);
       valores.push(valor);
@@ -1050,6 +1083,175 @@ export class Repo {
       .bind(this.tenant, de, ate)
       .all<any>();
     return results.filter((r: any) => podeVerEmpresa(this.ctx.sessao, r.empresa_id) && (!soComAjuste || Number(r.ajustes) > 0));
+  }
+
+  // ---------------------------------------------------------------- segmentos (22/10)
+
+  /**
+   * Segmentos em uso (os das empresas e os que já têm regra), cada um com as regras
+   * ativas: os CFOPs de entrada que a contadora disse que não combinam com ele.
+   * O nome é comparado sem maiúsculas ("Restaurante" e "restaurante" são o mesmo).
+   */
+  async segmentos(): Promise<{ nome: string; empresas: number; regras: any[] }[]> {
+    const [{ results: emps }, { results: regs }] = await Promise.all([
+      this.db
+        .prepare(
+          `SELECT segmento FROM empresas
+            WHERE tenant_id = ? AND ativo = 1 AND segmento IS NOT NULL AND TRIM(segmento) <> ''`,
+        )
+        .bind(this.tenant)
+        .all<any>(),
+      this.db
+        .prepare(
+          `SELECT r.id, r.segmento, r.cfop, r.observacao, r.criado_em, u.nome AS criado_por_nome
+             FROM segmento_regras r LEFT JOIN usuarios u ON u.id = r.criado_por
+            WHERE r.tenant_id = ? AND r.removido_em IS NULL
+            ORDER BY r.cfop`,
+        )
+        .bind(this.tenant)
+        .all<any>(),
+    ]);
+    // Agrupado aqui e não no SQL: o LOWER do SQLite não tira maiúscula de letra acentuada.
+    const mapa = new Map<string, { nome: string; empresas: number; regras: any[] }>();
+    for (const e of emps) {
+      const k = chaveSegmento(e.segmento);
+      if (!mapa.has(k)) mapa.set(k, { nome: e.segmento, empresas: 0, regras: [] });
+      mapa.get(k)!.empresas += 1;
+    }
+    for (const r of regs) {
+      const k = chaveSegmento(r.segmento);
+      if (!mapa.has(k)) mapa.set(k, { nome: r.segmento, empresas: 0, regras: [] });
+      mapa.get(k)!.regras.push({ id: r.id, cfop: r.cfop, observacao: r.observacao, criadoEm: r.criado_em, criadoPor: r.criado_por_nome });
+    }
+    return [...mapa.values()].sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  }
+
+  /** "Restaurante não pode ter 1102": grava a regra (ou atualiza o motivo, se já existe). */
+  async criarRegraSegmento(segmentoBruto: string, cfop: string, observacao?: string | null): Promise<{ id: string; nova: boolean }> {
+    const segmento = limparSegmento(segmentoBruto);
+    if (!segmento) throw new Error('segmento vazio');
+    const obs = String(observacao ?? '').trim().slice(0, 300) || null;
+    const { results: mesmas } = await this.db
+      .prepare('SELECT id, segmento, observacao FROM segmento_regras WHERE tenant_id = ? AND cfop = ? AND removido_em IS NULL')
+      .bind(this.tenant, cfop)
+      .all<any>();
+    const ja = mesmas.find((r: any) => chaveSegmento(r.segmento) === chaveSegmento(segmento));
+    if (ja) {
+      if ((ja.observacao ?? null) !== obs) {
+        await this.db.prepare('UPDATE segmento_regras SET observacao = ? WHERE id = ?').bind(obs, ja.id).run();
+        await this.aud.registrar(this.evento({
+          acao: 'alterar', entidade: 'segmento_regra', entidadeId: ja.id, campo: 'observacao',
+          valorAntes: ja.observacao ?? null, valorDepois: obs, origem: 'manual',
+        }));
+      }
+      return { id: ja.id, nova: false };
+    }
+    const novo = id();
+    await this.db
+      .prepare(
+        `INSERT INTO segmento_regras (id, tenant_id, segmento, cfop, observacao, criado_por, criado_em)
+         VALUES (?,?,?,?,?,?,?)`,
+      )
+      .bind(novo, this.tenant, segmento, cfop, obs, this.ctx.sessao.usuarioId, agora())
+      .run();
+    await this.aud.registrar(this.evento({
+      acao: 'criar', entidade: 'segmento_regra', entidadeId: novo,
+      valorDepois: `${segmento}: não pode ${cfop}${obs ? ` — ${obs}` : ''}`, origem: 'manual',
+    }));
+    return { id: novo, nova: true };
+  }
+
+  /** Tira a regra sem apagar: fica a data e quem tirou, e a trilha. */
+  async removerRegraSegmento(regraId: string): Promise<boolean> {
+    const r = await this.db
+      .prepare('SELECT id, segmento, cfop, observacao FROM segmento_regras WHERE tenant_id = ? AND id = ? AND removido_em IS NULL')
+      .bind(this.tenant, regraId)
+      .first<any>();
+    if (!r) return false;
+    await this.db
+      .prepare('UPDATE segmento_regras SET removido_em = ?, removido_por = ? WHERE id = ?')
+      .bind(agora(), this.ctx.sessao.usuarioId, r.id)
+      .run();
+    await this.aud.registrar(this.evento({
+      acao: 'excluir', entidade: 'segmento_regra', entidadeId: r.id,
+      valorAntes: `${r.segmento}: não pode ${r.cfop}${r.observacao ? ` — ${r.observacao}` : ''}`, origem: 'manual',
+    }));
+    return true;
+  }
+
+  /** O segmento da empresa e os CFOPs que não combinam com ele (CFOP → motivo). */
+  async segmentoDaEmpresa(empresaId: string): Promise<{ nome: string | null; proibidos: Record<string, string | null> }> {
+    this.exigirEmpresa(empresaId);
+    const e = await this.db
+      .prepare('SELECT segmento FROM empresas WHERE tenant_id = ? AND id = ?')
+      .bind(this.tenant, empresaId)
+      .first<any>();
+    const nome = limparSegmento(e?.segmento);
+    if (!nome) return { nome: null, proibidos: {} };
+    const { results } = await this.db
+      .prepare('SELECT segmento, cfop, observacao FROM segmento_regras WHERE tenant_id = ? AND removido_em IS NULL')
+      .bind(this.tenant)
+      .all<any>();
+    const k = chaveSegmento(nome);
+    return {
+      nome,
+      proibidos: Object.fromEntries(results.filter((r: any) => chaveSegmento(r.segmento) === k).map((r: any) => [r.cfop, r.observacao ?? null])),
+    };
+  }
+
+  // ---------------------------------------------------------------- aviso na linha (22/10)
+
+  /** "Isso aqui tinha que ser 1910": ela escreve na linha da nota, para o Mateus. */
+  async avisarNoItem(itemId: string, texto: string): Promise<{ id: string; empresaId: string; notaId: string }> {
+    const it = await this.db
+      .prepare(
+        `SELECT i.id, i.nota_id, i.x_prod_original, i.x_prod_novo, i.cfop_original, i.cfop_novo, n.empresa_id
+           FROM itens i JOIN notas n ON n.id = i.nota_id WHERE i.tenant_id = ? AND i.id = ?`,
+      )
+      .bind(this.tenant, itemId)
+      .first<any>();
+    if (!it) throw new ForaDoEscopo('Item não encontrado');
+    this.exigirEmpresa(it.empresa_id);
+    const novo = id();
+    const s = this.ctx.sessao;
+    await this.db
+      .prepare(
+        `INSERT INTO aviso_item (id, tenant_id, empresa_id, nota_id, item_id, texto, produto, cfop_original, cfop_linha,
+                                 usuario_id, usuario_nome, criado_em)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .bind(novo, this.tenant, it.empresa_id, it.nota_id, it.id, texto, it.x_prod_novo || it.x_prod_original || null,
+        it.cfop_original ?? null, it.cfop_novo ?? null, s.usuarioId, s.nome ?? null, agora())
+      .run();
+    return { id: novo, empresaId: it.empresa_id, notaId: it.nota_id };
+  }
+
+  /** Avisos de uma nota (para a linha mostrar o que já foi escrito). */
+  async avisosDaNota(notaId: string): Promise<any[]> {
+    const { results } = await this.db
+      .prepare('SELECT id, item_id, texto, usuario_nome, criado_em FROM aviso_item WHERE tenant_id = ? AND nota_id = ? ORDER BY criado_em')
+      .bind(this.tenant, notaId)
+      .all<any>();
+    return results;
+  }
+
+  /** Avisos no intervalo (ISO, [de, ate)), os mais recentes primeiro, das empresas que a pessoa vê. */
+  async avisosDoPeriodo(de: string, ate: string): Promise<any[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT a.id, a.empresa_id, e.razao_social, a.nota_id, n.numero, n.emit_nome, a.item_id, i.n_item,
+                a.texto, a.produto, a.cfop_original, a.cfop_linha, i.cfop_novo AS cfop_agora,
+                a.usuario_nome, a.criado_em
+           FROM aviso_item a
+           LEFT JOIN empresas e ON e.id = a.empresa_id
+           LEFT JOIN notas n ON n.id = a.nota_id
+           LEFT JOIN itens i ON i.id = a.item_id
+          WHERE a.tenant_id = ? AND a.criado_em >= ? AND a.criado_em < ?
+          ORDER BY a.criado_em DESC LIMIT 300`,
+      )
+      .bind(this.tenant, de, ate)
+      .all<any>();
+    return results.filter((r: any) => podeVerEmpresa(this.ctx.sessao, r.empresa_id));
   }
 
   /** Uma conversa inteira, em ordem, com o que aconteceu em cada resposta. */

@@ -178,6 +178,7 @@
       <div class="nav-grupo g-impostos">
         <div class="navlabel">Regras de impostos</div>
         <button data-view="vRegrasIcms"><span class="num">%</span><span>Regras de ICMS<span class="sub">manter ou Outras, por CFOP</span></span></button>
+        <button data-view="vSegmentos"><span class="num">≠</span><span>Regras por segmento<span class="sub">CFOP que não combina</span></span></button>
       </div>
       <div class="nav-grupo g-empresa">
         <div class="navlabel">Da empresa selecionada</div>
@@ -586,6 +587,27 @@
         </div>
       </section>
 
+      <!-- --------------------------------------------------- REGRAS POR SEGMENTO (22/10) -->
+      <section id="vSegmentos" class="hidden">
+        <h1>Regras por segmento</h1>
+        <p class="page-desc">Para cada tipo de empresa, os CFOPs de entrada que não podem aparecer. Ex.: imobiliária não compra
+          mercadoria, então não pode ter 1102. Quando uma linha de nota de uma empresa desse segmento cair num desses CFOPs,
+          a linha avisa, e o relatório por CFOP também. Não muda nada sozinho. O segmento de cada empresa fica no cadastro dela.</p>
+        <div class="card" id="seg-nova">
+          <header><h2>Nova regra</h2><span class="hint">vale para todas as empresas do segmento</span></header>
+          <div class="body">
+            <form id="form-seg" class="toolbar" style="padding:0;flex-wrap:wrap">
+              <input type="text" id="seg-nome" list="lista-segmentos" placeholder="Segmento (ex.: Imobiliária)" maxlength="60" style="width:210px" autocomplete="off">
+              <input type="text" id="seg-cfop" placeholder="CFOP (ex.: 1102)" maxlength="4" inputmode="numeric" style="width:120px" autocomplete="off">
+              <input type="text" id="seg-obs" placeholder="Por quê (opcional) — ex.: imobiliária não compra mercadoria" maxlength="300" style="min-width:300px;flex:1" autocomplete="off">
+              <button class="btn sm primary" type="submit">Adicionar</button>
+            </form>
+          </div>
+        </div>
+        <div id="seg-lista"></div>
+        <datalist id="lista-segmentos"></datalist>
+      </section>
+
       <section id="vRegrasIcms" class="hidden">
         <h1>Regras de ICMS por CFOP</h1>
         <p class="page-desc">Uma coluna por regime: cada empresa usa a do regime do cadastro dela. <b>Presumido</b> vale
@@ -749,6 +771,15 @@
             <div class="scroll"><table id="tbl-conversas">
               <thead><tr><th>Última mensagem</th><th>Empresa</th><th>Quem</th><th>Começou com</th><th class="num">Perguntas</th>
                 <th class="num">Propostas</th><th class="num">Confirmadas</th><th class="num">De lado</th><th class="num">Ajustes</th><th class="num">Erros</th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+        <div class="card">
+          <header><h2>Avisos nas notas</h2><span class="hint">o que foi escrito no "💬 avisar" das linhas, no mesmo período</span></header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-avisos">
+              <thead><tr><th>Quando</th><th>Quem</th><th>Empresa</th><th>Nota · item</th><th>Produto</th><th>CFOP veio → linha (hoje)</th><th>Aviso</th><th></th></tr></thead>
               <tbody></tbody>
             </table></div>
           </div>
