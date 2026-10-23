@@ -77,9 +77,8 @@
               id="btn-voltar-login4">Voltar</button>
     </div>
     <div id="esqueci-campos">
-      <p class="page-desc">Um administrador do escritório vai gerar uma senha provisória
-        para você. Não mandamos link por e-mail — assim não existe link de redefinição
-        circulando por caixa de entrada nenhuma.</p>
+      <p class="page-desc">O pedido aparece para o administrador do escritório. Ele gera um
+        link para você criar uma senha nova e te manda (o sistema não manda e-mail).</p>
       <div class="campo">
         <label class="fl" for="esq-email">Seu e-mail</label>
         <input type="email" id="esq-email" autocomplete="username">
@@ -90,6 +89,36 @@
         <a href="#" id="btn-voltar-login3">Voltar</a>
       </p>
     </div>
+  </form>
+
+  <!-- Link de acesso (23/10): quem administra cria a conta ou pede senha nova e manda
+       o link; a pessoa abre aqui, cria a senha dela e já entra. -->
+  <form class="login-card hidden" id="form-acesso">
+    <div class="logo"><span class="mark">AF</span> Alfa Fiscal</div>
+    <p class="sub" id="acesso-titulo">Criar sua senha</p>
+    <div id="acesso-erro" class="login-erro hidden"></div>
+    <div id="acesso-campos" class="hidden">
+      <p class="page-desc" id="acesso-ola"></p>
+      <div class="campo">
+        <label class="fl" for="acesso-email">Seu e-mail (é com ele que você entra)</label>
+        <input type="email" id="acesso-email" autocomplete="username" readonly>
+      </div>
+      <div class="campo">
+        <label class="fl" for="acesso-senha">Senha</label>
+        <input type="password" id="acesso-senha" autocomplete="new-password">
+      </div>
+      <div class="campo">
+        <label class="fl" for="acesso-senha2">Repita a senha</label>
+        <input type="password" id="acesso-senha2" autocomplete="new-password">
+      </div>
+      <p class="page-desc">Pelo menos 12 caracteres. Uma frase longa vale mais que
+        símbolo estranho — e você não vai anotá-la num papel.</p>
+      <button class="btn primary" style="width:100%;justify-content:center"
+              id="btn-acesso">Salvar e entrar</button>
+    </div>
+    <p class="page-desc" style="text-align:center;margin:.9rem 0 0">
+      <a href="#" id="btn-voltar-login5">Ir para a tela de entrar</a>
+    </p>
   </form>
 
   <!-- Cadastro. A conta nasce pendente: existe, tem senha, e não faz nada até
@@ -178,6 +207,7 @@
       <div class="nav-grupo g-impostos">
         <div class="navlabel">Regras de impostos</div>
         <button data-view="vRegrasIcms"><span class="num">%</span><span>Regras de ICMS<span class="sub">manter ou Outras, por CFOP</span></span></button>
+        <button data-view="vSegmentos"><span class="num">≠</span><span>Regras por segmento<span class="sub">CFOP que não combina</span></span></button>
       </div>
       <div class="nav-grupo g-empresa">
         <div class="navlabel">Da empresa selecionada</div>
@@ -586,6 +616,27 @@
         </div>
       </section>
 
+      <!-- --------------------------------------------------- REGRAS POR SEGMENTO (22/10) -->
+      <section id="vSegmentos" class="hidden">
+        <h1>Regras por segmento</h1>
+        <p class="page-desc">Para cada tipo de empresa, os CFOPs de entrada que não podem aparecer. Ex.: imobiliária não compra
+          mercadoria, então não pode ter 1102. Quando uma linha de nota de uma empresa desse segmento cair num desses CFOPs,
+          a linha avisa, e o relatório por CFOP também. Não muda nada sozinho. O segmento de cada empresa fica no cadastro dela.</p>
+        <div class="card" id="seg-nova">
+          <header><h2>Nova regra</h2><span class="hint">vale para todas as empresas do segmento</span></header>
+          <div class="body">
+            <form id="form-seg" class="toolbar" style="padding:0;flex-wrap:wrap">
+              <input type="text" id="seg-nome" list="lista-segmentos" placeholder="Segmento (ex.: Imobiliária)" maxlength="60" style="width:210px" autocomplete="off">
+              <input type="text" id="seg-cfop" placeholder="CFOP (ex.: 1102)" maxlength="4" inputmode="numeric" style="width:120px" autocomplete="off">
+              <input type="text" id="seg-obs" placeholder="Por quê (opcional) — ex.: imobiliária não compra mercadoria" maxlength="300" style="min-width:300px;flex:1" autocomplete="off">
+              <button class="btn sm primary" type="submit">Adicionar</button>
+            </form>
+          </div>
+        </div>
+        <div id="seg-lista"></div>
+        <datalist id="lista-segmentos"></datalist>
+      </section>
+
       <section id="vRegrasIcms" class="hidden">
         <h1>Regras de ICMS por CFOP</h1>
         <p class="page-desc">Uma coluna por regime: cada empresa usa a do regime do cadastro dela. <b>Presumido</b> vale
@@ -612,11 +663,10 @@
       <!-- ------------------------------------------------- USUÁRIOS -->
       <section id="vUsuarios" class="hidden">
         <h1>Usuários</h1>
-        <p class="page-desc">Duas portas, e as duas passam por aqui. <b>Você cria a conta</b>
-          — o sistema gera uma senha provisória que a pessoa troca no primeiro acesso, então
-          nem quem criou sabe a senha definitiva dela. Ou <b>a pessoa se cadastra</b> na tela
-          de entrada e escolhe a própria senha; a conta fica esperando você liberar, sem papel
-          nenhum e sem conseguir entrar.</p>
+        <p class="page-desc"><b>Para pôr alguém:</b> clique em <b>+ Novo usuário</b>, escolha o
+          papel e salve. Aparece um <b>link</b>: mande para a pessoa pelo WhatsApp. Ela abre,
+          cria a senha dela e já entra. <b>O sistema não manda e-mail.</b>
+          Esqueceu a senha ou perdeu o link? Botão <b>Link de acesso</b> na linha dela.</p>
         <div id="aviso-pendentes" class="hidden" style="background:#fff6e5;border:1px solid #f0dcb0;
           border-radius:8px;padding:.6rem .8rem;margin-bottom:.8rem;font-size:.86rem;color:#7a5a1e"></div>
         <div class="card">
@@ -749,6 +799,15 @@
             <div class="scroll"><table id="tbl-conversas">
               <thead><tr><th>Última mensagem</th><th>Empresa</th><th>Quem</th><th>Começou com</th><th class="num">Perguntas</th>
                 <th class="num">Propostas</th><th class="num">Confirmadas</th><th class="num">De lado</th><th class="num">Ajustes</th><th class="num">Erros</th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+        <div class="card">
+          <header><h2>Avisos nas notas</h2><span class="hint">o que foi escrito no "💬 avisar" das linhas, no mesmo período</span></header>
+          <div class="body tight">
+            <div class="scroll"><table id="tbl-avisos">
+              <thead><tr><th>Quando</th><th>Quem</th><th>Empresa</th><th>Nota · item</th><th>Produto</th><th>CFOP veio → linha (hoje)</th><th>Aviso</th><th></th></tr></thead>
               <tbody></tbody>
             </table></div>
           </div>

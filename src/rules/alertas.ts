@@ -433,6 +433,7 @@ export type EstiloLinha = {
  *   'manual'    - alguem digitou ali, nesta nota, e o sistema ainda nao
  *                 transformou isso em regra que casasse com este item
  *   'perfil'    - chute pelo perfil fiscal da empresa; ninguem ensinou nada
+ *   'saida'     - palpite pelo CFOP que veio (5910 -> 1910, 5949 -> 1949; 22/10)
  *   'nenhuma'   - veio do XML do fornecedor, ou esta vazio
  *
  * Isto nao MUDA o que e grave - muda o que a linha CONTA. Foi pedido da contadora
@@ -448,7 +449,7 @@ export type Procedencia = {
    * no "Conferir os que vieram certos" - a Sprite foi conferida 1102 por causa de outro
    * refrigerante, e ela achou que tinha ensinado errado.
    */
-  fonte: 'fixada' | 'aprendida' | 'parecido' | 'manual' | 'perfil' | 'nenhuma';
+  fonte: 'fixada' | 'aprendida' | 'parecido' | 'manual' | 'perfil' | 'saida' | 'nenhuma';
   /** quantas vezes a regra ja foi usada; so faz sentido em 'aprendida' e 'parecido' */
   usos?: number;
   /** o que a regra diz hoje, quando difere do valor da linha (a regra mudou depois) */

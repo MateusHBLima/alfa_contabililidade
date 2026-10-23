@@ -60,6 +60,21 @@ let r2: R2Local;
 let sessao: Sessao;
 let repo: Repo;
 
+/**
+ * 23/10: usuário novo nasce com link de acesso, não com senha provisória. Usa o link
+ * (como a pessoa faria na tela) e devolve a senha criada.
+ */
+async function senhaPeloLink(
+  amb: () => unknown, criado: { link: { codigo: string } }, senha = 'frase criada pelo link 1',
+): Promise<string> {
+  const r = await app.fetch(new Request('http://x/api/acesso/usar', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ codigo: criado.link.codigo, senha }),
+  }), amb() as never);
+  if (r.status !== 200) throw new Error(`link de acesso: ${r.status} ${await r.text()}`);
+  return senha;
+}
+
 async function semear() {
   db = new D1Local();
   db.migrar();
@@ -90,7 +105,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(34); // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026), produto_atencao (0031), conversas do assistente (0032: conversa, mensagem, evento)
+    expect(tabelas.length).toBe(37); // + links_acesso (0034) // + segmento_regras e aviso_item (0033) // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026), produto_atencao (0031), conversas do assistente (0032: conversa, mensagem, evento)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(4); // + Somente leitura (0029)
   });
@@ -1336,7 +1351,7 @@ describe('permissões por verbo e administração', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'op@alfacontabil.net', nome: 'Op', papelId }),
     });
-    const { senhaProvisoria } = await novo.json() as { senhaProvisoria: string };
+    const senhaProvisoria = await senhaPeloLink(ambiente, await novo.json());
     const login = await entrar('op@alfacontabil.net', senhaProvisoria);
     const ck = (login.headers.get('Set-Cookie') ?? '').split(';')[0]!;
 
@@ -1397,7 +1412,7 @@ describe('permissões por verbo e administração', () => {
       body: JSON.stringify({ email: 'jr@alfacontabil.net', nome: 'Fiscal Jr', papelId }),
     });
     expect(novo.status).toBe(201);
-    const { senhaProvisoria } = await novo.json() as { senhaProvisoria: string };
+    const senhaProvisoria = await senhaPeloLink(ambiente, await novo.json());
 
     const login = await entrar('jr@alfacontabil.net', senhaProvisoria);
     const ck = (login.headers.get('Set-Cookie') ?? '').split(';')[0]!;
@@ -1436,7 +1451,7 @@ describe('permissões por verbo e administração', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'lim@alfacontabil.net', nome: 'Limitado', papelId }),
     });
-    const { senhaProvisoria } = await novo.json() as { senhaProvisoria: string };
+    const senhaProvisoria = await senhaPeloLink(ambiente, await novo.json());
     const l = await entrar('lim@alfacontabil.net', senhaProvisoria);
     const ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
     await app.fetch(new Request('http://x/api/trocar-senha', {
@@ -1468,7 +1483,7 @@ describe('permissões por verbo e administração', () => {
       }),
     });
     expect(novo.status).toBe(201);
-    const { senhaProvisoria } = await novo.json() as { senhaProvisoria: string };
+    const senhaProvisoria = await senhaPeloLink(ambiente, await novo.json());
     const l = await entrar('exc@alfacontabil.net', senhaProvisoria);
     const ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
     await app.fetch(new Request('http://x/api/trocar-senha', {
@@ -1484,20 +1499,46 @@ describe('permissões por verbo e administração', () => {
     expect(eu.permissoes).toContain('notas.editar_cfop');    // o resto do papel continua
   });
 
-  it('usuário novo nasce com senha provisória e obrigado a trocar', async () => {
+  it('usuário novo nasce com link de acesso: cria a senha pelo link e entra direto (23/10)', async () => {
     const papeis = await (await req('/api/papeis')).json() as any[];
     const novo = await req('/api/usuarios', {
       method: 'POST',
       body: JSON.stringify({ email: 'prov@alfacontabil.net', nome: 'Provisória', papelId: papeis[0].id }),
     });
-    const { senhaProvisoria } = await novo.json() as { senhaProvisoria: string };
-    expect(senhaProvisoria.length).toBeGreaterThanOrEqual(12);
+    expect(novo.status).toBe(201);
+    const criado = await novo.json() as any;
+    expect(criado.senhaProvisoria).toBeUndefined();
+    expect(criado.link.motivo).toBe('primeiro');
+    expect(criado.link.codigo.length).toBeGreaterThanOrEqual(20);
 
-    const l = await entrar('prov@alfacontabil.net', senhaProvisoria);
-    const ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
-    // Entra, mas a sessão só serve para trocar a senha.
-    expect((await req('/api/empresas', {}, ck)).status).toBe(403);
-    expect((await req('/api/eu', {}, ck)).status).toBe(200);
+    const publico = (caminho: string, corpo: unknown) => app.fetch(new Request(`http://x${caminho}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(corpo),
+    }), ambiente());
+
+    // Na lista: esperando a pessoa criar a senha, com o link valendo.
+    let u = ((await (await req('/api/usuarios')).json()) as any[]).find((x) => x.email === 'prov@alfacontabil.net');
+    expect(u.aguardandoSenha).toBe(true);
+    expect(u.linkExpira).toBeTruthy();
+
+    // A tela do link diz de quem é.
+    const ver = await publico('/api/acesso/ver', { codigo: criado.link.codigo });
+    expect(ver.status).toBe(200);
+    expect(await ver.json()).toMatchObject({ nome: 'Provisória', email: 'prov@alfacontabil.net', motivo: 'primeiro' });
+
+    // Senha fraca não passa — e não gasta o link.
+    expect((await publico('/api/acesso/usar', { codigo: criado.link.codigo, senha: 'curta' })).status).toBe(400);
+
+    const senha = await senhaPeloLink(ambiente, criado);
+    const l = await entrar('prov@alfacontabil.net', senha);
+    expect(l.status).toBe(200);
+    // Entra direto: a senha é dela, não há troca obrigatória.
+    expect((await l.json() as any).deveTrocarSenha).toBe(false);
+
+    // Uso único.
+    expect((await publico('/api/acesso/usar', { codigo: criado.link.codigo, senha: 'outra frase comprida 9' })).status).toBe(404);
+    u = ((await (await req('/api/usuarios')).json()) as any[]).find((x) => x.email === 'prov@alfacontabil.net');
+    expect(u.aguardandoSenha).toBe(false);
+    expect(u.linkExpira).toBeNull();
   });
 
   it('mudar permissão derruba as sessões da pessoa na hora', async () => {
@@ -1507,7 +1548,9 @@ describe('permissões por verbo e administração', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'ses@alfacontabil.net', nome: 'Sessão', papelId: papeis[0].id }),
     });
-    const { id, senhaProvisoria } = await novo.json() as { id: string; senhaProvisoria: string };
+    const criado = await novo.json() as any;
+    const id = criado.id as string;
+    const senhaProvisoria = await senhaPeloLink(ambiente, criado);
     const l = await entrar('ses@alfacontabil.net', senhaProvisoria);
     const ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
 
@@ -1554,7 +1597,9 @@ describe('permissões por verbo e administração', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'des@alfacontabil.net', nome: 'Desativado', papelId: papeis[0].id }),
     });
-    const { id, senhaProvisoria } = await novo.json() as { id: string; senhaProvisoria: string };
+    const criado = await novo.json() as any;
+    const id = criado.id as string;
+    const senhaProvisoria = await senhaPeloLink(ambiente, criado);
     const l = await entrar('des@alfacontabil.net', senhaProvisoria);
     const ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
 
@@ -1579,7 +1624,7 @@ describe('permissões por verbo e administração', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'op@alfacontabil.net', nome: 'Operador', papelId: operador.id }),
     });
-    const { senhaProvisoria } = await novo.json() as { senhaProvisoria: string };
+    const senhaProvisoria = await senhaPeloLink(ambiente, await novo.json());
     const l = await entrar('op@alfacontabil.net', senhaProvisoria);
     const ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
     await app.fetch(new Request('http://x/api/trocar-senha', {
@@ -2378,7 +2423,7 @@ describe('convite: entrar já liberado, sem ninguém aprovar', () => {
     const novo = await post('/api/usuarios', {
       email: 'conv@alfacontabil.net', nome: 'Convidador', papelId: conv.id,
     }, cookieAdmin);
-    const { senhaProvisoria } = await novo.json() as { senhaProvisoria: string };
+    const senhaProvisoria = await senhaPeloLink(ambiente, await novo.json());
     const l = await post('/api/login', { email: 'conv@alfacontabil.net', senha: senhaProvisoria });
     const ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
     await post('/api/trocar-senha', { senhaAtual: senhaProvisoria, senhaNova: 'sexta frase aqui 12' }, ck);
@@ -2524,7 +2569,7 @@ describe('"é sempre assim": a contadora fixa um produto, não o mundo', () => {
       method: 'POST',
       body: JSON.stringify({ nome: 'Aux', email: 'aux@alfacontabil.net', papelId }),
     });
-    const { senhaProvisoria } = await novo.json() as any;
+    const senhaProvisoria = await senhaPeloLink(ambiente, await novo.json());
 
     const l = await app.fetch(new Request('http://x/api/login', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -3126,7 +3171,7 @@ describe('"quero ver como que tava" — a trilha do item', () => {
       method: 'POST',
       body: JSON.stringify({ nome: 'Aux', email: 'semtrilha@alfacontabil.net', papelId }),
     });
-    const { senhaProvisoria } = await novo.json() as any;
+    const senhaProvisoria = await senhaPeloLink(ambiente, await novo.json());
 
     const l = await app.fetch(new Request('http://x/api/login', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -4382,7 +4427,8 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     }), ambiente());
     ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
     empresaId = (await json('/api/empresas', {
-      method: 'POST', body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'ITALIANA', uf: 'SC', perfil: 'revenda', regime: 'simples' }),
+      // Sem liberar para todos (22/10): estes testes partem de empresa sem ninguém vinculado.
+      method: 'POST', body: JSON.stringify({ cnpj: '11222333000181', razaoSocial: 'ITALIANA', uf: 'SC', perfil: 'revenda', regime: 'simples', liberarParaTodos: false }),
     })).id;
   });
 
@@ -5265,7 +5311,7 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
 
   it('busca automática continua quando quem ligou vira responsável de outra empresa (13/10)', async () => {
     await automatica({ ligada: true, desde: '2026-10-01' });
-    const outra = await repo.criarEmpresa({ cnpj: '12.345.678/0001-95', razaoSocial: 'EMPRESA NOVA', uf: 'SC', perfil: 'revenda' });
+    const outra = await repo.criarEmpresa({ cnpj: '12.345.678/0001-95', razaoSocial: 'EMPRESA NOVA', uf: 'SC', perfil: 'revenda', liberarParaTodos: false });
     db.consultar("INSERT INTO usuario_empresas (usuario_id, empresa_id) VALUES ('u1', ?)", outra);
     respostas.push(() => new Response(retorno('117', 'nada', { ult: '0' })));
     const r = await rodar();
@@ -5946,5 +5992,237 @@ describe('16/10: assistente — ela conversa, a IA propõe, só o clique dela gr
     expect(conversa.mensagens[3].passos[0]).toMatchObject({ ferramenta: 'anotar_ajuste' });
     // Só registro: a marca é a do clique, nada a mais.
     expect(db.consultar('SELECT c_prod FROM produto_atencao WHERE removido_em IS NULL')).toEqual([{ c_prod: a.c_prod }]);
+  });
+});
+
+describe('22/10: pacote 2 da reunião de 15/10', () => {
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  const entrar = async (email: string) => ((await app.fetch(new Request('http://x/api/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, senha: 'uma frase de senha longa' }),
+  }), ambiente())).headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  const como = (ck: string) => (c: string, o: RequestInit = {}) => app.fetch(new Request(`http://x${c}`, {
+    ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+  }), ambiente());
+  const novoUsuario = async (id: string, email: string, papel: string, extra = '') => {
+    await db.prepare(`INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, criado_em${extra ? ', pendente' : ''}) VALUES (?,?,?,?,?,?${extra ? ', 1' : ''})`)
+      .bind(id, 'alfa', email, id, await gerarHashSenha('uma frase de senha longa'), new Date().toISOString()).run();
+    await db.prepare('INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES (?,?)').bind(id, papel).run();
+  };
+  let req: ReturnType<typeof como>;
+  beforeEach(async () => { req = como(await entrar('contadora@alfacontabil.net')); });
+  const post = (c: string, corpo: unknown, r = req) => r(c, { method: 'POST', body: JSON.stringify(corpo) });
+
+  it('empresa nova já vem liberada para todos os usuários ativos e com o segmento; mudar o segmento fica na trilha', async () => {
+    await novoUsuario('u-op', 'op@alfacontabil.net', 'papel-operador');
+    await novoUsuario('u-pend', 'pend@alfacontabil.net', 'papel-operador', 'pendente');
+    const r = await post('/api/empresas', { cnpj: '11222333000181', razaoSocial: 'RESTAURANTE NOVO LTDA', uf: 'SC', perfil: 'revenda', segmento: '  Restaurante ' });
+    expect(r.status).toBe(201);
+    const { id } = (await r.json()) as any;
+    const vinculados = (db.consultar('SELECT usuario_id FROM usuario_empresas WHERE empresa_id = ? ORDER BY usuario_id', id) as any[]).map((x) => x.usuario_id);
+    expect(vinculados).toEqual(['u-op', 'u1']);
+    expect((db.consultar('SELECT segmento FROM empresas WHERE id = ?', id)[0] as any).segmento).toBe('Restaurante');
+    expect((await req(`/api/empresas/${id}`, { method: 'PATCH', body: JSON.stringify({ segmento: 'Imobiliária' }) })).status).toBe(200);
+    expect(db.consultar(`SELECT valor_antes, valor_depois FROM auditoria WHERE entidade = 'empresa' AND campo = 'segmento'`)).toEqual([{ valor_antes: 'Restaurante', valor_depois: 'Imobiliária' }]);
+    // Quem desmarca na criação não libera.
+    const r2b = await post('/api/empresas', { cnpj: '11222333000262', razaoSocial: 'OUTRA LTDA', uf: 'SC', perfil: 'revenda', liberarParaTodos: false });
+    expect(db.consultar('SELECT 1 FROM usuario_empresas WHERE empresa_id = ?', ((await r2b.json()) as any).id)).toHaveLength(0);
+  });
+
+  it('regra por segmento: a linha avisa e o relatório marca; operador não cria; tirar não apaga', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'IMOBILIARIA PILOTO LTDA', uf: 'SC', perfil: 'revenda', segmento: 'Imobiliária' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '81') }]);
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    const r1 = await post('/api/segmentos/regras', { segmento: 'imobiliária', cfop: '1102', observacao: 'imobiliária não compra mercadoria' });
+    expect(r1.status).toBe(201);
+    expect((await post('/api/segmentos/regras', { segmento: 'IMOBILIÁRIA', cfop: '1102', observacao: 'imobiliária não compra mercadoria' })).status).toBe(200);
+    expect((await post('/api/segmentos/regras', { segmento: 'Imobiliária', cfop: '5102' })).status).toBe(400);
+
+    const itens = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens;
+    const em1102 = itens.filter((i: any) => i.cfop_novo === '1102');
+    expect(em1102.length).toBeGreaterThan(0);
+    for (const i of em1102) {
+      expect(i.alertas).toContainEqual(expect.objectContaining({ codigo: 'segmento_cfop', titulo: '1102 não combina com Imobiliária', detalhe: expect.stringContaining('não compra mercadoria') }));
+    }
+    expect(itens.filter((i: any) => i.cfop_novo !== '1102').every((i: any) => !i.alertas.some((a: any) => a.codigo === 'segmento_cfop'))).toBe(true);
+    const rel = (await (await req(`/api/empresas/${empresaId}/relatorios/cfop`)).json()) as any;
+    expect(rel.segmento).toEqual({ nome: 'Imobiliária', proibidos: { '1102': 'imobiliária não compra mercadoria' } });
+    const segs = ((await (await req('/api/segmentos')).json()) as any).segmentos;
+    expect(segs).toEqual([expect.objectContaining({ nome: 'Imobiliária', empresas: 1, regras: [expect.objectContaining({ cfop: '1102' })] })]);
+
+    await novoUsuario('u-op', 'op@alfacontabil.net', 'papel-operador');
+    const op = como(await entrar('op@alfacontabil.net'));
+    expect((await post('/api/segmentos/regras', { segmento: 'Restaurante', cfop: '1556' }, op)).status).toBe(403);
+
+    const regraId = ((await r1.json()) as any).id;
+    expect((await post(`/api/segmentos/regras/${regraId}/remover`, {})).status).toBe(200);
+    expect(db.consultar('SELECT removido_em FROM segmento_regras')).toEqual([{ removido_em: expect.any(String) }]);
+    const depois = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens;
+    expect(depois.some((i: any) => i.alertas.some((a: any) => a.codigo === 'segmento_cfop'))).toBe(false);
+    expect(db.consultar(`SELECT acao FROM auditoria WHERE entidade = 'segmento_regra' ORDER BY id`).map((x: any) => x.acao)).toEqual(['criar', 'excluir']);
+  });
+
+  it('palpite pelo CFOP que veio: 5910 entra 1910; nota já importada com o palpite do perfil se ajeita ao abrir', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '82', [['<CFOP>5102</CFOP>', '<CFOP>5910</CFOP>']]) }]);
+    const itens = db.consultar('SELECT id, TRIM(cfop_original) AS veio, cfop_novo, cfop_origem FROM itens ORDER BY n_item') as any[];
+    const brinde = itens.find((i) => i.veio === '5910');
+    expect(brinde).toMatchObject({ cfop_novo: '1910', cfop_origem: 'saida' });
+    expect(itens.find((i) => i.veio === '5102')).toMatchObject({ cfop_novo: '1102', cfop_origem: 'perfil' });
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    let tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela.procedencia).toEqual({ fonte: 'saida' });
+    // Como as notas importadas antes deste pacote estão: palpite do perfil (1102) num item 5910.
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'perfil' WHERE id = ?`, brinde.id);
+    tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela).toMatchObject({ cfop_novo: '1910', cfop_origem: 'saida' });
+    // O que alguém digitou não muda.
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'manual' WHERE id = ?`, brinde.id);
+    tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela).toMatchObject({ cfop_novo: '1102', cfop_origem: 'manual' });
+  });
+
+  it('aviso na linha: grava com a foto do momento, aparece na nota e na lista do dia; somente leitura não avisa', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '83') }]);
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    const item = db.consultar('SELECT id, x_prod_original, TRIM(cfop_original) AS veio, cfop_novo FROM itens ORDER BY n_item')[0] as any;
+    const antes = JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'));
+    const r = await post(`/api/itens/${item.id}/avisos`, { texto: 'isso aqui tinha que ser 1910, veio de bonificação' });
+    expect(r.status).toBe(201);
+    expect(JSON.stringify(db.consultar('SELECT * FROM itens ORDER BY id'))).toBe(antes);
+    expect((await post(`/api/itens/${item.id}/avisos`, { texto: '  ' })).status).toBe(400);
+    const tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === item.id);
+    expect(tela.avisos).toEqual([{ texto: 'isso aqui tinha que ser 1910, veio de bonificação', por: 'Contadora', em: expect.any(String) }]);
+    const hoje = new Date(Date.now() - 3 * 3600_000).toISOString().slice(0, 10);
+    const lista = ((await (await req(`/api/avisos?de=${hoje}`)).json()) as any).avisos;
+    expect(lista).toEqual([expect.objectContaining({ produto: item.x_prod_original, cfop_original: item.veio, cfop_linha: item.cfop_novo, nota_id: nota, item_id: item.id })]);
+    await novoUsuario('u-leitura', 'leitura@alfacontabil.net', 'papel-leitura');
+    const leitura = como(await entrar('leitura@alfacontabil.net'));
+    expect((await post(`/api/itens/${item.id}/avisos`, { texto: 'x' }, leitura)).status).toBe(403);
+    expect((await leitura(`/api/avisos?de=${hoje}`)).status).toBe(200);
+  });
+});
+
+/* 23/10 (Amanda): a Taís criou o usuário, a Amanda não recebeu e-mail nenhum (o sistema
+   não manda), a Taís mandou um convite, a Amanda usou com o mesmo e-mail e ouviu "precisa
+   liberar" — sem nada para liberar. Agora tudo passa por um link que quem administra manda
+   pelo WhatsApp, e o convite com e-mail que já existe diz isso com todas as letras. */
+describe('23/10: link de acesso — a Taís gerencia as contas sozinha', () => {
+  const SENHA = 'uma frase de senha longa';
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  const publico = (c: string, corpo: unknown) => app.fetch(new Request(`http://x${c}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'CF-Connecting-IP': '203.0.113.77' },
+    body: JSON.stringify(corpo),
+  }), ambiente());
+  const login = (email: string, senha: string) => publico('/api/login', { email, senha });
+  const cookie = (r: Response) => (r.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  const como = (ck: string) => (c: string, o: RequestInit = {}) => app.fetch(new Request(`http://x${c}`, {
+    ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+  }), ambiente());
+  let req: ReturnType<typeof como>;
+  beforeEach(async () => { req = como(cookie(await login('contadora@alfacontabil.net', SENHA))); });
+  const post = (c: string, corpo: unknown, r = req) => r(c, { method: 'POST', body: JSON.stringify(corpo) });
+  const usuario = async (email: string) =>
+    ((await (await req('/api/usuarios')).json()) as any[]).find((u) => u.email === email);
+
+  it('o caso da Amanda: conta com senha provisória antiga, nunca entrou — o link resolve', async () => {
+    // Como ficou em produção: criada antes desta mudança, senha provisória que ninguém repassou.
+    await db.prepare(
+      `INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, deve_trocar_senha, ativo, criado_em)
+       VALUES ('u-amanda','alfa','amanda@alfacontabil.net','Amanda Terra',?,1,1,?)`,
+    ).bind(await gerarHashSenha('provisoria que se perdeu 1'), new Date().toISOString()).run();
+    await db.prepare("INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES ('u-amanda','papel-operador')").run();
+
+    // Sem a SUA senha não gera: o link dá acesso à conta de outra pessoa.
+    expect((await post('/api/usuarios/u-amanda/link-acesso', {})).status).toBe(400);
+    expect((await post('/api/usuarios/u-amanda/link-acesso', { minhaSenha: 'errada errada 1' })).status).toBe(400);
+    const r = await post('/api/usuarios/u-amanda/link-acesso', { minhaSenha: SENHA });
+    expect(r.status).toBe(201);
+    const { link } = await r.json() as any;
+    expect(link.motivo).toBe('senha');
+    expect((await usuario('amanda@alfacontabil.net')).linkExpira).toBeTruthy();
+
+    // A senha antiga vale até o link ser usado.
+    expect((await login('amanda@alfacontabil.net', 'provisoria que se perdeu 1')).status).toBe(200);
+    expect((await publico('/api/acesso/usar', { codigo: link.codigo, senha: 'frase da terra 2026' })).status).toBe(200);
+    expect((await login('amanda@alfacontabil.net', 'provisoria que se perdeu 1')).status).toBe(401);
+    const entrou = await login('amanda@alfacontabil.net', 'frase da terra 2026');
+    expect(entrou.status).toBe(200);
+    expect((await entrou.json() as any).deveTrocarSenha).toBe(false);
+    // Fica na trilha, sem senha nenhuma escrita.
+    expect(db.consultar("SELECT valor_depois FROM auditoria WHERE entidade = 'link_acesso'")).toEqual([{ valor_depois: 'senha' }]);
+    expect(db.consultar("SELECT valor_depois FROM auditoria WHERE entidade = 'usuario' AND campo = 'senha'"))
+      .toEqual([{ valor_depois: 'criada pelo link (senha)' }]);
+  });
+
+  it('gerar outro link derruba o anterior; link vencido não vale; o código não fica legível no banco', async () => {
+    const r = await post('/api/usuarios', { email: 'nova@alfacontabil.net', nome: 'Nova', papelId: 'papel-operador' });
+    const { id, link: l1 } = await r.json() as any;
+    // Conta sem senha ainda: gerar outro não pede a senha de quem gera.
+    const r2 = await post(`/api/usuarios/${id}/link-acesso`, {});
+    expect(r2.status).toBe(201);
+    const { link: l2 } = await r2.json() as any;
+    expect(l2.motivo).toBe('primeiro');
+    expect((await publico('/api/acesso/ver', { codigo: l1.codigo })).status).toBe(404);
+    expect((await publico('/api/acesso/ver', { codigo: l2.codigo })).status).toBe(200);
+
+    const linhas = db.consultar('SELECT codigo_hash, revogado_em FROM links_acesso WHERE usuario_id = ? ORDER BY criado_em', id) as any[];
+    expect(linhas).toHaveLength(2);
+    for (const x of linhas) expect([l1.codigo, l2.codigo]).not.toContain(x.codigo_hash);
+
+    await db.prepare("UPDATE links_acesso SET expira_em = '2020-01-01T00:00:00.000Z' WHERE usuario_id = ?").bind(id).run();
+    const venc = await publico('/api/acesso/usar', { codigo: l2.codigo, senha: 'frase comprida demais 1' });
+    expect(venc.status).toBe(404);
+    expect((await venc.json() as any).erro).toContain('venceu');
+    const u = await usuario('nova@alfacontabil.net');
+    expect(u.aguardandoSenha).toBe(true);
+    expect(u.linkExpira).toBeNull();
+  });
+
+  it('desativada não usa link; operador não gera link de ninguém', async () => {
+    const r = await post('/api/usuarios', { email: 'saiu@alfacontabil.net', nome: 'Saiu', papelId: 'papel-operador' });
+    const { id, link } = await r.json() as any;
+    await post(`/api/usuarios/${id}/ativo`, { ativo: false });
+    expect((await publico('/api/acesso/usar', { codigo: link.codigo, senha: 'frase comprida demais 1' })).status).toBe(404);
+    expect((await post(`/api/usuarios/${id}/link-acesso`, {})).status).toBe(400);
+
+    // Operador (sem usuarios.criar nem redefinir_senha).
+    const op = await post('/api/usuarios', { email: 'op2@alfacontabil.net', nome: 'Op', papelId: 'papel-operador' });
+    const opSenha = await senhaPeloLink(ambiente, await op.json() as any);
+    const reqOp = como(cookie(await login('op2@alfacontabil.net', opSenha)));
+    expect((await post('/api/usuarios/u1/link-acesso', { minhaSenha: opSenha }, reqOp)).status).toBe(403);
+  });
+
+  it('convite com e-mail que já tem conta diz isso — e não gasta o convite nem cria conta', async () => {
+    const conv = await (await post('/api/convites', { papelId: 'papel-operador', usos: 3 })).json() as any;
+    const r = await publico('/api/cadastrar', {
+      nome: 'Contadora de novo', email: 'CONTADORA@alfacontabil.net', senha: 'frase comprida de teste 8', convite: conv.codigo,
+    });
+    expect(r.status).toBe(409);
+    const corpo = await r.json() as any;
+    expect(corpo.jaTemConta).toBe(true);
+    expect(corpo.erro).toContain('já tem conta');
+    expect((db.consultar('SELECT usos FROM convites')[0] as any).usos).toBe(0);
+    expect(db.consultar("SELECT 1 FROM usuarios WHERE lower(email) = 'contadora@alfacontabil.net'")).toHaveLength(1);
+    // Sem convite, continua a resposta igual para todo mundo (não vira descobridor de e-mails).
+    const sem = await publico('/api/cadastrar', {
+      nome: 'Contadora de novo', email: 'contadora@alfacontabil.net', senha: 'frase comprida de teste 8',
+    });
+    expect(sem.status).toBe(200);
+    // Convite errado com e-mail existente: "convite inválido", sem dizer se o e-mail existe.
+    const errado = await publico('/api/cadastrar', {
+      nome: 'Xis', email: 'contadora@alfacontabil.net', senha: 'frase comprida de teste 8', convite: 'XXXX-YYYY-ZZZZ',
+    });
+    expect(errado.status).toBe(400);
+    expect((await errado.json() as any).erro).toContain('convite');
   });
 });

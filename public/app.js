@@ -218,7 +218,7 @@ $('#btn-trocar-senha').addEventListener('click', (e) => {
 
 /** Três formulários no mesmo cartão: entrar, pedir acesso, esquecer a senha. */
 function mostrarFormulario(qual) {
-  for (const [id, nome] of [['#form-login', 'login'], ['#form-cadastro', 'cadastro'], ['#form-esqueci', 'esqueci']]) {
+  for (const [id, nome] of [['#form-login', 'login'], ['#form-cadastro', 'cadastro'], ['#form-esqueci', 'esqueci'], ['#form-acesso', 'acesso']]) {
     $(id).classList.toggle('hidden', nome !== qual);
   }
   for (const p of ['cadastro', 'esqueci']) {
@@ -265,6 +265,68 @@ $('#link-criar-conta').addEventListener('click', (e) => { e.preventDefault(); mo
 })();
 $('#btn-voltar-login').addEventListener('click', (e) => { e.preventDefault(); mostrarCadastro(false); });
 $('#btn-voltar-login2').addEventListener('click', () => mostrarCadastro(false));
+
+/* Link de acesso (23/10): /?acesso=CODIGO. Quem administra criou a conta (ou pediu
+   senha nova) e mandou o link; aqui a pessoa cria a senha dela e entra pelo login
+   normal, que pede o segundo fator se ela tiver. */
+const acesso = { codigo: new URLSearchParams(location.search).get('acesso') };
+const tirarAcessoDaUrl = () => {
+  const u = new URL(location.href);
+  u.searchParams.delete('acesso');
+  history.replaceState(null, '', u.pathname + u.search + u.hash);
+};
+const erroAcesso = (m) => {
+  $('#acesso-erro').textContent = m;
+  $('#acesso-erro').classList.remove('hidden');
+};
+(async () => {
+  if (!acesso.codigo) return;
+  mostrarFormulario('acesso');
+  $('#acesso-erro').classList.add('hidden');
+  try {
+    const r = await api('/api/acesso/ver', {
+      method: 'POST', body: JSON.stringify({ codigo: acesso.codigo }),
+    });
+    acesso.email = r.email;
+    $('#acesso-titulo').textContent = r.motivo === 'senha' ? 'Criar uma senha nova' : 'Criar sua senha';
+    $('#acesso-ola').textContent = r.motivo === 'senha'
+      ? `Olá, ${r.nome}. Crie uma senha nova para entrar no Alfa Fiscal.`
+      : `Olá, ${r.nome}. Crie sua senha para entrar no Alfa Fiscal.`;
+    $('#acesso-email').value = r.email;
+    $('#acesso-campos').classList.remove('hidden');
+    $('#acesso-senha').focus();
+  } catch (err) {
+    erroAcesso(err.message || 'este link não vale mais');
+  }
+})();
+$('#btn-voltar-login5').addEventListener('click', (e) => {
+  e.preventDefault();
+  tirarAcessoDaUrl();
+  mostrarFormulario('login');
+});
+$('#btn-acesso').addEventListener('click', async (e) => {
+  e.preventDefault();
+  const btn = $('#btn-acesso');
+  $('#acesso-erro').classList.add('hidden');
+  const senha = $('#acesso-senha').value;
+  if (senha !== $('#acesso-senha2').value) return erroAcesso('as duas senhas não são iguais');
+  btn.disabled = true;
+  try {
+    await api('/api/acesso/usar', {
+      method: 'POST', body: JSON.stringify({ codigo: acesso.codigo, senha }),
+    });
+    tirarAcessoDaUrl();
+    // Entra pelo caminho de sempre: mesmo formulário, mesmo segundo fator.
+    $('#login-email').value = acesso.email;
+    $('#login-senha').value = senha;
+    mostrarFormulario('login');
+    $('#form-login').requestSubmit();
+  } catch (err) {
+    erroAcesso(err.message || 'não foi possível salvar a senha');
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 $('#btn-cadastrar').addEventListener('click', async (e) => {
   e.preventDefault();
@@ -491,7 +553,7 @@ function marcarEscopo() {
   }
 }
 
-const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vApuracao', 'vRegrasIcms', 'vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura', 'vConversas'];
+const TELAS = ['v1', 'v2', 'v3', 'vOriginal', 'vEmpresas', 'vFornecedores', 'vRegras', 'vRelatorios', 'vApuracao', 'vRegrasIcms', 'vUsuarios', 'vPapeis', 'vCertificados', 'vCaptura', 'vConversas', 'vSegmentos'];
 
 function telaAtual() {
   return TELAS.find((v) => !$('#' + v).classList.contains('hidden')) ?? 'v1';
@@ -545,6 +607,7 @@ function irPara(view) {
   if (view === 'vCertificados') carregarCertificados();
   if (view === 'vCaptura') carregarCaptura();
   if (view === 'vConversas') carregarConversas();
+  if (view === 'vSegmentos') carregarSegmentos();
 }
 
 /* Trocar de empresa pede OK (reunião 25/09). Escolher no seletor sozinho
@@ -882,7 +945,7 @@ async function enviar(arquivos) {
       log.textContent = `importando… ${feitos} de ${xmls.length}\n${placar()}`;
     }
 
-    log.textContent = textoResultadoImportacao(xmls.length, tot, linhas);
+    mostrarResultadoImportacao(log, xmls.length, tot, linhas);
     avisarNotasDeOutraEmpresa(linhas, empresaDoEnvio);
 
     // Nota nova pode trazer competencia nova: o seletor tem que saber dela.
@@ -929,6 +992,28 @@ function avisarNotasDeOutraEmpresa(linhas, empresaId) {
   $('#modal-ok').textContent = 'Entendi';
   $('#modal-ok').focus();
 }
+
+/**
+ * 22/10 (reunião de 15/10, a Taís: "quando eu importo as notas, depois que ele importa, ele
+ * não some dali, ele fica ainda, daí eu tenho que ir um pouco mais pra baixo"). O resultado
+ * vira uma linha de resumo; o detalhe abre no clique. Se algo pede ação dela (recusa, evento,
+ * nota de outra empresa), já vem aberto. "fechar" some com a caixa.
+ */
+function mostrarResultadoImportacao(log, totalArquivos, tot, linhas) {
+  const texto = textoResultadoImportacao(totalArquivos, tot, linhas);
+  const pedeAcao = tot.recusadas > 0 || tot.eventos > 0 || frasesOutraEmpresa(linhas).length > 0;
+  const resumo = `${totalArquivos} arquivo(s) · ${tot.importadas} importada(s) · ${tot.duplicadas} já existia(m)`
+    + (tot.eventos ? ` · ${tot.eventos} evento(s)` : '') + ` · ${tot.recusadas} recusada(s)`;
+  // Sem quebra de linha entre as tags: a caixa do log mostra espaço em branco como está.
+  log.innerHTML = `<div class="log-topo"><b>${pedeAcao ? '⚠' : '✓'} ${esc(resumo)}</b>`
+    + '<button type="button" class="btn sm sutil" data-fechar-log>fechar</button></div>'
+    + `<details class="log-detalhe"${pedeAcao ? ' open' : ''}><summary>ver detalhes</summary><div>${esc(texto)}</div></details>`;
+}
+
+document.addEventListener('click', (ev) => {
+  const b = ev.target.closest?.('[data-fechar-log]');
+  if (b) b.closest('.log')?.classList.add('hidden');
+});
 
 /** O resultado de uma importacao em texto — usado na hora e ao reabrir a importacao depois. */
 function textoResultadoImportacao(totalArquivos, tot, linhas) {
@@ -1899,6 +1984,8 @@ function linhaItem(i) {
       ${m.produtoNovo ? '<span class="etiqueta etiqueta-novo" title="Primeira vez que este produto aparece deste fornecedor">＋ NOVO</span>' : ''}
       <span class="porque">cód. ${esc(i.c_prod ?? '—')}${i.c_ean ? ' · EAN ' + esc(i.c_ean) : ''}</span>
       ${alertas ? `<div class="alertas">${alertas}</div>` : ''}
+      ${(i.avisos ?? []).map((a) => `<div class="aviso-linha" title="Aviso escrito na linha${a.por ? ' por ' + esc(a.por) : ''} · ${esc(dataHora(a.em))}">💬 ${esc(a.texto)}</div>`).join('')}
+      ${podeEditarNota() ? `<button type="button" class="btn-avisar" data-avisar="${esc(i.id)}" title="Escreva o que está errado nesta linha. Fica gravado com a nota e o produto para o Mateus ver.">💬 avisar</button>` : ''}
     </td>
     <td class="mono tiny">${esc(i.ncm ?? '—')}</td>
     <td class="mono tiny">${m.cfopForaDoNormal
@@ -1996,6 +2083,10 @@ function selinhoProcedencia(p, itemId = null) {
   }
   if (fonte === 'perfil') {
     return `<span class="proc proc-perfil" title="Ninguém ensinou este item ainda — o valor é palpite pelo perfil fiscal da empresa">● palpite do perfil</span>`;
+  }
+  if (fonte === 'saida') {
+    // 22/10: 5910 → 1910, 5949 → 1949 (pedido da Taís na reunião de 15/10). Palpite: confirme.
+    return `<span class="proc proc-saida" title="Ninguém ensinou este produto nesta operação: o valor segue o CFOP que veio na nota (5910 → 1910, 5949 → 1949). Confira.">● pelo CFOP que veio</span>`;
   }
   return '';
 }
@@ -2154,7 +2245,7 @@ async function verDeOndeVeio(itemId) {
   try { r = await api(`/api/itens/${itemId}/de-onde-veio`); } catch (e) {
     return avisar('Não consegui ver de onde veio: ' + e.message);
   }
-  if (!r.regra) return avisar('Este CFOP não veio de uma regra aprendida: foi digitado ou é palpite do perfil.', 'De onde veio isto');
+  if (!r.regra) return avisar('Este CFOP não veio de uma regra aprendida: foi digitado, é palpite do perfil ou segue o CFOP que veio (5910 → 1910, 5949 → 1949).', 'De onde veio isto');
   const g = r.regra;
   const caminho = (DE_ONDE_NIVEL[g.nivel] ?? (() => 'de uma regra'))(partesDaChaveTela(g.nivel, g.chave));
   const deOutro = g.nivel === 4 || g.nivel === 6;
@@ -2885,7 +2976,8 @@ async function carregarResponsaveis(empresaId) {
   try {
     r = empresaId
       ? await api(`/api/empresas/${empresaId}/responsaveis`)
-      : { usuarios: (await api('/api/usuarios')).map((u) => ({ ...u, vinculado: false, todas: false })) };
+      // 22/10 (reunião de 15/10): empresa nova já vem com todo mundo marcado; o servidor já libera para todos.
+      : { usuarios: (await api('/api/usuarios')).map((u) => ({ ...u, vinculado: true, todas: false })) };
   } catch (e) {
     caixa.innerHTML = `<span class="tiny">não consegui carregar: ${esc(e.message)}</span>`;
     return;
@@ -2937,6 +3029,11 @@ function formularioEmpresa(empresa) {
       <select id="e-regime" style="width:100%">
         ${opcoesRegime(empresa?.regime)}
       </select></div>
+    <div style="margin-top:11px"><label class="fl">Segmento</label>
+      <input type="text" id="e-segmento" list="lista-segmentos" maxlength="60" style="width:100%" autocomplete="off"
+             placeholder="ex.: Restaurante, Imobiliária, Indústria" value="${esc(empresa?.segmento ?? '')}"></div>
+    <p class="tiny" style="margin-top:4px">Serve para as regras por segmento (Regras de impostos › Regras por segmento):
+      a linha avisa quando o CFOP não combina com o tipo de empresa.</p>
     ${pode('usuarios.visualizar') ? `<div style="margin-top:13px"><label class="fl">Responsáveis por esta empresa</label>
       <div id="e-responsaveis" class="resp-lista"><span class="tiny">carregando…</span></div>
       <p class="tiny" style="margin-top:4px">Pode marcar mais de uma pessoa. Quem vê todos os clientes aparece marcado de qualquer jeito.</p></div>` : ''}
@@ -2955,6 +3052,8 @@ function formularioEmpresa(empresa) {
           perfil: $('#e-perfil').value,
           regime: $('#e-regime').value || null,
           cnaePrincipal: $('#e-cnae').value.trim() || null,
+          segmento: $('#e-segmento').value.trim() || null,
+          liberarParaTodos: true,
         }),
       }).then(async (r) => { await salvarResponsaveis(r.id); });
     } else {
@@ -2968,6 +3067,7 @@ function formularioEmpresa(empresa) {
           perfil: $('#e-perfil').value,
           regime: $('#e-regime').value || null,
           cnae_principal: $('#e-cnae').value.trim() || null,
+          segmento: $('#e-segmento').value.trim() || null,
         }),
       });
       await salvarResponsaveis(empresa.id);
@@ -2978,6 +3078,7 @@ function formularioEmpresa(empresa) {
   });
 
   carregarResponsaveis(empresa?.id ?? null);
+  preencherListaSegmentos();
 
   // Pré-preenchimento pelo CNAE, como pedido: o cadastro já vem sugerido.
   $('#e-cnae').addEventListener('blur', async () => {
@@ -3154,6 +3255,7 @@ async function carregarUsuarios() {
   const podeEditar = estado.eu.permissoes.includes('usuarios.editar');
   const podeDesativar = estado.eu.permissoes.includes('usuarios.desativar');
   const podeSenha = estado.eu.permissoes.includes('usuarios.redefinir_senha');
+  const podeCriar = estado.eu.permissoes.includes('usuarios.criar');
   const podeMfa = estado.eu.permissoes.includes('usuarios.desativar_mfa');
 
   const podeAprovar = estado.eu.permissoes.includes('usuarios.aprovar');
@@ -3167,27 +3269,50 @@ async function carregarUsuarios() {
   }
   if (pediramSenha) {
     avisos.push(pediramSenha === 1
-      ? '1 pessoa esqueceu a senha e está esperando uma provisória.'
-      : `${pediramSenha} pessoas esqueceram a senha e estão esperando uma provisória.`);
+      ? '1 pessoa esqueceu a senha: clique em Link de acesso na linha dela e mande o link.'
+      : `${pediramSenha} pessoas esqueceram a senha: clique em Link de acesso na linha de cada uma e mande o link.`);
+  }
+  const linkVencido = us.filter((u) => u.ativo && u.aguardandoSenha && !u.linkExpira).length;
+  if (linkVencido) {
+    avisos.push(linkVencido === 1
+      ? '1 pessoa ainda não criou a senha e o link dela venceu: gere outro em Link de acesso.'
+      : `${linkVencido} pessoas ainda não criaram a senha e o link venceu: gere outro em Link de acesso.`);
   }
   $('#aviso-pendentes').classList.toggle('hidden', avisos.length === 0);
   $('#aviso-pendentes').textContent = avisos.join(' ');
 
-  $('#tbl-usuarios tbody').innerHTML = us.map((u) => `<tr${u.pendente || u.pediuSenha ? ' class="linha-pendente"' : (u.ativo ? '' : ' style="opacity:.55"')}>
+  // 23/10: o que a pessoa precisa fazer fica escrito na linha, e o botão "Link de
+  // acesso" resolve os três casos (conta nova, link perdido ou vencido, esqueceu a senha).
+  const situacao = (u) => {
+    if (u.pendente) return '<b>esperando liberação</b>';
+    if (!u.ativo) return 'desativado';
+    if (u.aguardandoSenha) {
+      return u.linkExpira
+        ? `<b>link enviado</b> <span class="d">(ainda não criou a senha; vale até ${dataHora(u.linkExpira)})</span>`
+        : '<b>link vencido</b> <span class="d">(ainda não criou a senha: gere outro)</span>';
+    }
+    if (u.pediuSenha) return '<b>esqueceu a senha</b>';
+    if (u.linkExpira) return `ativo <span class="d">(link de senha nova vale até ${dataHora(u.linkExpira)})</span>`;
+    return `ativo${u.deveTrocarSenha ? ' <span class="d">(senha provisória)</span>' : ''}`;
+  };
+  const precisaLink = (u) => u.pediuSenha || (u.aguardandoSenha && !u.linkExpira)
+    || (u.deveTrocarSenha && !u.ultimo_login);
+  const podeLink = (u) => !u.pendente && u.ativo && (podeSenha || (u.aguardandoSenha && podeCriar));
+
+  $('#tbl-usuarios tbody').innerHTML = us.map((u) => `<tr${u.pendente || (u.ativo && precisaLink(u)) ? ' class="linha-pendente"' : (u.ativo ? '' : ' style="opacity:.55"')}>
     <td><b>${esc(u.nome)}</b></td>
     <td>${esc(u.email)}</td>
     <td>${esc(u.papel ?? '—')}</td>
     <td>${u.excecoes > 0 ? `${u.excecoes} ajuste(s)` : '<span class="d">—</span>'}</td>
     <td>${u.mfa ? '✓ ligado' : '<span class="d">não</span>'}</td>
     <td>${u.ultimo_login ? new Date(u.ultimo_login).toLocaleDateString('pt-BR') : '<span class="d">nunca</span>'}</td>
-    <td>${u.pendente ? '<b>esperando liberação</b>'
-      : u.pediuSenha ? '<b>esqueceu a senha</b>'
-      : (u.ativo ? 'ativo' : 'desativado')}${u.deveTrocarSenha ? ' <span class="d">(senha provisória)</span>' : ''}</td>
+    <td>${situacao(u)}</td>
     <td style="white-space:nowrap">
       ${u.pendente && podeAprovar ? `<button class="btn primary sm" data-aprovar="${esc(u.id)}">Liberar</button>
         <button class="btn sm" data-recusar="${esc(u.id)}">Recusar</button>` : ''}
       ${!u.pendente && podeEditar ? `<button class="btn sm" data-editar="${esc(u.id)}">Editar</button>` : ''}
-      ${!u.pendente && podeSenha ? `<button class="btn ${u.pediuSenha ? 'primary ' : ''}sm" data-senha="${esc(u.id)}">Senha</button>` : ''}
+      ${podeLink(u) ? `<button class="btn ${precisaLink(u) ? 'primary ' : ''}sm" data-link="${esc(u.id)}"
+        title="Gera um link para a pessoa criar a senha. Mande pelo WhatsApp.">🔗 Link de acesso</button>` : ''}
       ${!u.pendente && podeDesativar ? `<button class="btn sm" data-ativo="${esc(u.id)}" data-para="${u.ativo ? '0' : '1'}">${u.ativo ? 'Desativar' : 'Reativar'}</button>` : ''}
       ${!u.pendente && u.mfa && podeMfa ? `<button class="btn sm" data-mfa="${esc(u.id)}"
         title="Para quem trocou de celular e ficou trancado para fora">Desligar 2º fator</button>` : ''}
@@ -3237,8 +3362,9 @@ async function carregarUsuarios() {
     });
   }
 
-  for (const b of $$('#tbl-usuarios button[data-senha]')) {
-    b.addEventListener('click', () => redefinirSenhaDe(b.dataset.senha).catch((e) => alerta(e.message)));
+  for (const b of $$('#tbl-usuarios button[data-link]')) {
+    const u = us.find((x) => x.id === b.dataset.link);
+    b.addEventListener('click', () => gerarLinkDe(u).catch((e) => alerta(e.message)));
   }
   for (const b of $$('#tbl-usuarios button[data-ativo]')) {
     b.addEventListener('click', async () => {
@@ -3278,7 +3404,8 @@ async function editarUsuario(id) {
     <div class="campo">
       <label class="fl" for="us-email">E-mail</label>
       <input type="email" id="us-email" value="${esc(u?.email ?? '')}" ${u ? 'disabled' : ''}>
-      ${u ? '<span class="d">o e-mail identifica a conta e não muda</span>' : ''}
+      ${u ? '<span class="d">o e-mail identifica a conta e não muda</span>'
+        : '<span class="d">depois de salvar aparece um link para você mandar à pessoa (o sistema não manda e-mail)</span>'}
     </div>
     <div class="campo">
       <label class="fl" for="us-papel">Papel</label>
@@ -3325,7 +3452,7 @@ async function editarUsuario(id) {
     } else {
       corpo.email = $('#us-email').value.trim();
       const r = await api('/api/usuarios', { method: 'POST', body: JSON.stringify(corpo) });
-      mostrarSenhaProvisoria(r.email, r.senhaProvisoria);
+      mostrarLinkAcesso(r);
     }
     await carregarUsuarios();
   });
@@ -3403,52 +3530,66 @@ async function aprovarPedido(id) {
   $('#ap-papel').addEventListener('change', desenhar);
 }
 
-function mostrarSenhaProvisoria(email, senha) {
+/* Link de acesso (23/10). Substitui a senha provisória: quem administra manda o link
+   pelo WhatsApp, a pessoa abre, cria a senha dela e entra. O sistema não manda e-mail,
+   e a tela diz isso com todas as letras — foi o que confundiu no caso da Amanda. */
+function mostrarLinkAcesso({ nome, email, link }) {
+  const url = `${location.origin}/?acesso=${encodeURIComponent(link.codigo)}`;
+  const primeiro = link.motivo === 'primeiro';
+  const texto = primeiro
+    ? `Oi ${nome}! Este é o seu acesso ao Alfa Fiscal. Abre o link, cria a sua senha e já entra (o e-mail é ${email}): ${url}`
+    : `Oi ${nome}! Este é o link para criar uma senha nova no Alfa Fiscal (o e-mail é ${email}): ${url}`;
   setTimeout(() => {
-    abrirModal('Usuário criado', `
-      <p class="page-desc">Passe esta senha para <b>${esc(email)}</b>. Ela é provisória:
-        a pessoa é obrigada a trocá-la no primeiro acesso, e a partir daí nem você
-        sabe qual é.</p>
-      <div class="senha-provisoria">${esc(senha)}</div>
-      <p class="page-desc"><b>Não aparece de novo.</b> Se perder, use o botão “Senha”
-        na lista para gerar outra.</p>
+    abrirModal(primeiro ? 'Usuário criado: falta mandar o link' : `Link de senha nova: ${nome}`, `
+      <p class="page-desc">Mande este link para <b>${esc(nome)}</b> pelo WhatsApp. Ela abre,
+        cria a senha dela e já entra. <b>O sistema não manda e-mail</b>: se você não mandar,
+        ela não fica sabendo.</p>
+      <div class="link-acesso">
+        <input type="text" id="la-url" readonly value="${esc(url)}">
+        <button type="button" class="btn sm" id="la-copiar">Copiar link</button>
+        <a class="btn primary sm" id="la-whats" target="_blank" rel="noopener"
+           href="https://wa.me/?text=${encodeURIComponent(texto)}">Mandar no WhatsApp</a>
+      </div>
+      <p class="page-desc">Vale até <b>${esc(dataHora(link.expiraEm))}</b> e uma vez só.
+        ${primeiro ? '' : 'A senha atual dela continua valendo até ela usar o link. '}
+        Perdeu o link ou venceu? Na lista, botão <b>Link de acesso</b> gera outro (o anterior
+        para de valer).</p>
     `, async () => {});
     $('#modal-cancelar').classList.add('hidden');
-    $('#modal-ok').textContent = 'Copiei';
+    $('#modal-ok').textContent = 'Pronto';
+    $('#la-copiar').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(url); } catch { $('#la-url').select(); }
+      $('#la-copiar').textContent = 'copiado';
+      setTimeout(() => { $('#la-copiar').textContent = 'Copiar link'; }, 1500);
+    });
   }, 30);
 }
 
-async function redefinirSenhaDe(id) {
-  const u = await api(`/api/usuarios/${id}`);
-  abrirModal(`Redefinir a senha de ${u.nome}`, `
-    <p class="page-desc">A pessoa vai receber uma senha provisória e será obrigada a
-      trocá-la no primeiro acesso. As sessões dela caem agora.</p>
+async function gerarLinkDe(u) {
+  // Conta que ainda não tem senha: gera outro link direto. Conta que já tem senha:
+  // pedir a SUA senha antes, porque o link dá acesso à conta de outra pessoa.
+  if (u.aguardandoSenha) {
+    const r = await api(`/api/usuarios/${u.id}/link-acesso`, { method: 'POST', body: '{}' });
+    mostrarLinkAcesso(r);
+    await carregarUsuarios();
+    return;
+  }
+  abrirModal(`Link de acesso: ${u.nome}`, `
+    <p class="page-desc">Gera um link para <b>${esc(u.nome)}</b> criar uma senha nova. Você
+      manda pelo WhatsApp. A senha atual dela continua valendo até ela usar o link.</p>
     <div class="campo">
-      <label class="fl" for="rs-nova">Senha provisória</label>
-      <input type="text" id="rs-nova" value="${esc(gerarSenhaProvisoria())}">
-      <span class="d">pode editar; mínimo 12 caracteres</span>
-    </div>
-    <div class="campo">
-      <label class="fl" for="rs-minha">Confirme a SUA senha</label>
-      <input type="password" id="rs-minha" autocomplete="current-password">
-      <span class="d">redefinir a senha de outra pessoa dá acesso à conta dela</span>
+      <label class="fl" for="la-minha">Confirme a SUA senha</label>
+      <input type="password" id="la-minha" autocomplete="current-password">
+      <span class="d">o link dá acesso à conta de outra pessoa, por isso a confirmação</span>
     </div>
   `, async () => {
-    await api(`/api/usuarios/${id}/redefinir-senha`, {
-      method: 'POST',
-      body: JSON.stringify({
-        senhaProvisoria: $('#rs-nova').value, minhaSenha: $('#rs-minha').value,
-      }),
+    const r = await api(`/api/usuarios/${u.id}/link-acesso`, {
+      method: 'POST', body: JSON.stringify({ minhaSenha: $('#la-minha').value }),
     });
-    const senha = $('#rs-nova').value;
-    mostrarSenhaProvisoria(u.email, senha);
+    mostrarLinkAcesso(r);
     await carregarUsuarios();
   });
-}
-
-function gerarSenhaProvisoria() {
-  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
-  return [...crypto.getRandomValues(new Uint8Array(14))].map((b) => A[b % A.length]).join('');
+  $('#modal-ok').textContent = 'Gerar link';
 }
 
 async function gerarConvite() {
@@ -3707,7 +3848,7 @@ function desenharRelatorio() {
     // eu nao consigo procurar a minha diferenca".
     cab.innerHTML = '<tr><th>CFOP de entrada</th><th>Natureza</th><th class="num">Notas</th><th class="num">Itens</th><th class="num">Conferidos</th><th class="num">Valor contábil</th><th class="num">Base ICMS</th><th class="num">ICMS</th><th class="num">Outras</th><th class="num">ICMS ST</th><th class="num">IPI</th><th>CFOP original (itens)</th></tr>';
     corpo.innerHTML = linhas.map((l) => `<tr class="rel-cfop" data-rel-cfop="${esc(l.cfop)}" title="Clique para ver as notas deste CFOP">
-      <td class="mono"><span class="seta">▸</span> <b>${esc(l.cfop)}</b></td><td>${esc(l.natureza)}${seloRegra(l)}</td>
+      <td class="mono"><span class="seta">▸</span> <b>${esc(l.cfop)}</b></td><td>${esc(l.natureza)}${seloRegra(l)}${seloSegmento(r, l.cfop)}</td>
       <td class="num">${l.notas}</td><td class="num">${l.itens}</td><td class="num">${l.conferidos}</td>
       <td class="num"><b>${moeda(l.valorContabil)}</b></td><td class="num">${moeda(l.baseIcms)}</td><td class="num">${moeda(l.icms)}</td>
       <td class="num">${l.regra === 'outras' ? moeda(l.outras) : ''}</td>
@@ -3729,7 +3870,7 @@ function desenharRelatorio() {
       <td class="num">${qtd(l.quantidade)}</td>
       <td class="num">${l.valorUnitarioMedio === null ? '—' : Number(l.valorUnitarioMedio).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
       <td class="num">${moeda(l.valor)}</td>
-      <td class="mono tiny">${esc(l.cfops)}</td><td class="mono tiny">${esc(l.codigos)}</td>
+      <td class="mono tiny">${esc(l.cfops)}${String(l.cfops ?? '').split(/[^0-9]+/).filter(Boolean).map((c) => seloSegmento(r, c)).join('')}</td><td class="mono tiny">${esc(l.codigos)}</td>
       <td class="num">${l.notas}</td></tr>`).join('');
     const filtrado = !!filtro || soNf;
     pe.innerHTML = `<tr><th>${filtrado ? rotuloFiltro : `Total · ${r.linhas.length} produtos`}</th><th></th><th></th><th></th><th class="num">${moeda(filtrado ? soma('valor') : r.totais.valor)}</th><th></th><th></th><th></th></tr>`;
@@ -4350,6 +4491,14 @@ function baixarConferenciaQuestor() {
 /* ---- Regras de ICMS por CFOP (28/09, planilha da Taís) ----
    "Outras": no relatório, base e ICMS saem zerados e o valor contábil vai para a
    coluna Outras. Não muda item nem XML: trocar a regra muda o relatório na hora. */
+/** 22/10: CFOP que ela disse que não combina com o segmento desta empresa. */
+function seloSegmento(r, cfop) {
+  const seg = r?.segmento;
+  if (!seg?.nome || !seg.proibidos || !(String(cfop) in seg.proibidos)) return '';
+  const motivo = seg.proibidos[String(cfop)];
+  return ` <span class="tag warn" title="Regra do segmento ${esc(seg.nome)}: o ${esc(cfop)} não pode aparecer${motivo ? ' — ' + esc(motivo) : ''}.">⚠ não combina com ${esc(seg.nome)}</span>`;
+}
+
 function seloRegra(l) {
   if (l.regra !== 'outras') return '';
   const xml = (l.baseIcmsXml || l.icmsXml)
@@ -4726,6 +4875,7 @@ async function carregarConversas() {
       <td class="num">${c.ajustes ? `<span class="tag warn">${c.ajustes}</span>` : '0'}</td>
       <td class="num">${c.erros ? `<span class="tag dan">${c.erros}</span>` : '0'}</td></tr>`).join('')
     : '<tr><td colspan="10" class="vazio">Nenhuma conversa nesse período.</td></tr>';
+  carregarAvisosRevisao();
   if (convs.pedida) {
     const { id, msg } = convs.pedida;
     convs.pedida = null;
@@ -5608,4 +5758,116 @@ $('#ass-msgs')?.addEventListener('click', async (ev) => {
     if (lista.some((p) => p.estado === 'feito')) await atualizarNotaAberta();
     return;
   }
+});
+
+
+/* ---- 22/10: pacote 2 da reunião de 15/10 ----
+   Segmento da empresa e regras por segmento; aviso na linha da nota. */
+const SEGMENTOS_SUGERIDOS = ['Restaurante', 'Bar', 'Padaria', 'Mercado', 'Imobiliária', 'Indústria', 'Serviço', 'Comércio'];
+let segmentosCache = null;
+
+function podeEditarNota() {
+  return ['notas.editar_cfop', 'notas.editar_descricao', 'notas.editar_escrituracao'].some(pode);
+}
+
+async function preencherListaSegmentos() {
+  try { segmentosCache = (await api('/api/segmentos')).segmentos; } catch { /* sem a lista, ficam as sugestões */ }
+  const nomes = new Map();
+  for (const s of segmentosCache ?? []) nomes.set(s.nome.toLowerCase(), s.nome);
+  for (const s of SEGMENTOS_SUGERIDOS) if (!nomes.has(s.toLowerCase())) nomes.set(s.toLowerCase(), s);
+  const dl = $('#lista-segmentos');
+  if (dl) dl.innerHTML = [...nomes.values()].sort((a, b) => a.localeCompare(b, 'pt-BR')).map((n) => `<option value="${esc(n)}">`).join('');
+}
+
+async function carregarSegmentos() {
+  const caixa = $('#seg-lista');
+  $('#seg-nova').classList.toggle('hidden', !pode('empresas.editar'));
+  caixa.innerHTML = '<p class="tiny">carregando…</p>';
+  await preencherListaSegmentos();
+  if (!segmentosCache) { caixa.innerHTML = '<p class="tiny">Não consegui carregar os segmentos.</p>'; return; }
+  const podeMexer = pode('empresas.editar');
+  caixa.innerHTML = segmentosCache.length ? segmentosCache.map((s) => `<div class="card">
+      <header><h2>${esc(s.nome)}</h2><span class="hint">${s.empresas} ${s.empresas === 1 ? 'empresa' : 'empresas'} com este segmento</span></header>
+      <div class="body tight">${s.regras.length ? `<table class="seg-tabela"><thead><tr><th>Não pode</th><th>Por quê</th><th>Quem · quando</th><th></th></tr></thead><tbody>
+        ${s.regras.map((r) => `<tr><td class="mono"><b>${esc(r.cfop)}</b></td><td>${esc(r.observacao ?? '—')}</td>
+          <td class="tiny">${esc(r.criadoPor ?? '—')} · ${esc(dataCurta(r.criadoEm))}</td>
+          <td>${podeMexer ? `<button type="button" class="btn sm sutil" data-seg-tirar="${esc(r.id)}" title="Tira a regra (fica na trilha)">tirar</button>` : ''}</td></tr>`).join('')}
+        </tbody></table>` : '<p class="vazio">Nenhuma regra ainda para este segmento.</p>'}</div></div>`).join('')
+    : '<p class="vazio">Nenhum segmento ainda. Escolha o segmento no cadastro de cada empresa (Empresas › editar) ou crie uma regra acima.</p>';
+}
+
+$('#form-seg')?.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const segmento = $('#seg-nome').value.trim();
+  const cfop = $('#seg-cfop').value.replace(/\D/g, '');
+  if (segmento.length < 2) return alerta('Escreva o segmento (ex.: Imobiliária).');
+  if (!/^[123]\d{3}$/.test(cfop)) return alerta('Use um CFOP de entrada, com 4 números (1xxx, 2xxx ou 3xxx).');
+  try {
+    await api('/api/segmentos/regras', { method: 'POST', body: JSON.stringify({ segmento, cfop, observacao: $('#seg-obs').value.trim() || null }) });
+    $('#seg-cfop').value = ''; $('#seg-obs').value = '';
+    avisarSalvo('Regra do segmento gravada');
+    await carregarSegmentos();
+  } catch (e) { alerta(e.message); }
+});
+
+$('#seg-lista')?.addEventListener('click', async (ev) => {
+  const b = ev.target.closest('[data-seg-tirar]');
+  if (!b) return;
+  b.disabled = true;
+  try {
+    await api(`/api/segmentos/regras/${b.dataset.segTirar}/remover`, { method: 'POST' });
+    await carregarSegmentos();
+  } catch (e) { b.disabled = false; alerta(e.message); }
+});
+
+/* Aviso na linha (reunião de 15/10: "aí tu aperta nele: isso aqui tinha que ser 1910"). */
+document.addEventListener('click', (ev) => {
+  const b = ev.target.closest?.('[data-avisar]');
+  if (!b) return;
+  const item = estado.notaAberta?.itens?.find((x) => x.id === b.dataset.avisar);
+  if (!item) return;
+  abrirModal('Avisar o Mateus sobre esta linha', `
+    <p class="tiny" style="margin-top:0"><b>${esc(item.x_prod_original)}</b> · item ${item.n_item} · veio ${esc(item.cfop_original ?? '—')} → está ${esc(item.cfop_novo || '—')}</p>
+    <textarea id="aviso-texto" rows="4" maxlength="1000" style="width:100%" placeholder="O que está errado ou como devia ser? Ex.: isso aqui tinha que ser 1910, veio como bonificação"></textarea>
+    <p class="tiny">Fica gravado com a nota e o produto. Não muda nada na linha.</p>`, async () => {
+    const texto = $('#aviso-texto').value.trim();
+    if (!texto) throw new Error('escreva o aviso');
+    await api(`/api/itens/${item.id}/avisos`, { method: 'POST', body: JSON.stringify({ texto }) });
+    (item.avisos ??= []).push({ texto, por: estado.eu?.nome ?? null, em: new Date().toISOString() });
+    renderItens();
+    avisarSalvo('Aviso gravado');
+  });
+  setTimeout(() => $('#aviso-texto')?.focus(), 50);
+});
+
+/* Avisos nas notas, na tela de revisão (mesmo período das conversas). */
+async function carregarAvisosRevisao() {
+  const tb = $('#tbl-avisos tbody');
+  if (!tb) return;
+  const q = new URLSearchParams({ de: $('#conv-de').value, ate: $('#conv-ate').value });
+  tb.innerHTML = '<tr><td colspan="8" class="vazio">carregando…</td></tr>';
+  let r;
+  try { r = await api(`/api/avisos?${q}`); } catch (e) {
+    tb.innerHTML = `<tr><td colspan="8" class="vazio">Não consegui carregar: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+  tb.innerHTML = r.avisos.length ? r.avisos.map((a) => `<tr>
+      <td class="tiny">${esc(dataHora(a.criado_em))}</td><td>${esc(a.usuario_nome || '—')}</td><td>${esc(a.razao_social || '—')}</td>
+      <td class="mono">${esc(a.numero ?? '—')} · ${esc(a.n_item ?? '—')}<span class="porque">${esc(a.emit_nome ?? '')}</span></td>
+      <td>${esc(a.produto ?? '—')}</td>
+      <td class="mono tiny">${esc(a.cfop_original ?? '—')} → ${esc(a.cfop_linha || '—')}${a.cfop_agora && a.cfop_agora !== a.cfop_linha ? ` (hoje ${esc(a.cfop_agora)})` : ''}</td>
+      <td>${esc(a.texto)}</td>
+      <td><button class="btn sm" type="button" data-aviso-abrir="${esc(a.nota_id)}" data-item="${esc(a.item_id)}" data-empresa="${esc(a.empresa_id)}">Abrir →</button></td>
+    </tr>`).join('') : '<tr><td colspan="8" class="vazio">Nenhum aviso nesse período.</td></tr>';
+}
+
+$('#tbl-avisos')?.addEventListener('click', async (ev) => {
+  const b = ev.target.closest('[data-aviso-abrir]');
+  if (!b) return;
+  // O aviso pode ser de outra empresa: abre a empresa certa antes da nota.
+  if (b.dataset.empresa && b.dataset.empresa !== estado.empresaId) {
+    $('#sel-empresa').value = b.dataset.empresa;
+    await trocarEmpresa(b.dataset.empresa);
+  }
+  abrirNota(b.dataset.avisoAbrir, b.dataset.item);
 });

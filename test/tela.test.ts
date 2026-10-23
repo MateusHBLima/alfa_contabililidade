@@ -111,7 +111,7 @@ describe('a tela desenha tudo que o servidor manda', () => {
   it('toda fonte de procedência é desenhada pela tela e tem cor', () => {
     const bloco = ALERTAS.match(/fonte: ([^;]+);/)!;
     const fontes = entreAspas(bloco[1]!).filter((f) => f !== 'nenhuma');
-    expect(fontes.sort()).toEqual(['aprendida', 'fixada', 'manual', 'parecido', 'perfil']); // + parecido (15/10, Sprite)
+    expect(fontes.sort()).toEqual(['aprendida', 'fixada', 'manual', 'parecido', 'perfil', 'saida']); // + parecido (15/10, Sprite), + saida (22/10, 5910 → 1910)
 
     for (const f of fontes) {
       expect(APP, `a tela não trata procedência "${f}"`).toContain(`'${f}'`);

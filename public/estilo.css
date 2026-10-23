@@ -347,6 +347,7 @@ tr.nota-andando td:first-child{box-shadow:inset 3px 0 0 var(--primary-2)}
 .proc-fixada{background:var(--accent);color:#fff;font-weight:800;font-size:12px;padding:3px 9px;letter-spacing:.2px;box-shadow:0 1px 0 rgba(0,0,0,.08)}
 .proc-aprendida{background:var(--ok);color:#fff;font-weight:800;font-size:12px;padding:3px 9px;letter-spacing:.2px;box-shadow:0 1px 0 rgba(0,0,0,.08)}
 .proc-perfil{background:var(--warn-soft);color:var(--warn)}
+.proc-saida{background:var(--warn-soft);color:var(--warn)}
 
 /* Os dois estados que dividem o antigo "Pronto": mesma tranquilidade, origem
    diferente. Nenhum dos dois destaca a linha. */
@@ -771,3 +772,20 @@ tr.nota-estorno td{background:#faf5ff}
 .conv-achados th,.conv-achados td{padding:2px 6px;border-bottom:1px solid var(--line-2);text-align:left}
 .conv-msg .ass-propostas{margin-top:8px}
 .conv-ajuste{margin-top:8px;background:var(--warn-soft);border-radius:6px;padding:6px 9px;font-size:13px}
+
+/* 22/10: resultado da importação recolhido, aviso na linha, regras por segmento */
+.log .log-topo{display:flex;align-items:center;gap:10px;justify-content:space-between;white-space:normal}
+.log .log-topo .btn{color:#c8d6e8;border-color:#3a4b63;background:transparent}
+.log .log-detalhe{margin-top:6px}
+.log .log-detalhe summary{cursor:pointer;color:#8fb3e8;white-space:normal}
+.log .log-detalhe>div{margin-top:6px}
+.aviso-linha{margin-top:4px;font-size:12px;background:var(--warn-soft);color:#7a4b00;border-radius:6px;padding:3px 8px;display:inline-block}
+.btn-avisar{display:block;margin-top:4px;font:inherit;font-size:11px;color:var(--muted);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline}
+.btn-avisar:hover{color:var(--primary)}
+.seg-tabela{width:100%;border-collapse:collapse;font-size:13px}
+.seg-tabela th,.seg-tabela td{padding:7px 12px;border-bottom:1px solid var(--line-2);text-align:left}
+
+/* Link de acesso (23/10): o link e os dois botões na mesma linha, quebrando no celular. */
+.link-acesso { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .4rem 0 .8rem; }
+.link-acesso input { flex: 1 1 260px; min-width: 0; font-family: ui-monospace, monospace; font-size: .8rem; }
+.link-acesso a.btn { text-decoration: none; }
