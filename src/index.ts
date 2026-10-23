@@ -193,7 +193,7 @@ app.use('/api/*', async (c, next) => {
   // exigir sessão nela torna o segundo fator impossível de completar.
   const PUBLICAS = new Set([
     '/api/login', '/api/login/mfa', '/api/saude', '/api/local', '/api/cadastrar',
-    '/api/esqueci', '/api/acesso/ver', '/api/acesso/usar',
+    '/api/esqueci', '/api/acesso/ver', '/api/acesso/usar', '/api/convite/ver',
   ]);
   if (PUBLICAS.has(c.req.path)) return next();
 
@@ -368,16 +368,36 @@ async function hashConvite(codigo: string): Promise<string> {
 
 async function convitePorCodigo(
   db: D1Database, codigo: string,
-): Promise<{ id: string; papel_id: string } | null> {
+): Promise<{ id: string; papel_id: string; empresas: string | null; papel: string; para: string | null } | null> {
   const c = await db
     .prepare(
-      `SELECT id, papel_id FROM convites
-        WHERE codigo_hash = ? AND revogado = 0 AND usos < usos_max AND expira_em > ?`,
+      `SELECT c.id, c.papel_id, c.empresas, c.para, p.nome AS papel
+         FROM convites c JOIN papeis p ON p.id = c.papel_id
+        WHERE c.codigo_hash = ? AND c.revogado = 0 AND c.usos < c.usos_max AND c.expira_em > ?`,
     )
     .bind(await hashConvite(codigo), new Date().toISOString())
-    .first<{ id: string; papel_id: string }>();
+    .first<{ id: string; papel_id: string; empresas: string | null; papel: string; para: string | null }>();
   return c ?? null;
 }
+
+const CONVITE_INVALIDO = {
+  erro: 'este link de cadastro venceu, já foi usado ou foi cancelado. Peça um novo a quem te mandou.',
+};
+
+/** A tela de cadastro confere o link assim que abre, antes de a pessoa preencher tudo. */
+app.post('/api/convite/ver', async (c) => {
+  const { codigo } = z.object({ codigo: z.string().min(4).max(80) }).parse(await c.req.json());
+  const ip = c.req.header('CF-Connecting-IP') ?? null;
+  if (await origemBloqueada(c.env.DB, ip)) {
+    return c.json({ erro: 'muitas tentativas deste computador. Espere alguns minutos.' }, 429);
+  }
+  const conv = await convitePorCodigo(c.env.DB, codigo);
+  if (!conv) {
+    await registrarTentativa(c.env.DB, ip, false);
+    return c.json(CONVITE_INVALIDO, 404);
+  }
+  return c.json({ papel: conv.papel });
+});
 
 /**
  * Cadastro público. A conta nasce PENDENTE: existe, tem senha, e não faz nada.
@@ -474,9 +494,23 @@ app.post('/api/cadastrar', async (c) => {
         .bind(id, conv.papel_id),
       // Incremento condicional: dois cliques simultâneos no mesmo link não podem
       // gastar o mesmo uso duas vezes.
-      c.env.DB.prepare('UPDATE convites SET usos = usos + 1 WHERE id = ? AND usos < usos_max')
-        .bind(conv.id),
+      c.env.DB.prepare('UPDATE convites SET usos = usos + 1, usado_por = ? WHERE id = ? AND usos < usos_max')
+        .bind(id, conv.id),
     );
+    // 23/10: o link já leva as empresas que a gestora marcou. Só entram as que existem
+    // (empresa apagada depois de gerar o link fica de fora, sem erro).
+    let empresas: string[] = [];
+    try { empresas = JSON.parse(conv.empresas ?? '[]'); } catch { empresas = []; }
+    for (const e of empresas) {
+      escritas.push(
+        c.env.DB
+          .prepare(
+            `INSERT INTO usuario_empresas (usuario_id, empresa_id)
+             SELECT ?, id FROM empresas WHERE id = ? AND tenant_id = 'alfa'`,
+          )
+          .bind(id, e),
+      );
+    }
   }
   await c.env.DB.batch(escritas);
 
@@ -1370,19 +1404,22 @@ app.post('/api/usuarios/:id/link-acesso', async (c) => {
 
   const u = await c.env.DB
     .prepare(
-      `SELECT id, email, nome, ativo, pendente, aguardando_senha FROM usuarios
+      `SELECT id, email, nome, ativo, pendente, aguardando_senha, ultimo_login FROM usuarios
         WHERE id = ? AND tenant_id = ?`,
     )
     .bind(alvo, s.tenantId)
     .first<{ id: string; email: string; nome: string; ativo: number; pendente: number;
-      aguardando_senha: number }>();
+      aguardando_senha: number; ultimo_login: string | null }>();
   if (!u) return c.json({ erro: 'usuário não encontrado' }, 404);
   if (u.pendente === 1) {
     return c.json({ erro: 'este pedido de acesso ainda não foi liberado: use Liberar ou Recusar' }, 400);
   }
   if (u.ativo !== 1) return c.json({ erro: 'usuário desativado: reative antes de gerar o link' }, 400);
 
-  const primeiro = u.aguardando_senha === 1;
+  // Conta que nunca foi usada (esperando a primeira senha, ou com a senha provisória
+  // antiga que ninguém repassou — o caso da Amanda): não há conta de ninguém para
+  // proteger, então não pede a senha de quem gera.
+  const primeiro = u.aguardando_senha === 1 || !u.ultimo_login;
   if (primeiro) {
     exigirAlguma(s, ['usuarios.criar', 'usuarios.redefinir_senha']);
   } else {
@@ -1472,13 +1509,25 @@ app.put('/api/usuarios/:id', async (c) => {
 app.post('/api/convites', async (c) => {
   const s = c.get('sessao');
   exigir(s, 'usuarios.convidar');
-  const { papelId, usos, horas } = z
+  const { papelId, usos, horas, empresas, para } = z
     .object({
       papelId: z.string().min(1),
       usos: z.number().int().min(1).max(50).default(1),
       horas: z.number().int().min(1).max(720).default(72),
+      // 23/10: "+ Novo usuário" gera o link já com as empresas e para quem é.
+      empresas: z.array(z.string()).max(500).default([]),
+      para: z.string().trim().max(80).optional(),
     })
     .parse(await c.req.json());
+
+  // Só empresas desta conta e que quem gera enxerga: ninguém libera o que não vê.
+  const empresasOk: string[] = [];
+  for (const e of [...new Set(empresas)]) {
+    const existe = await c.env.DB
+      .prepare('SELECT id FROM empresas WHERE id = ? AND tenant_id = ?')
+      .bind(e, s.tenantId).first();
+    if (existe && podeVerEmpresa(s, e)) empresasOk.push(e);
+  }
 
   // Não se convida para um papel mais poderoso do que o seu.
   const papel = await c.env.DB
@@ -1507,23 +1556,26 @@ app.post('/api/convites', async (c) => {
   await c.env.DB
     .prepare(
       `INSERT INTO convites (id, tenant_id, codigo_hash, papel_id, usos_max, usos,
-         expira_em, criado_por, criado_em, revogado)
-       VALUES (?,?,?,?,?,0,?,?,?,0)`,
+         expira_em, criado_por, criado_em, revogado, empresas, para)
+       VALUES (?,?,?,?,?,0,?,?,?,0,?,?)`,
     )
     .bind(id, s.tenantId, await hashConvite(codigo), papelId, usos,
       new Date(Date.now() + horas * 3600_000).toISOString(), s.usuarioId,
-      new Date().toISOString())
+      new Date().toISOString(), empresasOk.length ? JSON.stringify(empresasOk) : null, para || null)
     .run();
 
   await new Auditoria(c.env.DB, c.env.AUDIT_SEED).registrar({
     tenantId: s.tenantId, usuarioId: s.usuarioId, usuarioEmail: s.email,
     acao: 'criar', entidade: 'convite', entidadeId: id,
-    campo: 'papel', valorAntes: null, valorDepois: `${papel.nome} · ${usos} uso(s) · ${horas}h`,
+    campo: 'papel',
+    valorAntes: null,
+    valorDepois: `${papel.nome} · ${usos} uso(s) · ${horas}h · ${empresasOk.length} empresa(s)${para ? ` · para ${para}` : ''}`,
     origem: 'manual', ip: c.req.header('CF-Connecting-IP') ?? null,
     requestId: c.req.header('CF-Ray') ?? null,
   });
 
-  return c.json({ codigo, papel: papel.nome, usos, horas }, 201);
+  const expiraEm = new Date(Date.now() + horas * 3600_000).toISOString();
+  return c.json({ codigo, papel: papel.nome, usos, horas, expiraEm, para: para || null, empresas: empresasOk.length }, 201);
 });
 
 app.get('/api/convites', async (c) => {
@@ -1531,8 +1583,10 @@ app.get('/api/convites', async (c) => {
   exigir(s, 'usuarios.convidar');
   const { results } = await c.env.DB
     .prepare(
-      `SELECT c.id, c.usos, c.usos_max, c.expira_em, c.revogado, p.nome AS papel
+      `SELECT c.id, c.usos, c.usos_max, c.expira_em, c.revogado, p.nome AS papel, c.para,
+              u.nome AS usado_por_nome, u.email AS usado_por_email
          FROM convites c JOIN papeis p ON p.id = c.papel_id
+         LEFT JOIN usuarios u ON u.id = c.usado_por
         WHERE c.tenant_id = ? ORDER BY c.criado_em DESC LIMIT 30`,
     )
     .bind(s.tenantId)

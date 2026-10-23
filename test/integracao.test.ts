@@ -6134,7 +6134,7 @@ describe('23/10: link de acesso — a Taís gerencia as contas sozinha', () => {
   const usuario = async (email: string) =>
     ((await (await req('/api/usuarios')).json()) as any[]).find((u) => u.email === email);
 
-  it('o caso da Amanda: conta com senha provisória antiga, nunca entrou — o link resolve', async () => {
+  it('o caso da Amanda: conta com senha provisória antiga, nunca entrou — o link resolve sem pedir senha', async () => {
     // Como ficou em produção: criada antes desta mudança, senha provisória que ninguém repassou.
     await db.prepare(
       `INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, deve_trocar_senha, ativo, criado_em)
@@ -6142,13 +6142,11 @@ describe('23/10: link de acesso — a Taís gerencia as contas sozinha', () => {
     ).bind(await gerarHashSenha('provisoria que se perdeu 1'), new Date().toISOString()).run();
     await db.prepare("INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES ('u-amanda','papel-operador')").run();
 
-    // Sem a SUA senha não gera: o link dá acesso à conta de outra pessoa.
-    expect((await post('/api/usuarios/u-amanda/link-acesso', {})).status).toBe(400);
-    expect((await post('/api/usuarios/u-amanda/link-acesso', { minhaSenha: 'errada errada 1' })).status).toBe(400);
-    const r = await post('/api/usuarios/u-amanda/link-acesso', { minhaSenha: SENHA });
+    // Nunca entrou: não há conta de ninguém para proteger, então não pede a senha da gestora.
+    const r = await post('/api/usuarios/u-amanda/link-acesso', {});
     expect(r.status).toBe(201);
     const { link } = await r.json() as any;
-    expect(link.motivo).toBe('senha');
+    expect(link.motivo).toBe('primeiro');
     expect((await usuario('amanda@alfacontabil.net')).linkExpira).toBeTruthy();
 
     // A senha antiga vale até o link ser usado.
@@ -6159,9 +6157,75 @@ describe('23/10: link de acesso — a Taís gerencia as contas sozinha', () => {
     expect(entrou.status).toBe(200);
     expect((await entrou.json() as any).deveTrocarSenha).toBe(false);
     // Fica na trilha, sem senha nenhuma escrita.
-    expect(db.consultar("SELECT valor_depois FROM auditoria WHERE entidade = 'link_acesso'")).toEqual([{ valor_depois: 'senha' }]);
+    expect(db.consultar("SELECT valor_depois FROM auditoria WHERE entidade = 'link_acesso'")).toEqual([{ valor_depois: 'primeiro' }]);
     expect(db.consultar("SELECT valor_depois FROM auditoria WHERE entidade = 'usuario' AND campo = 'senha'"))
-      .toEqual([{ valor_depois: 'criada pelo link (senha)' }]);
+      .toEqual([{ valor_depois: 'criada pelo link (primeiro)' }]);
+
+    // Agora que ela já entrou, um link de senha nova pede a senha de quem gera.
+    expect((await post('/api/usuarios/u-amanda/link-acesso', {})).status).toBe(400);
+    expect((await post('/api/usuarios/u-amanda/link-acesso', { minhaSenha: 'errada errada 1' })).status).toBe(400);
+    const r2 = await post('/api/usuarios/u-amanda/link-acesso', { minhaSenha: SENHA });
+    expect(r2.status).toBe(201);
+    expect(((await r2.json()) as any).link.motivo).toBe('senha');
+  });
+
+  it('+ Novo usuário: a gestora gera o link com papel e empresas; a pessoa cria a conta e já entra', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'CLIENTE UM LTDA', uf: 'SC', perfil: 'revenda', liberarParaTodos: false });
+    const g = await post('/api/convites', {
+      papelId: 'papel-operador', usos: 1, horas: 168, para: 'Amanda', empresas: [empresaId, 'nao-existe'],
+    });
+    expect(g.status).toBe(201);
+    const conv = await g.json() as any;
+    expect(conv).toMatchObject({ papel: 'Operador', para: 'Amanda', empresas: 1, usos: 1 });
+    expect(conv.expiraEm).toBeTruthy();
+
+    // A tela confere o link assim que abre.
+    const ver = await publico('/api/convite/ver', { codigo: conv.codigo });
+    expect(ver.status).toBe(200);
+    expect(await ver.json()).toEqual({ papel: 'Operador' });
+
+    // A pessoa escolhe o e-mail e a senha dela.
+    const cad = await publico('/api/cadastrar', {
+      nome: 'Amanda Terra', email: 'amanda.terra@alfacontabil.net', senha: 'frase da terra 2026', convite: conv.codigo,
+    });
+    expect(cad.status).toBe(200);
+    expect((await cad.json() as any).liberado).toBe(true);
+    const entrou = await login('amanda.terra@alfacontabil.net', 'frase da terra 2026');
+    expect(entrou.status).toBe(200);
+    const eu = await (await como(cookie(entrou))('/api/eu')).json() as any;
+    expect(eu.nome).toBe('Amanda Terra');
+
+    const u = db.consultar("SELECT id FROM usuarios WHERE email = 'amanda.terra@alfacontabil.net'")[0] as any;
+    expect(db.consultar('SELECT empresa_id FROM usuario_empresas WHERE usuario_id = ?', u.id)).toEqual([{ empresa_id: empresaId }]);
+    expect(db.consultar('SELECT papel_id FROM usuario_papeis WHERE usuario_id = ?', u.id)).toEqual([{ papel_id: 'papel-operador' }]);
+
+    // Na lista de links: para quem era, e quem usou.
+    const lista = await (await req('/api/convites')).json() as any[];
+    expect(lista[0]).toMatchObject({ para: 'Amanda', usos: 1, usado_por_nome: 'Amanda Terra', usado_por_email: 'amanda.terra@alfacontabil.net' });
+
+    // Uso único: o mesmo link não serve de novo.
+    expect((await publico('/api/convite/ver', { codigo: conv.codigo })).status).toBe(404);
+    const de2 = await publico('/api/cadastrar', {
+      nome: 'Outra', email: 'outra@alfacontabil.net', senha: 'frase comprida de teste 8', convite: conv.codigo,
+    });
+    expect(de2.status).toBe(400);
+  });
+
+  it('ninguém põe no link empresa que não enxerga', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'CLIENTE UM LTDA', uf: 'SC', perfil: 'revenda', liberarParaTodos: false });
+    // Um papel que convida mas só vê as empresas marcadas para ele (nenhuma).
+    await post('/api/papeis', { nome: 'Gestor sem clientes', permissoes: ['usuarios.convidar', 'notas.visualizar'] });
+    const papeis = await (await req('/api/papeis')).json() as any[];
+    const gestor = papeis.find((p) => p.nome === 'Gestor sem clientes')!;
+    const leitor = papeis.find((p) => p.nome === 'Operador')!;
+    void leitor;
+    const g = await post('/api/convites', { papelId: gestor.id, usos: 1 });
+    const { codigo } = await g.json() as any;
+    await publico('/api/cadastrar', { nome: 'Gestor', email: 'gestor@alfacontabil.net', senha: 'frase comprida de teste 8', convite: codigo });
+    const reqG = como(cookie(await login('gestor@alfacontabil.net', 'frase comprida de teste 8')));
+    const r = await post('/api/convites', { papelId: gestor.id, usos: 1, empresas: [empresaId] }, reqG);
+    expect(r.status).toBe(201);
+    expect((await r.json() as any).empresas).toBe(0);
   });
 
   it('gerar outro link derruba o anterior; link vencido não vale; o código não fica legível no banco', async () => {

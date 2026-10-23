@@ -257,11 +257,31 @@ $('#link-criar-conta').addEventListener('click', (e) => { e.preventDefault(); mo
 
 // Link de convite abre direto no cadastro, com o código já preenchido: quem
 // recebe o link não precisa entender o que fazer com um código solto.
-(() => {
-  const codigo = new URLSearchParams(location.search).get('convite');
-  if (!codigo) return;
-  $('#cad-convite').value = codigo;
+// 23/10: é assim que entra gente nova — a gestora gera o link em "+ Novo usuário" e a
+// pessoa cria a conta aqui, com o e-mail duas vezes (não há e-mail de confirmação).
+const modoConvite = { codigo: new URLSearchParams(location.search).get('convite') };
+(async () => {
+  if (!modoConvite.codigo) return;
+  $('#cad-convite').value = modoConvite.codigo;
+  $('#cad-convite-campo').classList.add('hidden');
+  $('#cad-email2-campo').classList.remove('hidden');
+  $('#cadastro-titulo').textContent = 'Criar sua conta';
+  $('#btn-cadastrar').textContent = 'Criar conta e entrar';
   mostrarFormulario('cadastro');
+  try {
+    const r = await api('/api/convite/ver', {
+      method: 'POST', body: JSON.stringify({ codigo: modoConvite.codigo }),
+    });
+    $('#cadastro-convite-info').textContent =
+      `O escritório te convidou para entrar como ${r.papel}. Preencha seus dados e crie sua senha.`;
+    $('#cadastro-convite-info').classList.remove('hidden');
+    $('#cad-nome').focus();
+  } catch (err) {
+    // Link vencido, usado ou cancelado: diz na hora, antes de a pessoa preencher tudo.
+    $('#cadastro-campos').classList.add('hidden');
+    $('#cadastro-msg').textContent = err.message || 'este link não vale mais';
+    $('#cadastro-ok').classList.remove('hidden');
+  }
 })();
 $('#btn-voltar-login').addEventListener('click', (e) => { e.preventDefault(); mostrarCadastro(false); });
 $('#btn-voltar-login2').addEventListener('click', () => mostrarCadastro(false));
@@ -343,6 +363,10 @@ $('#btn-cadastrar').addEventListener('click', async (e) => {
   // não é a que ela pensa, esperando aprovação para descobrir isso.
   if (senha !== $('#cad-senha2').value) return erro('as duas senhas não são iguais');
   if (!$('#cad-nome').value.trim()) return erro('informe seu nome');
+  const email = $('#cad-email').value.trim();
+  if (modoConvite.codigo && email.toLowerCase() !== $('#cad-email2').value.trim().toLowerCase()) {
+    return erro('os dois e-mails não são iguais');
+  }
 
   btn.disabled = true;
   try {
@@ -350,11 +374,22 @@ $('#btn-cadastrar').addEventListener('click', async (e) => {
       method: 'POST',
       body: JSON.stringify({
         nome: $('#cad-nome').value.trim(),
-        email: $('#cad-email').value.trim(),
+        email,
         senha,
         convite: $('#cad-convite').value.trim() || undefined,
       }),
     });
+    if (r.liberado) {
+      // Conta criada pelo link da gestora: entra direto, pelo login de sempre.
+      const u = new URL(location.href);
+      u.searchParams.delete('convite');
+      history.replaceState(null, '', u.pathname + u.search + u.hash);
+      $('#login-email').value = email;
+      $('#login-senha').value = senha;
+      mostrarFormulario('login');
+      $('#form-login').requestSubmit();
+      return;
+    }
     $('#cadastro-campos').classList.add('hidden');
     $('#cadastro-msg').textContent = r.mensagem;
     $('#cadastro-ok').classList.remove('hidden');
@@ -765,8 +800,7 @@ async function iniciar() {
   // A tela esconde; o servidor decide. Estas linhas são conveniência, não
   // segurança — cada rota confere a permissão por conta própria.
   $('#btn-nova-empresa').classList.toggle('hidden', !pode('empresas.criar'));
-  $('#btn-novo-usuario').classList.toggle('hidden', !pode('usuarios.criar'));
-  $('#btn-convidar').classList.toggle('hidden', !pode('usuarios.convidar'));
+  $('#btn-novo-usuario').classList.toggle('hidden', !pode('usuarios.convidar'));
   $('#btn-novo-papel').classList.toggle('hidden', !pode('papeis.gerenciar'));
   for (const [botao, permissao] of [['vUsuarios', 'usuarios.visualizar'], ['vPapeis', 'papeis.gerenciar'], ['vCertificados', 'certificados.gerenciar'], ['vCaptura', 'captura.gerenciar'], ['vConversas', 'auditoria.visualizar']]) {
     const b = document.querySelector(`#nav button[data-view="${botao}"]`);
@@ -3218,32 +3252,32 @@ async function carregarConvites() {
   const cs = await api('/api/convites');
   const abertos = cs.filter((c) => !c.revogado && !c.vencido && c.usos < c.usos_max);
   const situacao = (c) =>
-    c.revogado ? '<span class="tag dan">revogado</span>'
+    c.revogado ? '<span class="tag dan">cancelado</span>'
     : c.vencido ? '<span class="tag mut">vencido</span>'
-    : c.usos >= c.usos_max ? '<span class="tag mut">todo usado</span>'
-    : '<span class="tag ok">válido</span>';
+    : c.usos >= c.usos_max ? '<span class="tag ok">usado</span>'
+    : '<span class="tag">esperando a pessoa</span>';
 
   $('#tbl-convites tbody').innerHTML = cs.map((c) => `<tr${c.revogado || c.vencido ? ' style="opacity:.55"' : ''}>
-    <td>${esc(c.papel ?? '—')}</td>
-    <td class="mono tiny">${c.usos} de ${c.usos_max}</td>
+    <td>${c.para ? esc(c.para) : '<span class="d">—</span>'}</td>
+    <td>${esc(c.papel ?? '—')}${c.usos_max > 1 ? ` <span class="d">(${c.usos} de ${c.usos_max})</span>` : ''}</td>
     <td class="tiny">${dataCurta(c.expira_em)}</td>
-    <td>${situacao(c)}</td>
+    <td>${situacao(c)}${c.usado_por_nome ? ` <span class="d">por ${esc(c.usado_por_nome)} (${esc(c.usado_por_email)})</span>` : ''}</td>
     <td class="acoes">${abertos.includes(c)
-      ? `<button class="btn sm perigo" data-revogar="${esc(c.id)}">Revogar</button>` : ''}</td>
-  </tr>`).join('') || '<tr><td colspan="5" class="vazio">Nenhum convite gerado.</td></tr>';
+      ? `<button class="btn sm perigo" data-revogar="${esc(c.id)}">Cancelar</button>` : ''}</td>
+  </tr>`).join('') || '<tr><td colspan="5" class="vazio">Nenhum link gerado.</td></tr>';
 
   $$('#tbl-convites button[data-revogar]').forEach((b) =>
     b.addEventListener('click', async () => {
       const ok = await confirmar({
-        titulo: 'Revogar convite',
-        ok: 'Revogar',
+        titulo: 'Cancelar link de cadastro',
+        ok: 'Cancelar link',
         perigo: true,
-        corpo: '<p class="dialogo-texto">Quem tiver o link para de conseguir entrar por ele.</p>',
+        corpo: '<p class="dialogo-texto">Quem tiver o link para de conseguir criar conta por ele.</p>',
       });
       if (!ok) return;
       try {
         await api(`/api/convites/${b.dataset.revogar}`, { method: 'DELETE' });
-        avisarSalvo('Convite revogado');
+        avisarSalvo('Link cancelado');
         await carregarConvites();
       } catch (e) { alerta(e.message); }
     }));
@@ -3592,59 +3626,86 @@ async function gerarLinkDe(u) {
   $('#modal-ok').textContent = 'Gerar link';
 }
 
-async function gerarConvite() {
+/* "+ Novo usuário" (pedido do Mateus, 23/10): a gestora escolhe o papel e as empresas e
+   gera um link de uso único. A pessoa abre, cria a conta dela (nome, e-mail e senha) e já
+   entra com o papel e as empresas escolhidos. Ninguém digita o e-mail de ninguém. */
+async function novoUsuarioPorLink() {
   if (!papeisCache.length) papeisCache = await api('/api/papeis');
-  abrirModal('Gerar convite', `
-    <p class="page-desc">Quem abrir este link entra <b>na hora</b>, já com o papel escolhido —
-      ninguém precisa aprovar. Mande no grupo do escritório.</p>
+  const empresas = estado.empresas ?? [];
+  abrirModal('Novo usuário', `
+    <p class="page-desc">Escolha o que a pessoa vai poder fazer e gere o link. Ela abre o link,
+      cria a conta dela (e-mail e senha) e já entra. O link serve uma vez só.</p>
     <div class="campo">
-      <label class="fl" for="cv-papel">Papel de quem entrar</label>
-      <select id="cv-papel">
+      <label class="fl" for="nu-para">Para quem é <span class="d">(só para você se lembrar)</span></label>
+      <input type="text" id="nu-para" maxlength="80" placeholder="Ex.: Amanda">
+    </div>
+    <div class="campo">
+      <label class="fl" for="nu-papel">Papel</label>
+      <select id="nu-papel">
         ${papeisCache.map((p) => `<option value="${esc(p.id)}">${esc(p.nome)}</option>`).join('')}
       </select>
     </div>
-    <div class="rowflex">
-      <div style="flex:1"><label class="fl" for="cv-usos">Quantas pessoas podem usar</label>
-        <input type="number" id="cv-usos" value="3" min="1" max="50" style="width:100%"></div>
-      <div style="flex:1"><label class="fl" for="cv-horas">Vale por (horas)</label>
-        <input type="number" id="cv-horas" value="72" min="1" max="720" style="width:100%"></div>
+    <div class="campo">
+      <label class="fl">Clientes que esta pessoa enxerga</label>
+      ${empresas.length === 0 ? '<span class="d">nenhuma empresa cadastrada ainda</span>'
+        : `<label class="perm-item"><input type="checkbox" id="nu-todas" checked><span><b>Todas</b></span></label>
+          ${empresas.map((e) => `
+          <label class="perm-item">
+            <input type="checkbox" data-nu-empresa="${esc(e.id)}" checked>
+            <span>${esc(e.razao_social)}</span>
+          </label>`).join('')}`}
+      <p class="page-desc">Dá para mudar depois, no Editar da pessoa.</p>
     </div>
-    <p class="page-desc">O prazo e o limite de usos existem para o link não virar porta
-      permanente. Se sobrar convite sem usar, ele vence sozinho.</p>
   `, async () => {
     const r = await api('/api/convites', {
       method: 'POST',
       body: JSON.stringify({
-        papelId: $('#cv-papel').value,
-        usos: Number($('#cv-usos').value),
-        horas: Number($('#cv-horas').value),
+        papelId: $('#nu-papel').value,
+        usos: 1,
+        horas: 168,
+        para: $('#nu-para').value.trim() || undefined,
+        empresas: [...$$('#modal-corpo input[data-nu-empresa]')].filter((i) => i.checked).map((i) => i.dataset.nuEmpresa),
       }),
     });
-    mostrarConvite(r);
+    mostrarLinkCadastro(r);
   });
-  $('#modal-ok').textContent = 'Gerar';
+  $('#modal-ok').textContent = 'Gerar link';
+  $('#nu-todas')?.addEventListener('change', (ev) => {
+    for (const i of $$('#modal-corpo input[data-nu-empresa]')) i.checked = ev.target.checked;
+  });
 }
 
-function mostrarConvite(r) {
+function mostrarLinkCadastro(r) {
   carregarConvites().catch(() => {});
-  const link = `${location.origin}/?convite=${encodeURIComponent(r.codigo)}`;
+  const url = `${location.origin}/?convite=${encodeURIComponent(r.codigo)}`;
+  const quem = r.para ? ` ${r.para}` : '';
+  const texto = `Oi${quem}! Este é o link para você criar a sua conta no Alfa Fiscal. Abre, coloca teu nome, teu e-mail e uma senha, e já entra: ${url}`;
   setTimeout(() => {
-    abrirModal('Convite gerado', `
-      <p class="page-desc">Mande este link para até <b>${r.usos} pessoa(s)</b>. Quem abrir
-        entra como <b>${esc(r.papel)}</b>, sem passar por aprovação. Vale ${r.horas} horas.</p>
-      <div class="senha-provisoria" style="font-size:.9rem">${esc(link)}</div>
-      <p class="page-desc">Se preferir passar só o código: <b>${esc(r.codigo)}</b></p>
-      <p class="page-desc"><b>Não aparece de novo</b> — no banco fica só o embaralhado dele.
-        Convite perdido se gera outro.</p>
+    abrirModal(r.para ? `Link de cadastro: ${r.para}` : 'Link de cadastro', `
+      <p class="page-desc">Mande este link para ${r.para ? `<b>${esc(r.para)}</b>` : 'a pessoa'} pelo
+        WhatsApp. Ela abre, cria a conta dela (e-mail e senha) e já entra como
+        <b>${esc(r.papel)}</b>${r.empresas ? `, vendo ${r.empresas} empresa(s)` : ''}.
+        <b>O sistema não manda e-mail</b>: se você não mandar, ela não fica sabendo.</p>
+      <div class="link-acesso">
+        <input type="text" id="la-url" readonly value="${esc(url)}">
+        <button type="button" class="btn sm" id="la-copiar">Copiar link</button>
+        <a class="btn primary sm" target="_blank" rel="noopener"
+           href="https://wa.me/?text=${encodeURIComponent(texto)}">Mandar no WhatsApp</a>
+      </div>
+      <p class="page-desc">Vale até <b>${esc(dataHora(r.expiraEm))}</b> e uma vez só. Perdeu ou
+        venceu? Gere outro em + Novo usuário (e cancele este em Links de cadastro).</p>
     `, async () => {});
     $('#modal-cancelar').classList.add('hidden');
-    $('#modal-ok').textContent = 'Copiei';
+    $('#modal-ok').textContent = 'Pronto';
+    $('#la-copiar').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(url); } catch { $('#la-url').select(); }
+      $('#la-copiar').textContent = 'copiado';
+      setTimeout(() => { $('#la-copiar').textContent = 'Copiar link'; }, 1500);
+    });
   }, 30);
 }
 
-$('#btn-convidar').addEventListener('click', () => gerarConvite().catch((e) => alerta(e.message)));
-
-$('#btn-novo-usuario').addEventListener('click', () => editarUsuario(null).catch((e) => alerta(e.message)));
+$('#btn-novo-usuario').addEventListener('click', () => novoUsuarioPorLink().catch((e) => alerta(e.message)));
 
 // ------------------------------------------------------------------ fornecedores e regras
 
