@@ -784,3 +784,8 @@ tr.nota-estorno td{background:#faf5ff}
 .btn-avisar:hover{color:var(--primary)}
 .seg-tabela{width:100%;border-collapse:collapse;font-size:13px}
 .seg-tabela th,.seg-tabela td{padding:7px 12px;border-bottom:1px solid var(--line-2);text-align:left}
+
+/* Link de acesso (23/10): o link e os dois botões na mesma linha, quebrando no celular. */
+.link-acesso { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .4rem 0 .8rem; }
+.link-acesso input { flex: 1 1 260px; min-width: 0; font-family: ui-monospace, monospace; font-size: .8rem; }
+.link-acesso a.btn { text-decoration: none; }

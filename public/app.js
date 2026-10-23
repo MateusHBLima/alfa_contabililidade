@@ -218,7 +218,7 @@ $('#btn-trocar-senha').addEventListener('click', (e) => {
 
 /** Três formulários no mesmo cartão: entrar, pedir acesso, esquecer a senha. */
 function mostrarFormulario(qual) {
-  for (const [id, nome] of [['#form-login', 'login'], ['#form-cadastro', 'cadastro'], ['#form-esqueci', 'esqueci']]) {
+  for (const [id, nome] of [['#form-login', 'login'], ['#form-cadastro', 'cadastro'], ['#form-esqueci', 'esqueci'], ['#form-acesso', 'acesso']]) {
     $(id).classList.toggle('hidden', nome !== qual);
   }
   for (const p of ['cadastro', 'esqueci']) {
@@ -265,6 +265,68 @@ $('#link-criar-conta').addEventListener('click', (e) => { e.preventDefault(); mo
 })();
 $('#btn-voltar-login').addEventListener('click', (e) => { e.preventDefault(); mostrarCadastro(false); });
 $('#btn-voltar-login2').addEventListener('click', () => mostrarCadastro(false));
+
+/* Link de acesso (23/10): /?acesso=CODIGO. Quem administra criou a conta (ou pediu
+   senha nova) e mandou o link; aqui a pessoa cria a senha dela e entra pelo login
+   normal, que pede o segundo fator se ela tiver. */
+const acesso = { codigo: new URLSearchParams(location.search).get('acesso') };
+const tirarAcessoDaUrl = () => {
+  const u = new URL(location.href);
+  u.searchParams.delete('acesso');
+  history.replaceState(null, '', u.pathname + u.search + u.hash);
+};
+const erroAcesso = (m) => {
+  $('#acesso-erro').textContent = m;
+  $('#acesso-erro').classList.remove('hidden');
+};
+(async () => {
+  if (!acesso.codigo) return;
+  mostrarFormulario('acesso');
+  $('#acesso-erro').classList.add('hidden');
+  try {
+    const r = await api('/api/acesso/ver', {
+      method: 'POST', body: JSON.stringify({ codigo: acesso.codigo }),
+    });
+    acesso.email = r.email;
+    $('#acesso-titulo').textContent = r.motivo === 'senha' ? 'Criar uma senha nova' : 'Criar sua senha';
+    $('#acesso-ola').textContent = r.motivo === 'senha'
+      ? `Olá, ${r.nome}. Crie uma senha nova para entrar no Alfa Fiscal.`
+      : `Olá, ${r.nome}. Crie sua senha para entrar no Alfa Fiscal.`;
+    $('#acesso-email').value = r.email;
+    $('#acesso-campos').classList.remove('hidden');
+    $('#acesso-senha').focus();
+  } catch (err) {
+    erroAcesso(err.message || 'este link não vale mais');
+  }
+})();
+$('#btn-voltar-login5').addEventListener('click', (e) => {
+  e.preventDefault();
+  tirarAcessoDaUrl();
+  mostrarFormulario('login');
+});
+$('#btn-acesso').addEventListener('click', async (e) => {
+  e.preventDefault();
+  const btn = $('#btn-acesso');
+  $('#acesso-erro').classList.add('hidden');
+  const senha = $('#acesso-senha').value;
+  if (senha !== $('#acesso-senha2').value) return erroAcesso('as duas senhas não são iguais');
+  btn.disabled = true;
+  try {
+    await api('/api/acesso/usar', {
+      method: 'POST', body: JSON.stringify({ codigo: acesso.codigo, senha }),
+    });
+    tirarAcessoDaUrl();
+    // Entra pelo caminho de sempre: mesmo formulário, mesmo segundo fator.
+    $('#login-email').value = acesso.email;
+    $('#login-senha').value = senha;
+    mostrarFormulario('login');
+    $('#form-login').requestSubmit();
+  } catch (err) {
+    erroAcesso(err.message || 'não foi possível salvar a senha');
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 $('#btn-cadastrar').addEventListener('click', async (e) => {
   e.preventDefault();
@@ -3193,6 +3255,7 @@ async function carregarUsuarios() {
   const podeEditar = estado.eu.permissoes.includes('usuarios.editar');
   const podeDesativar = estado.eu.permissoes.includes('usuarios.desativar');
   const podeSenha = estado.eu.permissoes.includes('usuarios.redefinir_senha');
+  const podeCriar = estado.eu.permissoes.includes('usuarios.criar');
   const podeMfa = estado.eu.permissoes.includes('usuarios.desativar_mfa');
 
   const podeAprovar = estado.eu.permissoes.includes('usuarios.aprovar');
@@ -3206,27 +3269,50 @@ async function carregarUsuarios() {
   }
   if (pediramSenha) {
     avisos.push(pediramSenha === 1
-      ? '1 pessoa esqueceu a senha e está esperando uma provisória.'
-      : `${pediramSenha} pessoas esqueceram a senha e estão esperando uma provisória.`);
+      ? '1 pessoa esqueceu a senha: clique em Link de acesso na linha dela e mande o link.'
+      : `${pediramSenha} pessoas esqueceram a senha: clique em Link de acesso na linha de cada uma e mande o link.`);
+  }
+  const linkVencido = us.filter((u) => u.ativo && u.aguardandoSenha && !u.linkExpira).length;
+  if (linkVencido) {
+    avisos.push(linkVencido === 1
+      ? '1 pessoa ainda não criou a senha e o link dela venceu: gere outro em Link de acesso.'
+      : `${linkVencido} pessoas ainda não criaram a senha e o link venceu: gere outro em Link de acesso.`);
   }
   $('#aviso-pendentes').classList.toggle('hidden', avisos.length === 0);
   $('#aviso-pendentes').textContent = avisos.join(' ');
 
-  $('#tbl-usuarios tbody').innerHTML = us.map((u) => `<tr${u.pendente || u.pediuSenha ? ' class="linha-pendente"' : (u.ativo ? '' : ' style="opacity:.55"')}>
+  // 23/10: o que a pessoa precisa fazer fica escrito na linha, e o botão "Link de
+  // acesso" resolve os três casos (conta nova, link perdido ou vencido, esqueceu a senha).
+  const situacao = (u) => {
+    if (u.pendente) return '<b>esperando liberação</b>';
+    if (!u.ativo) return 'desativado';
+    if (u.aguardandoSenha) {
+      return u.linkExpira
+        ? `<b>link enviado</b> <span class="d">(ainda não criou a senha; vale até ${dataHora(u.linkExpira)})</span>`
+        : '<b>link vencido</b> <span class="d">(ainda não criou a senha: gere outro)</span>';
+    }
+    if (u.pediuSenha) return '<b>esqueceu a senha</b>';
+    if (u.linkExpira) return `ativo <span class="d">(link de senha nova vale até ${dataHora(u.linkExpira)})</span>`;
+    return `ativo${u.deveTrocarSenha ? ' <span class="d">(senha provisória)</span>' : ''}`;
+  };
+  const precisaLink = (u) => u.pediuSenha || (u.aguardandoSenha && !u.linkExpira)
+    || (u.deveTrocarSenha && !u.ultimo_login);
+  const podeLink = (u) => !u.pendente && u.ativo && (podeSenha || (u.aguardandoSenha && podeCriar));
+
+  $('#tbl-usuarios tbody').innerHTML = us.map((u) => `<tr${u.pendente || (u.ativo && precisaLink(u)) ? ' class="linha-pendente"' : (u.ativo ? '' : ' style="opacity:.55"')}>
     <td><b>${esc(u.nome)}</b></td>
     <td>${esc(u.email)}</td>
     <td>${esc(u.papel ?? '—')}</td>
     <td>${u.excecoes > 0 ? `${u.excecoes} ajuste(s)` : '<span class="d">—</span>'}</td>
     <td>${u.mfa ? '✓ ligado' : '<span class="d">não</span>'}</td>
     <td>${u.ultimo_login ? new Date(u.ultimo_login).toLocaleDateString('pt-BR') : '<span class="d">nunca</span>'}</td>
-    <td>${u.pendente ? '<b>esperando liberação</b>'
-      : u.pediuSenha ? '<b>esqueceu a senha</b>'
-      : (u.ativo ? 'ativo' : 'desativado')}${u.deveTrocarSenha ? ' <span class="d">(senha provisória)</span>' : ''}</td>
+    <td>${situacao(u)}</td>
     <td style="white-space:nowrap">
       ${u.pendente && podeAprovar ? `<button class="btn primary sm" data-aprovar="${esc(u.id)}">Liberar</button>
         <button class="btn sm" data-recusar="${esc(u.id)}">Recusar</button>` : ''}
       ${!u.pendente && podeEditar ? `<button class="btn sm" data-editar="${esc(u.id)}">Editar</button>` : ''}
-      ${!u.pendente && podeSenha ? `<button class="btn ${u.pediuSenha ? 'primary ' : ''}sm" data-senha="${esc(u.id)}">Senha</button>` : ''}
+      ${podeLink(u) ? `<button class="btn ${precisaLink(u) ? 'primary ' : ''}sm" data-link="${esc(u.id)}"
+        title="Gera um link para a pessoa criar a senha. Mande pelo WhatsApp.">🔗 Link de acesso</button>` : ''}
       ${!u.pendente && podeDesativar ? `<button class="btn sm" data-ativo="${esc(u.id)}" data-para="${u.ativo ? '0' : '1'}">${u.ativo ? 'Desativar' : 'Reativar'}</button>` : ''}
       ${!u.pendente && u.mfa && podeMfa ? `<button class="btn sm" data-mfa="${esc(u.id)}"
         title="Para quem trocou de celular e ficou trancado para fora">Desligar 2º fator</button>` : ''}
@@ -3276,8 +3362,9 @@ async function carregarUsuarios() {
     });
   }
 
-  for (const b of $$('#tbl-usuarios button[data-senha]')) {
-    b.addEventListener('click', () => redefinirSenhaDe(b.dataset.senha).catch((e) => alerta(e.message)));
+  for (const b of $$('#tbl-usuarios button[data-link]')) {
+    const u = us.find((x) => x.id === b.dataset.link);
+    b.addEventListener('click', () => gerarLinkDe(u).catch((e) => alerta(e.message)));
   }
   for (const b of $$('#tbl-usuarios button[data-ativo]')) {
     b.addEventListener('click', async () => {
@@ -3317,7 +3404,8 @@ async function editarUsuario(id) {
     <div class="campo">
       <label class="fl" for="us-email">E-mail</label>
       <input type="email" id="us-email" value="${esc(u?.email ?? '')}" ${u ? 'disabled' : ''}>
-      ${u ? '<span class="d">o e-mail identifica a conta e não muda</span>' : ''}
+      ${u ? '<span class="d">o e-mail identifica a conta e não muda</span>'
+        : '<span class="d">depois de salvar aparece um link para você mandar à pessoa (o sistema não manda e-mail)</span>'}
     </div>
     <div class="campo">
       <label class="fl" for="us-papel">Papel</label>
@@ -3364,7 +3452,7 @@ async function editarUsuario(id) {
     } else {
       corpo.email = $('#us-email').value.trim();
       const r = await api('/api/usuarios', { method: 'POST', body: JSON.stringify(corpo) });
-      mostrarSenhaProvisoria(r.email, r.senhaProvisoria);
+      mostrarLinkAcesso(r);
     }
     await carregarUsuarios();
   });
@@ -3442,52 +3530,66 @@ async function aprovarPedido(id) {
   $('#ap-papel').addEventListener('change', desenhar);
 }
 
-function mostrarSenhaProvisoria(email, senha) {
+/* Link de acesso (23/10). Substitui a senha provisória: quem administra manda o link
+   pelo WhatsApp, a pessoa abre, cria a senha dela e entra. O sistema não manda e-mail,
+   e a tela diz isso com todas as letras — foi o que confundiu no caso da Amanda. */
+function mostrarLinkAcesso({ nome, email, link }) {
+  const url = `${location.origin}/?acesso=${encodeURIComponent(link.codigo)}`;
+  const primeiro = link.motivo === 'primeiro';
+  const texto = primeiro
+    ? `Oi ${nome}! Este é o seu acesso ao Alfa Fiscal. Abre o link, cria a sua senha e já entra (o e-mail é ${email}): ${url}`
+    : `Oi ${nome}! Este é o link para criar uma senha nova no Alfa Fiscal (o e-mail é ${email}): ${url}`;
   setTimeout(() => {
-    abrirModal('Usuário criado', `
-      <p class="page-desc">Passe esta senha para <b>${esc(email)}</b>. Ela é provisória:
-        a pessoa é obrigada a trocá-la no primeiro acesso, e a partir daí nem você
-        sabe qual é.</p>
-      <div class="senha-provisoria">${esc(senha)}</div>
-      <p class="page-desc"><b>Não aparece de novo.</b> Se perder, use o botão “Senha”
-        na lista para gerar outra.</p>
+    abrirModal(primeiro ? 'Usuário criado: falta mandar o link' : `Link de senha nova: ${nome}`, `
+      <p class="page-desc">Mande este link para <b>${esc(nome)}</b> pelo WhatsApp. Ela abre,
+        cria a senha dela e já entra. <b>O sistema não manda e-mail</b>: se você não mandar,
+        ela não fica sabendo.</p>
+      <div class="link-acesso">
+        <input type="text" id="la-url" readonly value="${esc(url)}">
+        <button type="button" class="btn sm" id="la-copiar">Copiar link</button>
+        <a class="btn primary sm" id="la-whats" target="_blank" rel="noopener"
+           href="https://wa.me/?text=${encodeURIComponent(texto)}">Mandar no WhatsApp</a>
+      </div>
+      <p class="page-desc">Vale até <b>${esc(dataHora(link.expiraEm))}</b> e uma vez só.
+        ${primeiro ? '' : 'A senha atual dela continua valendo até ela usar o link. '}
+        Perdeu o link ou venceu? Na lista, botão <b>Link de acesso</b> gera outro (o anterior
+        para de valer).</p>
     `, async () => {});
     $('#modal-cancelar').classList.add('hidden');
-    $('#modal-ok').textContent = 'Copiei';
+    $('#modal-ok').textContent = 'Pronto';
+    $('#la-copiar').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(url); } catch { $('#la-url').select(); }
+      $('#la-copiar').textContent = 'copiado';
+      setTimeout(() => { $('#la-copiar').textContent = 'Copiar link'; }, 1500);
+    });
   }, 30);
 }
 
-async function redefinirSenhaDe(id) {
-  const u = await api(`/api/usuarios/${id}`);
-  abrirModal(`Redefinir a senha de ${u.nome}`, `
-    <p class="page-desc">A pessoa vai receber uma senha provisória e será obrigada a
-      trocá-la no primeiro acesso. As sessões dela caem agora.</p>
+async function gerarLinkDe(u) {
+  // Conta que ainda não tem senha: gera outro link direto. Conta que já tem senha:
+  // pedir a SUA senha antes, porque o link dá acesso à conta de outra pessoa.
+  if (u.aguardandoSenha) {
+    const r = await api(`/api/usuarios/${u.id}/link-acesso`, { method: 'POST', body: '{}' });
+    mostrarLinkAcesso(r);
+    await carregarUsuarios();
+    return;
+  }
+  abrirModal(`Link de acesso: ${u.nome}`, `
+    <p class="page-desc">Gera um link para <b>${esc(u.nome)}</b> criar uma senha nova. Você
+      manda pelo WhatsApp. A senha atual dela continua valendo até ela usar o link.</p>
     <div class="campo">
-      <label class="fl" for="rs-nova">Senha provisória</label>
-      <input type="text" id="rs-nova" value="${esc(gerarSenhaProvisoria())}">
-      <span class="d">pode editar; mínimo 12 caracteres</span>
-    </div>
-    <div class="campo">
-      <label class="fl" for="rs-minha">Confirme a SUA senha</label>
-      <input type="password" id="rs-minha" autocomplete="current-password">
-      <span class="d">redefinir a senha de outra pessoa dá acesso à conta dela</span>
+      <label class="fl" for="la-minha">Confirme a SUA senha</label>
+      <input type="password" id="la-minha" autocomplete="current-password">
+      <span class="d">o link dá acesso à conta de outra pessoa, por isso a confirmação</span>
     </div>
   `, async () => {
-    await api(`/api/usuarios/${id}/redefinir-senha`, {
-      method: 'POST',
-      body: JSON.stringify({
-        senhaProvisoria: $('#rs-nova').value, minhaSenha: $('#rs-minha').value,
-      }),
+    const r = await api(`/api/usuarios/${u.id}/link-acesso`, {
+      method: 'POST', body: JSON.stringify({ minhaSenha: $('#la-minha').value }),
     });
-    const senha = $('#rs-nova').value;
-    mostrarSenhaProvisoria(u.email, senha);
+    mostrarLinkAcesso(r);
     await carregarUsuarios();
   });
-}
-
-function gerarSenhaProvisoria() {
-  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
-  return [...crypto.getRandomValues(new Uint8Array(14))].map((b) => A[b % A.length]).join('');
+  $('#modal-ok').textContent = 'Gerar link';
 }
 
 async function gerarConvite() {

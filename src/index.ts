@@ -193,7 +193,7 @@ app.use('/api/*', async (c, next) => {
   // exigir sessão nela torna o segundo fator impossível de completar.
   const PUBLICAS = new Set([
     '/api/login', '/api/login/mfa', '/api/saude', '/api/local', '/api/cadastrar',
-    '/api/esqueci',
+    '/api/esqueci', '/api/acesso/ver', '/api/acesso/usar',
   ]);
   if (PUBLICAS.has(c.req.path)) return next();
 
@@ -417,10 +417,35 @@ app.post('/api/cadastrar', async (c) => {
       + 'avise alguém do escritório. Você receberá o mesmo aviso se já tiver conta aqui.',
   };
 
+  // Com convite válido, a conta já nasce liberada e com o papel do convite.
+  // É o que tira o trabalho de aprovar: quem recebeu o link entra e trabalha.
+  // O convite é conferido ANTES de olhar se o e-mail existe (23/10): com convite
+  // errado a resposta é "convite inválido" exista o e-mail ou não.
+  const conv = convite ? await convitePorCodigo(c.env.DB, convite) : null;
+
+  if (convite && !conv) {
+    // Convite errado NÃO cria conta pendente em silêncio: quem digitou um código
+    // acha que vai entrar direto, e descobriria só depois que ficou esperando.
+    return c.json({ erro: 'convite inválido, expirado ou já usado' }, 400);
+  }
+
   const jaExiste = await c.env.DB
     .prepare('SELECT id FROM usuarios WHERE lower(email) = ?')
     .bind(email.toLowerCase())
     .first();
+
+  if (jaExiste && conv) {
+    // 23/10 (Amanda): a Taís criou o usuário e depois mandou um convite; a Amanda usou
+    // o convite com o mesmo e-mail e ouviu "precisa liberar" — sem nada para liberar.
+    // Quem tem convite válido é alguém que o escritório chamou: pode saber que a conta
+    // já existe e o que fazer. O convite não é gasto.
+    await registrarTentativa(c.env.DB, ip, false);
+    return c.json({
+      erro: 'este e-mail já tem conta aqui. Entre com a sua senha. Se não sabe qual é, peça '
+        + 'a quem te convidou um link de acesso (tela Usuários, botão "Link de acesso").',
+      jaTemConta: true,
+    }, 409);
+  }
 
   if (jaExiste) {
     // Custo constante: sem isto, "já existe" volta instantâneo e "novo" demora
@@ -432,16 +457,6 @@ app.post('/api/cadastrar', async (c) => {
 
   const agora = new Date().toISOString();
   const id = crypto.randomUUID();
-
-  // Com convite válido, a conta já nasce liberada e com o papel do convite.
-  // É o que tira o trabalho de aprovar: quem recebeu o link entra e trabalha.
-  const conv = convite ? await convitePorCodigo(c.env.DB, convite) : null;
-
-  if (convite && !conv) {
-    // Convite errado NÃO cria conta pendente em silêncio: quem digitou um código
-    // acha que vai entrar direto, e descobriria só depois que ficou esperando.
-    return c.json({ erro: 'convite inválido, expirado ou já usado' }, 400);
-  }
 
   const escritas = [
     c.env.DB
@@ -508,9 +523,126 @@ app.post('/api/esqueci', async (c) => {
   await registrarTentativa(c.env.DB, ip, false);
   return c.json({
     ok: true,
-    mensagem: 'Pedido registrado. Fale com um administrador do escritório: ele vai gerar '
-      + 'uma senha provisória para você. Se este e-mail não tiver conta aqui, nada acontece.',
+    mensagem: 'Pedido registrado. Fale com um administrador do escritório: ele gera um link '
+      + 'para você criar uma senha nova. Se este e-mail não tiver conta aqui, nada acontece.',
   });
+});
+
+/* ------------------------------------------------------------------ link de acesso
+ * 23/10. Criar usuário e "Link de acesso" (na lista de usuários) geram um link de uso
+ * único: quem administra manda pelo WhatsApp, a pessoa abre, cria a senha dela e entra.
+ * Substitui a senha provisória passando de mão em mão; o sistema continua sem e-mail.
+ * O código fica só como hash, vale 7 dias e uma vez; gerar outro revoga os anteriores.
+ */
+const LINK_DIAS = 7;
+const LINK_INVALIDO = {
+  erro: 'este link venceu ou já foi usado. Peça um novo a quem te cadastrou.',
+};
+
+function codigoDeLink(): string {
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  return [...crypto.getRandomValues(new Uint8Array(24))].map((b) => A[b % A.length]).join('');
+}
+
+async function criarLinkAcesso(
+  db: D1Database, tenantId: string, usuarioId: string, motivo: 'primeiro' | 'senha',
+  criadoPor: string | null,
+): Promise<{ codigo: string; expiraEm: string; motivo: string }> {
+  const codigo = codigoDeLink();
+  const agora = new Date();
+  const expiraEm = new Date(agora.getTime() + LINK_DIAS * 86_400_000).toISOString();
+  await db.batch([
+    db.prepare(
+      `UPDATE links_acesso SET revogado_em = ?
+        WHERE usuario_id = ? AND usado_em IS NULL AND revogado_em IS NULL`,
+    ).bind(agora.toISOString(), usuarioId),
+    db.prepare(
+      `INSERT INTO links_acesso (id, tenant_id, usuario_id, codigo_hash, motivo, criado_por,
+         criado_em, expira_em) VALUES (?,?,?,?,?,?,?,?)`,
+    ).bind(crypto.randomUUID(), tenantId, usuarioId, await hashConvite(codigo), motivo,
+      criadoPor, agora.toISOString(), expiraEm),
+  ]);
+  return { codigo, expiraEm, motivo };
+}
+
+async function linkValido(db: D1Database, codigo: string) {
+  return db
+    .prepare(
+      `SELECT l.id, l.usuario_id, l.motivo, l.expira_em, u.email, u.nome, u.tenant_id
+         FROM links_acesso l JOIN usuarios u ON u.id = l.usuario_id
+        WHERE l.codigo_hash = ? AND l.usado_em IS NULL AND l.revogado_em IS NULL
+          AND l.expira_em > ? AND u.ativo = 1 AND u.pendente = 0`,
+    )
+    .bind(await hashConvite(codigo), new Date().toISOString())
+    .first<{ id: string; usuario_id: string; motivo: string; expira_em: string;
+      email: string; nome: string; tenant_id: string }>();
+}
+
+/** A tela do link pergunta de quem é antes de pedir a senha: "Olá, Amanda". */
+app.post('/api/acesso/ver', async (c) => {
+  const { codigo } = z.object({ codigo: z.string().min(10).max(80) }).parse(await c.req.json());
+  const ip = c.req.header('CF-Connecting-IP') ?? null;
+  if (await origemBloqueada(c.env.DB, ip)) {
+    return c.json({ erro: 'muitas tentativas deste computador. Espere alguns minutos.' }, 429);
+  }
+  const l = await linkValido(c.env.DB, codigo);
+  if (!l) {
+    await registrarTentativa(c.env.DB, ip, false);
+    return c.json(LINK_INVALIDO, 404);
+  }
+  return c.json({ nome: l.nome, email: l.email, motivo: l.motivo, expiraEm: l.expira_em });
+});
+
+/** A pessoa cria a senha dela. Depois a tela entra pelo login normal (que pede o 2º fator, se houver). */
+app.post('/api/acesso/usar', async (c) => {
+  const { codigo, senha } = z
+    .object({ codigo: z.string().min(10).max(80), senha: z.string().min(1) })
+    .parse(await c.req.json());
+  const ip = c.req.header('CF-Connecting-IP') ?? null;
+  if (await origemBloqueada(c.env.DB, ip)) {
+    return c.json({ erro: 'muitas tentativas deste computador. Espere alguns minutos.' }, 429);
+  }
+  const l = await linkValido(c.env.DB, codigo);
+  if (!l) {
+    await registrarTentativa(c.env.DB, ip, false);
+    return c.json(LINK_INVALIDO, 404);
+  }
+  const forca = avaliarSenha(senha, l.email);
+  if (!forca.ok) return c.json({ erro: forca.problemas.join('; ') }, 400);
+
+  const hash = await gerarHashSenha(senha);
+  const agora = new Date().toISOString();
+  // Uso único de verdade: dois cliques ao mesmo tempo, só um marca o link.
+  const marca = await c.env.DB
+    .prepare('UPDATE links_acesso SET usado_em = ? WHERE id = ? AND usado_em IS NULL AND revogado_em IS NULL')
+    .bind(agora, l.id)
+    .run();
+  if (!marca.meta.changes) return c.json(LINK_INVALIDO, 404);
+
+  await c.env.DB.batch([
+    c.env.DB
+      .prepare(
+        `UPDATE usuarios SET senha_hash = ?, deve_trocar_senha = 0, aguardando_senha = 0,
+           tentativas_falhas = 0, bloqueado_ate = NULL, senha_solicitada_em = NULL
+         WHERE id = ?`,
+      )
+      .bind(hash, l.usuario_id),
+    c.env.DB.prepare('UPDATE sessoes SET revogada = 1 WHERE usuario_id = ?').bind(l.usuario_id),
+    c.env.DB
+      .prepare(
+        `UPDATE links_acesso SET revogado_em = ?
+          WHERE usuario_id = ? AND usado_em IS NULL AND revogado_em IS NULL`,
+      )
+      .bind(agora, l.usuario_id),
+  ]);
+
+  await new Auditoria(c.env.DB, c.env.AUDIT_SEED).registrar({
+    tenantId: l.tenant_id, usuarioId: l.usuario_id, usuarioEmail: l.email,
+    acao: 'alterar', entidade: 'usuario', entidadeId: l.usuario_id,
+    campo: 'senha', valorAntes: null, valorDepois: `criada pelo link (${l.motivo})`,
+    origem: 'manual', ip, requestId: c.req.header('CF-Ray') ?? null,
+  });
+  return c.json({ ok: true, email: l.email });
 });
 
 app.post('/api/login', async (c) => {
@@ -1110,7 +1242,9 @@ app.get('/api/usuarios', async (c) => {
   const { results } = await c.env.DB
     .prepare(
       `SELECT u.id, u.email, u.nome, u.ativo, u.pendente, u.solicitado_em, u.senha_solicitada_em,
-              u.ultimo_login, u.criado_em, u.deve_trocar_senha,
+              u.ultimo_login, u.criado_em, u.deve_trocar_senha, u.aguardando_senha,
+              (SELECT MAX(l.expira_em) FROM links_acesso l
+                WHERE l.usuario_id = u.id AND l.usado_em IS NULL AND l.revogado_em IS NULL) AS link_expira,
               (SELECT p.nome FROM usuario_papeis up JOIN papeis p ON p.id = up.papel_id
                 WHERE up.usuario_id = u.id LIMIT 1) AS papel,
               (SELECT up.papel_id FROM usuario_papeis up WHERE up.usuario_id = u.id LIMIT 1) AS papel_id,
@@ -1125,6 +1259,9 @@ app.get('/api/usuarios', async (c) => {
     ...u, ativo: u.ativo === 1, pendente: u.pendente === 1,
     pediuSenha: !!u.senha_solicitada_em,
     mfa: u.mfa === 1, deveTrocarSenha: u.deve_trocar_senha === 1,
+    aguardandoSenha: u.aguardando_senha === 1,
+    // Link aberto (não usado, não revogado) que ainda vale; vencido vira null.
+    linkExpira: u.link_expira && u.link_expira > new Date().toISOString() ? u.link_expira : null,
   })));
 });
 
@@ -1176,12 +1313,12 @@ app.post('/api/usuarios', async (c) => {
     .prepare('SELECT id FROM usuarios WHERE lower(email) = ?').bind(email).first();
   if (jaTem) return c.json({ erro: 'já existe um usuário com este e-mail' }, 400);
 
-  // Senha provisória gerada aqui e mostrada UMA vez a quem criou. A pessoa é
-  // obrigada a trocá-la no primeiro acesso — o admin não fica sabendo a senha
-  // definitiva de ninguém, o que é o ponto.
-  const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  const provisoria = [...bytes].map((b) => ALFABETO[b % ALFABETO.length]).join('');
+  // 23/10: a conta nasce sem senha conhecida por ninguém (um hash de algo aleatório
+  // que não é guardado) e com um link de acesso. Quem criou manda o link; a pessoa
+  // cria a senha dela. Antes era uma senha provisória mostrada uma vez na tela —
+  // e a Taís esperava um e-mail que o sistema nunca mandou.
+  const ninguemSabe = [...crypto.getRandomValues(new Uint8Array(32))]
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
 
   const id = crypto.randomUUID();
   const agora = new Date().toISOString();
@@ -1189,9 +1326,9 @@ app.post('/api/usuarios', async (c) => {
     c.env.DB
       .prepare(
         `INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, deve_trocar_senha,
-           ativo, criado_em, criado_por) VALUES (?,?,?,?,?,1,1,?,?)`,
+           aguardando_senha, ativo, criado_em, criado_por) VALUES (?,?,?,?,?,0,1,1,?,?)`,
       )
-      .bind(id, s.tenantId, email, corpo.nome, await gerarHashSenha(provisoria), agora, s.usuarioId),
+      .bind(id, s.tenantId, email, corpo.nome, await gerarHashSenha(ninguemSabe), agora, s.usuarioId),
     c.env.DB.prepare('INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES (?,?)')
       .bind(id, corpo.papelId),
     ...corpo.empresas.map((e) =>
@@ -1213,7 +1350,59 @@ app.post('/api/usuarios', async (c) => {
     requestId: c.req.header('CF-Ray') ?? null,
   });
 
-  return c.json({ id, email, senhaProvisoria: provisoria }, 201);
+  const link = await criarLinkAcesso(c.env.DB, s.tenantId, id, 'primeiro', s.usuarioId);
+  return c.json({ id, email, nome: corpo.nome, link }, 201);
+});
+
+/**
+ * "Link de acesso" na lista de usuários. Conta que ainda espera a primeira senha: gera
+ * outro link (o anterior para de valer). Conta que já tem senha (esqueceu, ou ainda está
+ * com senha provisória antiga): gera um link de senha nova — e, como isso dá acesso à
+ * conta de outra pessoa, pede a senha de quem gera. A senha atual continua valendo até
+ * o link ser usado.
+ */
+app.post('/api/usuarios/:id/link-acesso', async (c) => {
+  const s = c.get('sessao');
+  const alvo = c.req.param('id');
+  const { minhaSenha } = z
+    .object({ minhaSenha: z.string().optional() })
+    .parse(await c.req.json().catch(() => ({})));
+
+  const u = await c.env.DB
+    .prepare(
+      `SELECT id, email, nome, ativo, pendente, aguardando_senha FROM usuarios
+        WHERE id = ? AND tenant_id = ?`,
+    )
+    .bind(alvo, s.tenantId)
+    .first<{ id: string; email: string; nome: string; ativo: number; pendente: number;
+      aguardando_senha: number }>();
+  if (!u) return c.json({ erro: 'usuário não encontrado' }, 404);
+  if (u.pendente === 1) {
+    return c.json({ erro: 'este pedido de acesso ainda não foi liberado: use Liberar ou Recusar' }, 400);
+  }
+  if (u.ativo !== 1) return c.json({ erro: 'usuário desativado: reative antes de gerar o link' }, 400);
+
+  const primeiro = u.aguardando_senha === 1;
+  if (primeiro) {
+    exigirAlguma(s, ['usuarios.criar', 'usuarios.redefinir_senha']);
+  } else {
+    exigir(s, 'usuarios.redefinir_senha');
+    if (!minhaSenha || !(await reautenticar(c.env.DB, s.usuarioId, minhaSenha))) {
+      return c.json({ erro: 'confirme a SUA senha para gerar o link de outra pessoa' }, 400);
+    }
+  }
+
+  const link = await criarLinkAcesso(
+    c.env.DB, s.tenantId, u.id, primeiro ? 'primeiro' : 'senha', s.usuarioId,
+  );
+  await new Auditoria(c.env.DB, c.env.AUDIT_SEED).registrar({
+    tenantId: s.tenantId, usuarioId: s.usuarioId, usuarioEmail: s.email,
+    acao: 'criar', entidade: 'link_acesso', entidadeId: u.id,
+    campo: 'motivo', valorAntes: null, valorDepois: link.motivo,
+    origem: 'manual', ip: c.req.header('CF-Connecting-IP') ?? null,
+    requestId: c.req.header('CF-Ray') ?? null,
+  });
+  return c.json({ id: u.id, email: u.email, nome: u.nome, link }, 201);
 });
 
 app.put('/api/usuarios/:id', async (c) => {
