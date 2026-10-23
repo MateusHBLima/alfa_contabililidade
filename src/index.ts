@@ -1417,17 +1417,14 @@ app.post('/api/usuarios/:id/link-acesso', async (c) => {
   if (u.ativo !== 1) return c.json({ erro: 'usuário desativado: reative antes de gerar o link' }, 400);
 
   // Conta que nunca foi usada (esperando a primeira senha, ou com a senha provisória
-  // antiga que ninguém repassou — o caso da Amanda): não há conta de ninguém para
-  // proteger, então não pede a senha de quem gera.
+  // antiga que ninguém repassou — o caso da Amanda) recebe link de "criar sua senha";
+  // as outras, de "senha nova".
+  // 23/10 (Mateus): "vamos fazer ela só mandar o link" — não se pede mais a senha de
+  // quem gera. Basta a permissão; quem gerou cada link fica na trilha de auditoria.
   const primeiro = u.aguardando_senha === 1 || !u.ultimo_login;
-  if (primeiro) {
-    exigirAlguma(s, ['usuarios.criar', 'usuarios.redefinir_senha']);
-  } else {
-    exigir(s, 'usuarios.redefinir_senha');
-    if (!minhaSenha || !(await reautenticar(c.env.DB, s.usuarioId, minhaSenha))) {
-      return c.json({ erro: 'confirme a SUA senha para gerar o link de outra pessoa' }, 400);
-    }
-  }
+  if (primeiro) exigirAlguma(s, ['usuarios.criar', 'usuarios.redefinir_senha']);
+  else exigir(s, 'usuarios.redefinir_senha');
+  void minhaSenha; // aceito e ignorado: telas antigas ainda podem mandar
 
   const link = await criarLinkAcesso(
     c.env.DB, s.tenantId, u.id, primeiro ? 'primeiro' : 'senha', s.usuarioId,

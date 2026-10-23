@@ -3574,7 +3574,7 @@ function mostrarLinkAcesso({ nome, email, link }) {
     ? `Oi ${nome}! Este é o seu acesso ao Alfa Fiscal. Abre o link, cria a sua senha e já entra (o e-mail é ${email}): ${url}`
     : `Oi ${nome}! Este é o link para criar uma senha nova no Alfa Fiscal (o e-mail é ${email}): ${url}`;
   setTimeout(() => {
-    abrirModal(primeiro ? 'Usuário criado: falta mandar o link' : `Link de senha nova: ${nome}`, `
+    abrirModal(primeiro ? `Link para ${nome} criar a senha` : `Link de senha nova: ${nome}`, `
       <p class="page-desc">Mande este link para <b>${esc(nome)}</b> pelo WhatsApp. Ela abre,
         cria a senha dela e já entra. <b>O sistema não manda e-mail</b>: se você não mandar,
         ela não fica sabendo.</p>
@@ -3600,30 +3600,11 @@ function mostrarLinkAcesso({ nome, email, link }) {
 }
 
 async function gerarLinkDe(u) {
-  // Conta que ainda não tem senha: gera outro link direto. Conta que já tem senha:
-  // pedir a SUA senha antes, porque o link dá acesso à conta de outra pessoa.
-  if (u.aguardandoSenha) {
-    const r = await api(`/api/usuarios/${u.id}/link-acesso`, { method: 'POST', body: '{}' });
-    mostrarLinkAcesso(r);
-    await carregarUsuarios();
-    return;
-  }
-  abrirModal(`Link de acesso: ${u.nome}`, `
-    <p class="page-desc">Gera um link para <b>${esc(u.nome)}</b> criar uma senha nova. Você
-      manda pelo WhatsApp. A senha atual dela continua valendo até ela usar o link.</p>
-    <div class="campo">
-      <label class="fl" for="la-minha">Confirme a SUA senha</label>
-      <input type="password" id="la-minha" autocomplete="current-password">
-      <span class="d">o link dá acesso à conta de outra pessoa, por isso a confirmação</span>
-    </div>
-  `, async () => {
-    const r = await api(`/api/usuarios/${u.id}/link-acesso`, {
-      method: 'POST', body: JSON.stringify({ minhaSenha: $('#la-minha').value }),
-    });
-    mostrarLinkAcesso(r);
-    await carregarUsuarios();
-  });
-  $('#modal-ok').textContent = 'Gerar link';
+  // 23/10 (Mateus): "vamos fazer ela só mandar o link". Um clique: o link aparece com
+  // o botão do WhatsApp. Sem confirmar senha.
+  const r = await api(`/api/usuarios/${u.id}/link-acesso`, { method: 'POST', body: '{}' });
+  mostrarLinkAcesso(r);
+  await carregarUsuarios();
 }
 
 /* "+ Novo usuário" (pedido do Mateus, 23/10): a gestora escolhe o papel e as empresas e

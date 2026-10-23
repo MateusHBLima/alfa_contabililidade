@@ -6161,10 +6161,9 @@ describe('23/10: link de acesso — a Taís gerencia as contas sozinha', () => {
     expect(db.consultar("SELECT valor_depois FROM auditoria WHERE entidade = 'usuario' AND campo = 'senha'"))
       .toEqual([{ valor_depois: 'criada pelo link (primeiro)' }]);
 
-    // Agora que ela já entrou, um link de senha nova pede a senha de quem gera.
-    expect((await post('/api/usuarios/u-amanda/link-acesso', {})).status).toBe(400);
-    expect((await post('/api/usuarios/u-amanda/link-acesso', { minhaSenha: 'errada errada 1' })).status).toBe(400);
-    const r2 = await post('/api/usuarios/u-amanda/link-acesso', { minhaSenha: SENHA });
+    // Agora que ela já entrou, o link é de senha nova — e também sai com um clique,
+    // sem pedir a senha de quem gera (23/10: "vamos fazer ela só mandar o link").
+    const r2 = await post('/api/usuarios/u-amanda/link-acesso', {});
     expect(r2.status).toBe(201);
     expect(((await r2.json()) as any).link.motivo).toBe('senha');
   });
