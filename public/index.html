@@ -125,7 +125,8 @@
        um administrador liberar. -->
   <form class="login-card hidden" id="form-cadastro">
     <div class="logo"><span class="mark">AF</span> Alfa Fiscal</div>
-    <p class="sub">Pedir acesso</p>
+    <p class="sub" id="cadastro-titulo">Pedir acesso</p>
+    <p class="page-desc hidden" id="cadastro-convite-info"></p>
     <div id="cadastro-erro" class="login-erro hidden"></div>
     <div id="cadastro-ok" class="hidden">
       <p class="page-desc" id="cadastro-msg"></p>
@@ -141,6 +142,10 @@
         <label class="fl" for="cad-email">E-mail</label>
         <input type="email" id="cad-email" autocomplete="username">
       </div>
+      <div class="campo hidden" id="cad-email2-campo">
+        <label class="fl" for="cad-email2">Repita o e-mail</label>
+        <input type="email" id="cad-email2" autocomplete="off">
+      </div>
       <div class="campo">
         <label class="fl" for="cad-senha">Senha</label>
         <input type="password" id="cad-senha" autocomplete="new-password">
@@ -149,7 +154,7 @@
         <label class="fl" for="cad-senha2">Repita a senha</label>
         <input type="password" id="cad-senha2" autocomplete="new-password">
       </div>
-      <div class="campo">
+      <div class="campo" id="cad-convite-campo">
         <label class="fl" for="cad-convite">Código de convite <span class="d">(opcional)</span></label>
         <input type="text" id="cad-convite" placeholder="ABCD-EFGH-JKLM">
         <span class="d">Com convite você entra na hora. Sem, alguém precisa liberar.</span>
@@ -664,15 +669,14 @@
       <section id="vUsuarios" class="hidden">
         <h1>Usuários</h1>
         <p class="page-desc"><b>Para pôr alguém:</b> clique em <b>+ Novo usuário</b>, escolha o
-          papel e salve. Aparece um <b>link</b>: mande para a pessoa pelo WhatsApp. Ela abre,
-          cria a senha dela e já entra. <b>O sistema não manda e-mail.</b>
-          Esqueceu a senha ou perdeu o link? Botão <b>Link de acesso</b> na linha dela.</p>
+          papel e as empresas e gere o <b>link</b>. Mande para a pessoa pelo WhatsApp: ela abre,
+          cria a conta dela (e-mail e senha) e já entra. O link serve uma vez só.
+          <b>O sistema não manda e-mail.</b> Esqueceu a senha? Botão <b>Link de acesso</b> na linha dela.</p>
         <div id="aviso-pendentes" class="hidden" style="background:#fff6e5;border:1px solid #f0dcb0;
           border-radius:8px;padding:.6rem .8rem;margin-bottom:.8rem;font-size:.86rem;color:#7a5a1e"></div>
         <div class="card">
           <header><h2>Quem tem acesso</h2>
-            <button class="btn sm" id="btn-convidar" style="margin-left:auto">🔗 Gerar convite</button>
-            <button class="btn primary sm" id="btn-novo-usuario">+ Novo usuário</button>
+            <button class="btn primary sm" id="btn-novo-usuario" style="margin-left:auto">+ Novo usuário</button>
           </header>
           <div class="body tight">
             <div class="scroll"><table id="tbl-usuarios">
@@ -685,13 +689,13 @@
 
         <div class="card" id="card-convites">
           <header>
-            <b>Convites em aberto</b>
-            <span class="page-desc" style="margin:0 0 0 10px">Link gerado entra direto,
-              sem ninguém aprovar. Revogar corta na hora.</span>
+            <b>Links de cadastro</b>
+            <span class="page-desc" style="margin:0 0 0 10px">Os links que você gerou em
+              + Novo usuário. Cancelar corta na hora.</span>
           </header>
           <div class="body tight">
             <div class="scroll"><table id="tbl-convites">
-              <thead><tr><th>Papel</th><th>Usos</th><th>Vence em</th><th>Situação</th><th></th></tr></thead>
+              <thead><tr><th>Para quem</th><th>Papel</th><th>Vence em</th><th>Situação</th><th></th></tr></thead>
               <tbody></tbody>
             </table></div>
           </div>

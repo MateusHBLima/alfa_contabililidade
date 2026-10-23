@@ -789,3 +789,7 @@ tr.nota-estorno td{background:#faf5ff}
 .link-acesso { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .4rem 0 .8rem; }
 .link-acesso input { flex: 1 1 260px; min-width: 0; font-family: ui-monospace, monospace; font-size: .8rem; }
 .link-acesso a.btn { text-decoration: none; }
+/* A lista de clientes no cadastro de usuário: o checkbox herdava a largura cheia dos
+   campos (.campo input) e empurrava o nome da empresa para fora da caixa. */
+.campo .perm-item input[type="checkbox"] { width: auto; min-width: 0; }
+.campo .perm-item span { flex: 1; min-width: 0; }
