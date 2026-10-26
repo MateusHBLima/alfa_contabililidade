@@ -6086,6 +6086,52 @@ describe('22/10: pacote 2 da reunião de 15/10', () => {
     expect(tela).toMatchObject({ cfop_novo: '1102', cfop_origem: 'manual' });
   });
 
+  it('26/10: CFOP que veio é regra fixa — passa por cima da regra aprendida ao abrir; 5910 pede atenção, 5949 não; conferido e digitado não mudam', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '84', [['<CFOP>5102</CFOP>', '<CFOP>5910</CFOP>']]) }]);
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    const itens = db.consultar('SELECT id, TRIM(cfop_original) AS veio, cfop_novo, cfop_origem, confianca FROM itens ORDER BY n_item') as any[];
+    const brinde = itens.find((i) => i.veio === '5910');
+    // Na importação já entra fixo e confiável.
+    expect(brinde).toMatchObject({ cfop_novo: '1910', cfop_origem: 'saida', confianca: 'alta' });
+    let tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela.alertas).toContainEqual(expect.objectContaining({ codigo: 'cfop-saida-atencao', severidade: 'atencao', titulo: 'Veio 5910 (bonificação, doação ou brinde): precisa de atenção' }));
+    // Destacada para conferir ("Conferir", ou "Produto novo" quando é a primeira vez do produto).
+    expect(tela.estilo.destacar).toBe(true);
+    expect(['conferir', 'novo']).toContain(tela.estilo.estado);
+    // Linhas que não vieram 5910/6910 não ganham esse aviso.
+    const outras = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.filter((i: any) => i.id !== brinde.id);
+    expect(outras.every((i: any) => !i.alertas.some((a: any) => a.codigo === 'cfop-saida-atencao'))).toBe(true);
+
+    // Como estavam as notas antes de hoje: regra aprendida do produto deu 1102 num item 5910.
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'regra:qualquer', confianca = 'alta' WHERE id = ?`, brinde.id);
+    tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela).toMatchObject({ cfop_novo: '1910', cfop_origem: 'saida', confianca: 'alta' });
+    // Importado com o palpite antigo (confiança baixa): só sobe a confiança.
+    db.consultar(`UPDATE itens SET confianca = 'nenhuma' WHERE id = ?`, brinde.id);
+    tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela).toMatchObject({ cfop_novo: '1910', cfop_origem: 'saida', confianca: 'alta' });
+    // Conferido não muda.
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'regra:qualquer', revisado = 1 WHERE id = ?`, brinde.id);
+    tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela).toMatchObject({ cfop_novo: '1102', cfop_origem: 'regra:qualquer' });
+    expect(tela.estilo.estado).toBe('conferido');
+    // Digitado por alguém não muda.
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'manual', revisado = 0 WHERE id = ?`, brinde.id);
+    tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === brinde.id);
+    expect(tela).toMatchObject({ cfop_novo: '1102', cfop_origem: 'manual' });
+  });
+
+  it('26/10: 5949 entra 1949 fixo e sai pronto, sem pedir atenção', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '85', [['<CFOP>5102</CFOP>', '<CFOP>5949</CFOP>']]) }]);
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    const outro = (db.consultar(`SELECT id FROM itens WHERE TRIM(cfop_original) = '5949'`)[0] as any).id;
+    const tela = ((await (await req(`/api/notas/${nota}`)).json()) as any).itens.find((i: any) => i.id === outro);
+    expect(tela).toMatchObject({ cfop_novo: '1949', cfop_origem: 'saida', confianca: 'alta' });
+    expect(tela.alertas.some((a: any) => a.codigo === 'cfop-saida-atencao')).toBe(false);
+  });
+
   it('aviso na linha: grava com a foto do momento, aparece na nota e na lista do dia; somente leitura não avisa', async () => {
     const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'RESTAURANTE PILOTO LTDA', uf: 'SC', perfil: 'revenda' });
     await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '83') }]);

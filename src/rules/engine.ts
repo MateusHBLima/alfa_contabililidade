@@ -88,11 +88,18 @@ const CFOP_POR_PERFIL: Record<PerfilEmpresa, { dentroUF: string; foraUF: string 
  * produto, é fácil de eu tratar errado: é margarina, é comida, boto 1102, mas naquela
  * nota a margarina era 1910").
  *
- * É palpite, não regra: fica no lugar do chute do perfil (que daria 1102) e sai em
- * amarelo para ela confirmar. O que ela já ensinou para aquele produto NAQUELA operação
- * (a chave de CFOP inclui o CFOP de saída) continua valendo por cima - é assim que o
- * detergente da OESA em 5949 da Italiana segue em 1556.
+ * 26/10: virou REGRA FIXA. A Taís pediu pelo assistente (23/10): "sempre que vier produtos
+ * no 5910 não alterar pra outro CFOP, apenas considerar como 1910 e deixar como precisa de
+ * atenção"; "6910 - deixar somente como 2910 e cair no precisa de atenção"; "no 5949 -
+ * deixar 1949 e no 6949 - deixar 2949". Então o CFOP que veio decide ANTES de qualquer
+ * regra aprendida do produto. Ela ainda pode trocar na mão um caso diferente (o Mateus
+ * preferiu não travar). O "precisa de atenção" do 5910/6910 é o alerta `cfop-saida-atencao`
+ * da linha (ver GET /api/notas/:id). Em 26/10, nas 10 empresas, as 239 regras aprendidas
+ * de 5949 já davam 1949; no 5910, 9 de 56 davam 1101/1102 e passam a 1910.
  */
+/** Os que, além do CFOP fixo, sempre pedem conferência ("cair no precisa de atenção"). */
+export const CFOP_SAIDA_COM_ATENCAO: ReadonlySet<string> = new Set(['5910', '6910']);
+
 export const CFOP_PELA_SAIDA: Readonly<Record<string, { cfop: string; nome: string }>> = {
   '5910': { cfop: '1910', nome: 'bonificação, doação ou brinde' },
   '6910': { cfop: '2910', nome: 'bonificação, doação ou brinde' },
@@ -297,9 +304,7 @@ export function sugerir(
   candidatas: Regra[],
   contexto: ContextoNota,
 ): Sugestao {
-  const regra = escolherRegra(candidatas, campo);
-  if (regra) return sugestaoDeRegra(regra);
-
+  // 26/10: o CFOP que veio (5910/6910/5949/6949) decide antes de qualquer regra do produto.
   if (campo === 'cfop') {
     const saida = String(item.CFOP ?? '').trim();
     const pelaSaida = CFOP_PELA_SAIDA[saida];
@@ -309,11 +314,17 @@ export function sugerir(
         campo,
         origem: 'saida',
         regraId: null,
-        nivel: 7,
-        confianca: 'media',
-        porque: `veio ${saida} (${pelaSaida.nome}) · entra ${pelaSaida.cfop} · confirme`,
+        nivel: null,
+        confianca: 'alta',
+        porque: `veio ${saida} (${pelaSaida.nome}) · entra ${pelaSaida.cfop} sempre (regra da contabilidade)`,
       };
     }
+  }
+
+  const regra = escolherRegra(candidatas, campo);
+  if (regra) return sugestaoDeRegra(regra);
+
+  if (campo === 'cfop') {
     const mesmaUF =
       contexto.ufEmitente !== null &&
       contexto.ufDestinatario !== null &&

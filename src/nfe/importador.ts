@@ -428,9 +428,12 @@ export async function atualizarPalpitesDaNota(repo: Repo, nota: any, itens: any[
   const candidatas = await repo.carregarRegrasCandidatas(
     empresa.id, pendentes.flatMap((i) => chavesParaBuscar(comoItem(i) as any, nota.emit_cnpj)),
   );
-  // Palpite do perfil (1102) em item que veio 5910/5949: o palpite pelo CFOP que veio (22/10)
-  // vale também para o que foi importado antes dele existir.
-  const temPelaSaida = pendentes.some((i) => i.cfop_origem === 'perfil' && CFOP_PELA_SAIDA[String(i.cfop_original ?? '').trim()]);
+  const doSistema = (origem: unknown) => !String(origem ?? '').startsWith('manual');
+  // 26/10: o CFOP que veio (5910/6910/5949/6949) é regra fixa e vale também para o que foi
+  // importado antes — por cima do chute do perfil e da regra aprendida, nunca do que alguém
+  // digitou nem do que já foi conferido.
+  const temPelaSaida = pendentes.some((i) => CFOP_PELA_SAIDA[String(i.cfop_original ?? '').trim()]
+    && doSistema(i.cfop_origem) && (i.cfop_origem !== 'saida' || i.confianca !== 'alta'));
   // Sem nenhuma regra para estes produtos, não há o que atualizar.
   if (candidatas.length === 0 && !temPelaSaida) return 0;
 
@@ -439,7 +442,6 @@ export async function atualizarPalpitesDaNota(repo: Repo, nota: any, itens: any[
     ufEmitente: nota.emit_uf ?? null,
     ufDestinatario: empresa.uf ?? null,
   };
-  const doSistema = (origem: unknown) => !String(origem ?? '').startsWith('manual');
 
   const comandos: D1PreparedStatement[] = [];
   for (const i of pendentes) {
@@ -452,23 +454,32 @@ export async function atualizarPalpitesDaNota(repo: Repo, nota: any, itens: any[
     const binds: unknown[] = [];
     const conferir: string[] = [];
     const conferirBinds: unknown[] = [];
+    let sobeConfianca = false;
     for (const campo of TODOS_CAMPOS) {
       const col = COLUNAS_CAMPO[campo];
       if (!col || !doSistema(i[col.origem])) continue;
       const s = sug[campo]!;
       // Só troca quando agora há uma regra aprendida; palpite por palpite, fica como está -
-      // menos o chute do perfil, que dá lugar ao palpite pelo CFOP que veio (22/10).
-      const pelaSaida = campo === 'cfop' && s.origem === 'saida' && i[col.origem] === 'perfil';
+      // menos o CFOP que veio (26/10: regra fixa), que vale sobre perfil e regra aprendida.
+      const pelaSaida = campo === 'cfop' && s.origem === 'saida';
       if (!s.regraId && !pelaSaida) continue;
       const valor = campo === 'cfop' || campo === 'descricao' ? s.valor : vazioParaNulo(s.valor);
-      if ((i[col.valor] ?? null) === valor && i[col.origem] === s.origem) continue;
+      if ((i[col.valor] ?? null) === valor && i[col.origem] === s.origem) {
+        // Mesmo valor, mas importado quando ainda era palpite (confiança baixa): só sobe a confiança.
+        if (pelaSaida && i.confianca !== 'alta') sobeConfianca = true;
+        continue;
+      }
       sets.push(`${col.valor} = ?`, `${col.origem} = ?`);
       binds.push(valor, s.origem);
       // Se alguém mexeu nesse campo entre a leitura e agora, não sobrescreve.
       conferir.push(`COALESCE(${col.origem}, '') = ?`);
       conferirBinds.push(String(i[col.origem] ?? ''));
     }
-    if (sets.length === 0) continue;
+    if (sets.length === 0 && !sobeConfianca) continue;
+    if (sets.length === 0) {
+      conferir.push(`COALESCE(cfop_origem, '') = ?`);
+      conferirBinds.push(String(i.cfop_origem ?? ''));
+    }
 
     if (doSistema(i.cfop_origem)) {
       const confianca = sug['cfop']!.confianca === 'alta' ? 'alta'
