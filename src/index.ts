@@ -20,7 +20,7 @@ import { danfeHtml, danfeFolha, DANFE_CSS } from './nfe/danfe';
 import { CRITERIOS, ehTipoApuracao, ehSimples, montarCandidatas, type TipoApuracao } from './relatorios/apuracao';
 import { montarZip } from './nfe/zip';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
-import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, type ContextoNota, type PerfilEmpresa } from './rules/engine';
+import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, CFOP_PELA_SAIDA, CFOP_SAIDA_COM_ATENCAO, type ContextoNota, type PerfilEmpresa } from './rules/engine';
 import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
@@ -3022,6 +3022,18 @@ app.get('/api/notas/:id', async (c) => {
       alertas.push({
         codigo: 'pediu-atencao', severidade: 'atencao', titulo: 'Você pediu para sempre olhar',
         detalhe: pediu.observacao ? `Marcado pelo assistente: ${pediu.observacao}` : 'Marcado pelo assistente para sempre conferir.',
+        bloqueia: false,
+      });
+    }
+    // 26/10 (Taís): todo item que vem no 5910/6910 "cai no precisa de atenção", mesmo com
+    // o CFOP certo. Some quando ela confere a linha, como os outros avisos.
+    const veio = String(i.cfop_original ?? '').trim();
+    if (CFOP_SAIDA_COM_ATENCAO.has(veio) && !r!.nota.cancelada_em) {
+      const fixo = CFOP_PELA_SAIDA[veio]!;
+      alertas.push({
+        codigo: 'cfop-saida-atencao', severidade: 'atencao',
+        titulo: `Veio ${veio} (${fixo.nome}): precisa de atenção`,
+        detalhe: `Regra da contabilidade: todo item que vem no ${veio} entra como ${fixo.cfop} e sempre é conferido.`,
         bloqueia: false,
       });
     }

@@ -2119,8 +2119,8 @@ function selinhoProcedencia(p, itemId = null) {
     return `<span class="proc proc-perfil" title="Ninguém ensinou este item ainda — o valor é palpite pelo perfil fiscal da empresa">● palpite do perfil</span>`;
   }
   if (fonte === 'saida') {
-    // 22/10: 5910 → 1910, 5949 → 1949 (pedido da Taís na reunião de 15/10). Palpite: confirme.
-    return `<span class="proc proc-saida" title="Ninguém ensinou este produto nesta operação: o valor segue o CFOP que veio na nota (5910 → 1910, 5949 → 1949). Confira.">● pelo CFOP que veio</span>`;
+    // 26/10: regra fixa da contabilidade (5910 → 1910, 6910 → 2910, 5949 → 1949, 6949 → 2949).
+    return `<span class="proc proc-saida" title="Regra da contabilidade: o CFOP que veio decide a entrada (5910 → 1910, 6910 → 2910, 5949 → 1949, 6949 → 2949), mesmo que o produto tenha outro aprendido. Dá para trocar na mão num caso diferente.">● pelo CFOP que veio</span>`;
   }
   return '';
 }

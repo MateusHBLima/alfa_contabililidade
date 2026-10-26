@@ -297,17 +297,19 @@ describe('22/10: palpite pelo CFOP que veio (reunião de 15/10: "sempre que vir 
   it('5910 → 1910, 6910 → 2910, 5949 → 1949, 6949 → 2949, no lugar do chute do perfil', () => {
     for (const [veio, entra] of [['5910', '1910'], ['6910', '2910'], ['5949', '1949'], ['6949', '2949']]) {
       const s = sugerirCfop(com(veio!), [], contexto);
-      expect(s).toMatchObject({ valor: entra, origem: 'saida', regraId: null, confianca: 'media' });
+      expect(s).toMatchObject({ valor: entra, origem: 'saida', regraId: null, confianca: 'alta' });
       expect(s.porque).toContain(veio!);
     }
   });
   it('5102 continua no perfil (1102), como antes', () => {
     expect(sugerirCfop(com('5102'), [], contexto)).toMatchObject({ valor: '1102', origem: 'perfil' });
   });
-  it('o que ela ensinou para o produto naquela operação vale por cima (detergente da OESA em 5949 → 1556)', () => {
-    const r = regra({ id: 'r', nivel: 1, chave: `${CNPJ}|7891#5949`, campo: 'cfop', valor: '1556', usos: 3, acertos: 3, confianca: 0.9 });
-    const s = sugerirCfop(com('5949'), regrasDoItem(com('5949'), CNPJ, [r]), contexto);
-    expect(s).toMatchObject({ valor: '1556', regraId: 'r' });
+  it('26/10: virou regra fixa — vale por cima do que foi aprendido para o produto (Taís: "não alterar pra outro CFOP")', () => {
+    for (const [veio, entra, aprendido] of [['5910', '1910', '1102'], ['5949', '1949', '1556']]) {
+      const r = regra({ id: 'r', nivel: 1, chave: `${CNPJ}|7891#${veio}`, campo: 'cfop', valor: aprendido!, usos: 3, acertos: 3, confianca: 0.9, fixada: true } as any);
+      const s = sugerirCfop(com(veio!), regrasDoItem(com(veio!), CNPJ, [r]), contexto);
+      expect(s).toMatchObject({ valor: entra, origem: 'saida', regraId: null, confianca: 'alta' });
+    }
   });
   it('regra do mesmo produto em 5102 não vale para a nota em 5910 (a margarina da bonificação)', () => {
     const r = regra({ id: 'r', nivel: 1, chave: `${CNPJ}|7891#5102`, campo: 'cfop', valor: '1102', usos: 9, acertos: 9, confianca: 0.95 });
