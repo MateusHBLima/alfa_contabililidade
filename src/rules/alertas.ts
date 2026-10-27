@@ -449,9 +449,14 @@ export type Procedencia = {
    * no "Conferir os que vieram certos" - a Sprite foi conferida 1102 por causa de outro
    * refrigerante, e ela achou que tinha ensinado errado.
    */
-  fonte: 'fixada' | 'aprendida' | 'parecido' | 'manual' | 'perfil' | 'saida' | 'nenhuma';
+  fonte: 'fixada' | 'aprendida' | 'parecido' | 'dividido' | 'manual' | 'perfil' | 'saida' | 'nenhuma';
   /** quantas vezes a regra ja foi usada; so faz sentido em 'aprendida' e 'parecido' */
   usos?: number;
+  /**
+   * 'dividido' (27/10, açúcar da Italiana Garden Gastronomia): produto novo cujo NCM já foi
+   * conferido com CFOPs diferentes. O sistema não empresta nenhum; `opcoes` = os que já entraram.
+   */
+  opcoes?: string[];
   /** o que a regra diz hoje, quando difere do valor da linha (a regra mudou depois) */
   regraAgora?: string;
 };

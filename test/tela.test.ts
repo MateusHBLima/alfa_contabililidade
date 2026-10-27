@@ -111,7 +111,7 @@ describe('a tela desenha tudo que o servidor manda', () => {
   it('toda fonte de procedência é desenhada pela tela e tem cor', () => {
     const bloco = ALERTAS.match(/fonte: ([^;]+);/)!;
     const fontes = entreAspas(bloco[1]!).filter((f) => f !== 'nenhuma');
-    expect(fontes.sort()).toEqual(['aprendida', 'fixada', 'manual', 'parecido', 'perfil', 'saida']); // + parecido (15/10, Sprite), + saida (22/10, 5910 → 1910)
+    expect(fontes.sort()).toEqual(['aprendida', 'dividido', 'fixada', 'manual', 'parecido', 'perfil', 'saida']); // + parecido (15/10, Sprite), + saida (22/10, 5910 → 1910), + dividido (27/10, açúcar)
 
     for (const f of fontes) {
       expect(APP, `a tela não trata procedência "${f}"`).toContain(`'${f}'`);
@@ -239,13 +239,13 @@ describe('tela: o botão de fixar padrão do produto', () => {
   });
 
   it('pede confirmação antes, e diz que não toca nos outros itens', () => {
-    const fn = APP.slice(APP.indexOf('async function fixarProduto'), APP.indexOf('async function fixarProduto') + 1200);
+    const fn = APP.slice(APP.indexOf('async function fixarProduto'), APP.indexOf('async function fixarProduto') + 1800);
     expect(fn).toContain('await confirmar(');
     expect(fn).toMatch(/Não altera nenhum outro item/);
   });
 
   it('manda escopo de item, nunca de fornecedor', () => {
-    const fn = APP.slice(APP.indexOf('async function fixarProduto'), APP.indexOf('async function fixarProduto') + 1200);
+    const fn = APP.slice(APP.indexOf('async function fixarProduto'), APP.indexOf('async function fixarProduto') + 1800);
     expect(fn).toContain('fixar: true');
     expect(fn, 'fixarProduto não pode mandar escopo de fornecedor').not.toContain("escopo: 'fornecedor'");
   });
@@ -422,7 +422,7 @@ describe('tela: reunião 25/09', () => {
   });
   it('nota aberta pelo relatório volta para o relatório', () => {
     expect(APP).toMatch(/function voltarAoRelatorio/);
-    expect(APP).toContain("estado.voltar ? voltarAoRelatorio() : irPara('v1')");
+    expect(APP).toContain('if (estado.voltar) return voltarAoRelatorio();');
     expect(APP).toContain("if (view === 'vRelatorios') return abrirRelatorios();");
   });
   it('PDF da nota e CFOPs de fora do estado', () => {
@@ -636,5 +636,41 @@ describe('tela: notas de outra empresa (01/10)', () => {
     expect(APP).toContain('avisarNotasDeOutraEmpresa(linhas, empresaDoEnvio);');
     expect(APP).toContain("'Nenhuma nota foi importada.'");
     expect(APP).toContain('NOTAS DE OUTRA EMPRESA — NÃO FORAM IMPORTADAS');
+  });
+});
+
+/**
+ * 27/10, queijo coalho da L'Italiana Garden Cucina: ela digitou 1101 e clicou logo em
+ * "☆ é sempre assim". O botão leu a linha antes de a gravação terminar e fixou 1102.
+ * Toda ação que decide pela linha espera o que ainda está sendo gravado.
+ */
+describe('tela: ação na linha espera o que está sendo gravado', () => {
+  const corpoDe = (inicio: string) => {
+    const i = APP.indexOf(inicio);
+    expect(i, inicio).toBeGreaterThan(-1);
+    return APP.slice(i, i + 900);
+  };
+
+  it('salvarCampo registra o salvamento', () => {
+    expect(corpoDe('async function salvarCampo(')).toContain('registrarSalvamento(');
+  });
+
+  for (const inicio of [
+    'async function fixarProduto(', "$('#btn-fixar-visiveis').addEventListener('click'", 'async function aplicarEmLote(',
+    'async function conferirUm(', "$('#btn-conferir-visiveis').addEventListener('click'", 'async function conferirNotaPronta(',
+  ]) {
+    it(`${inicio.slice(0, 40)}… espera os salvamentos antes de ler a linha`, () => {
+      const corpo = corpoDe(inicio);
+      const espera = corpo.indexOf('await esperarSalvamentos()');
+      expect(espera, 'sem esperarSalvamentos').toBeGreaterThan(-1);
+      for (const leitura of ['estado.notaAberta', 'api(']) {
+        const k = corpo.indexOf(leitura);
+        if (k > -1) expect(espera, `${leitura} antes de esperar`).toBeLessThan(k);
+      }
+    });
+  }
+
+  it('o "é sempre assim" usa o valor que está no campo', () => {
+    expect(corpoDe('async function fixarProduto(')).toContain('input.cfop[data-item=');
   });
 });

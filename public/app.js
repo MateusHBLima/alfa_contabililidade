@@ -13,6 +13,12 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const estado = {
   filtroNotas: 'todas',
+  // Vieram prontas (27/10): notas com os itens abertos (▸) na lista e onde ela estava,
+  // para a lista não voltar ao começo depois de salvar, conferir ou voltar de uma nota.
+  notasAbertasNaLista: new Set(),
+  rolagemNotas: null, // { notaId, topo } da nota aberta pela lista: o "← Notas" volta para ela
+  reabrindo: null,
+  pendenciasNaTela: null,
   dataDe: '',   // período de emissão em Notas carregadas (AAAA-MM-DD), pedido da Taís 29/09
   dataAte: '',
   importacoes: [],
@@ -629,7 +635,7 @@ function irPara(view) {
   TELAS.forEach((v) => $('#' + v).classList.toggle('hidden', v !== view));
   marcarEscopo();
   gravarEndereco(view);
-  if (view === 'v1') atualizarPendencias();
+  if (view === 'v1') estado.pendenciasNaTela = atualizarPendencias();
   if (view === 'vEmpresas') renderEmpresas();
   if (view === 'vFornecedores') carregarFornecedores();
   if (view === 'vRegras') carregarRegras();
@@ -1195,40 +1201,110 @@ function notaVeioPronta(n) {
   return faltam > 0 && Number(n.itens_prontos ?? 0) >= faltam;
 }
 
-/** Confere uma nota que veio pronta - só se, aberta, todos os que faltam vieram certos. */
+/**
+ * Confere uma nota que veio pronta - só se, aberta, todos os que faltam vieram certos.
+ * 27/10: o que ela corrigiu ali mesmo na lista (✎ preenchido por vocês) também entra -
+ * foi ela que decidiu. Antes, corrigir obrigava a abrir a nota, e a lista voltava ao começo.
+ */
 async function conferirNotaPronta(notaId, emLote = false) {
+  await esperarSalvamentos();
   const n = await api(`/api/notas/${notaId}`);
   const faltam = n.itens.filter((i) => !i.revisado);
   const certos = itensQueVieramCertos(n);
-  if (certos.length < faltam.length) return { ok: false, numero: n.nota.numero };
-  await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: certos.map((i) => i.id) }) });
+  const corrigidos = faltam.filter((i) => !certos.includes(i) && i.procedencia?.fonte === 'manual'
+    && String(i.cfop_novo ?? '').trim() !== '' && !(i.alertas ?? []).some((a) => a.severidade === 'critico' || a.bloqueia));
+  const conferir = [...certos, ...corrigidos];
+  if (conferir.length < faltam.length) return { ok: false, numero: n.nota.numero };
+  await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: conferir.map((i) => i.id) }) });
   if (!emLote) { avisarSalvo(`Nota ${n.nota.numero} conferida`); await carregarNotas(); }
-  return { ok: true, numero: n.nota.numero, itens: certos.length };
+  return { ok: true, numero: n.nota.numero, itens: conferir.length };
 }
 
-async function verItensDaNota(notaId, botao) {
+async function verItensDaNota(notaId, botao, manterAberto = false) {
   const tr = botao.closest('tr');
   const aberto = tr.nextElementSibling?.classList.contains('itens-da-nota');
-  if (aberto) { tr.nextElementSibling.remove(); botao.textContent = '▸'; return; }
+  if (aberto && !manterAberto) {
+    tr.nextElementSibling.remove();
+    botao.textContent = '▸';
+    estado.notasAbertasNaLista.delete(notaId);
+    return;
+  }
+  estado.notasAbertasNaLista.add(notaId);
   botao.textContent = '▾';
-  const sub = document.createElement('tr');
-  sub.className = 'itens-da-nota';
-  sub.innerHTML = '<td colspan="8" class="vazio">carregando os itens…</td>';
-  tr.after(sub);
+  let sub = aberto ? tr.nextElementSibling : null;
+  if (!sub) {
+    sub = document.createElement('tr');
+    sub.className = 'itens-da-nota';
+    sub.innerHTML = '<td colspan="8" class="vazio">carregando os itens…</td>';
+    tr.after(sub);
+  }
   try {
-    const n = await api(`/api/notas/${notaId}`);
-    sub.innerHTML = `<td colspan="8"><table class="itens-mini"><tbody>${n.itens.map((i) => `
-      <tr class="${i.revisado ? 'mini-conferido' : ''}">
-        <td class="tiny">${i.n_item}</td>
-        <td>${esc(i.x_prod_novo || i.x_prod_original || '')}<span class="porque">cód. ${esc(i.c_prod ?? '')}</span></td>
-        <td class="mono">${esc(i.cfop_original ?? '')} → <b>${esc(i.cfop_novo ?? '—')}</b></td>
-        <td>${selinhoProcedencia(i.procedencia)}${i.revisado ? ' <span class="tag ok">conferido</span>' : ''}</td>
-        <td class="num">${moeda(i.valor_total)}</td>
-      </tr>`).join('')}</tbody></table></td>`;
+    desenharItensDaNota(sub, await api(`/api/notas/${notaId}`));
   } catch (e) {
     sub.innerHTML = `<td colspan="8" class="vazio">Não consegui ler os itens: ${esc(e.message)}</td>`;
   }
 }
+
+/**
+ * Os itens de uma nota que veio pronta, dentro da lista (▸). 27/10, pedido da Taís: "se eu
+ * pego um erro, eu tenho que voltar e fazer tudo de novo". O CFOP de item não conferido
+ * se corrige aqui mesmo: grava na hora e nada fecha.
+ */
+function desenharItensDaNota(sub, n) {
+  const editar = pode('notas.editar_cfop') && !n.nota.cancelada_em;
+  sub.innerHTML = `<td colspan="8"><table class="itens-mini"><tbody>${n.itens.map((i) => `
+      <tr class="${i.revisado ? 'mini-conferido' : ''}">
+        <td class="tiny">${i.n_item}</td>
+        <td>${esc(i.x_prod_novo || i.x_prod_original || '')}<span class="porque">cód. ${esc(i.c_prod ?? '')}</span></td>
+        <td class="mono">${esc(i.cfop_original ?? '')} → ${editar && !i.revisado
+          ? `<input type="text" class="cfop mini-cfop" maxlength="4" inputmode="numeric" autocomplete="off"
+               value="${esc(i.cfop_novo ?? '')}" data-mini-cfop="${esc(i.id)}" data-mini-nota="${esc(n.nota.id)}"
+               aria-label="CFOP de entrada do item ${esc(i.n_item)}" title="Corrija aqui: grava na hora, sem abrir a nota">`
+          : `<b>${esc(i.cfop_novo ?? '—')}</b>`}</td>
+        <td>${selinhoProcedencia(i.procedencia)}${i.revisado ? ' <span class="tag ok">conferido</span>' : ''}</td>
+        <td class="num">${moeda(i.valor_total)}</td>
+      </tr>`).join('')}</tbody></table>${editar && n.itens.some((i) => !i.revisado)
+        ? '<p class="tiny mini-dica">Achou um erro? Corrija o CFOP aqui mesmo: grava na hora e a lista não fecha. Depois, ✓ Conferir na linha da nota.</p>'
+        : ''}</td>`;
+}
+
+/** Depois de redesenhar a lista: reabre os itens que estavam abertos e volta para onde ela estava. */
+function reabrirItensDasNotas(rolagem) {
+  const botoes = [...estado.notasAbertasNaLista]
+    .map((id) => document.querySelector(`#tbl-notas [data-ver-itens="${CSS.escape(id)}"]`))
+    .filter(Boolean);
+  estado.reabrindo = Promise.allSettled(botoes.map((b) => verItensDaNota(b.dataset.verItens, b, true)))
+    .then(() => {
+      if (rolagem !== null && !$('#v1').classList.contains('hidden')) window.scrollTo(0, rolagem);
+    });
+  return estado.reabrindo;
+}
+
+// CFOP corrigido na lista das que vieram prontas: grava, avisa e redesenha só aquela nota.
+document.addEventListener('change', (ev) => {
+  const el = ev.target.closest?.('[data-mini-cfop]');
+  if (!el) return;
+  const valor = el.value.trim();
+  if (valor === el.defaultValue.trim()) return;
+  registrarSalvamento((async () => {
+    try {
+      await api(`/api/itens/${el.dataset.miniCfop}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor }] }),
+      });
+      avisarSalvo(`Salvo: ${valor || 'sem CFOP'}`);
+      const sub = el.closest('tr.itens-da-nota');
+      const n = await api(`/api/notas/${el.dataset.miniNota}`);
+      if (sub?.isConnected) desenharItensDaNota(sub, n);
+    } catch (e) {
+      el.value = el.defaultValue;
+      alerta(`Não consegui salvar o CFOP: ${e.message}`);
+    }
+  })());
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && ev.target.matches?.('[data-mini-cfop]')) ev.target.blur();
+});
 
 document.addEventListener('click', async (ev) => {
   const ver = ev.target.closest('[data-ver-itens]');
@@ -1265,7 +1341,15 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
+/** A lista redesenha sem perder o que ela tinha aberto nem onde estava (27/10). */
 function renderNotas() {
+  const naLista = !$('#v1').classList.contains('hidden');
+  const rolagem = naLista ? window.scrollY : null;
+  desenharNotas();
+  reabrirItensDasNotas(rolagem);
+}
+
+function desenharNotas() {
   const corpo = $('#tbl-notas tbody');
   const vazio = $('#vazio-notas');
   vazio.classList.toggle('hidden', estado.notas.length > 0);
@@ -1450,7 +1534,12 @@ $('#rel-estornos').addEventListener('click', (ev) => {
 });
 $('#tbl-notas').addEventListener('click', (ev) => {
   const abrir = ev.target.closest('button[data-nota]');
-  if (abrir) return abrirNota(abrir.dataset.nota);
+  if (abrir) {
+    // Para o "← Notas" voltar onde ela estava (27/10): a linha da nota e a altura dela na tela.
+    const linha = abrir.closest('tr');
+    estado.rolagemNotas = { notaId: abrir.dataset.nota, topo: linha ? linha.getBoundingClientRect().top : null, y: window.scrollY };
+    return esperarSalvamentos().then(() => abrirNota(abrir.dataset.nota));
+  }
   const apagar = ev.target.closest('button[data-apagar-nota]');
   if (apagar) return apagarNota(apagar.dataset.apagarNota);
 });
@@ -1477,7 +1566,20 @@ function apagarNota(id) {
 
 // ------------------------------------------------------------------ ambiente 2
 
-$('#btn-voltar-notas').addEventListener('click', () => (estado.voltar ? voltarAoRelatorio() : irPara('v1')));
+$('#btn-voltar-notas').addEventListener('click', async () => {
+  if (estado.voltar) return voltarAoRelatorio();
+  irPara('v1');
+  // De volta à lista: os itens que estavam abertos e o mesmo ponto da página (27/10).
+  // Espera o que muda a altura da página (itens reabrindo, quadro de pendências) e põe a
+  // nota que ela abriu na mesma altura de antes; se ela saiu da lista, volta ao mesmo ponto.
+  const volta = estado.rolagemNotas;
+  estado.rolagemNotas = null;
+  await Promise.allSettled([estado.reabrindo, estado.pendenciasNaTela]);
+  if (!volta) return;
+  const linha = document.querySelector(`#tbl-notas tr[data-linha-nota="${CSS.escape(volta.notaId)}"]`);
+  if (linha && volta.topo !== null) window.scrollBy(0, linha.getBoundingClientRect().top - volta.topo);
+  else window.scrollTo(0, volta.y);
+});
 $('#btn-ver-xml').addEventListener('click', () => irPara('v3'));
 
 // ------------------------------------------------------------------ nota original
@@ -2112,6 +2214,12 @@ function selinhoProcedencia(p, itemId = null) {
     // 15/10: aprendido de OUTRO produto com o mesmo NCM. Pede olho: não é "este produto".
     return `<span class="proc proc-parecido"${clicavel} title="Ninguém tratou ESTE produto ainda: o CFOP veio de outro produto com o mesmo NCM${dica}">≈ DE OUTRO PRODUTO (NCM)</span>${mudou}`;
   }
+  if (fonte === 'dividido') {
+    // 27/10: produto novo e NCM já conferido com CFOPs diferentes - o sistema não escolhe.
+    const ops = (p?.opcoes ?? []).map(esc);
+    const lista = ops.length > 1 ? `${ops.slice(0, -1).join(', ')} ou ${ops[ops.length - 1]}` : ops.join('');
+    return `<span class="proc proc-dividido" title="Ninguém tratou ESTE produto ainda, e outros produtos com o mesmo NCM já entraram com CFOPs diferentes (${lista}). O sistema não escolhe: escolha o deste.">? NCM COM ${ops.length > 1 ? 'CFOPS DIFERENTES' : 'CFOP'}: ${lista}</span>`;
+  }
   if (fonte === 'manual') {
     return `<span class="proc proc-manual" title="Alguém digitou este valor nesta nota">✎ preenchido por vocês</span>`;
   }
@@ -2133,16 +2241,42 @@ function quemConferiu(i) {
 }
 
 async function salvarCampo(itemId, campo, valor) {
-  try {
-    await api(`/api/itens/${itemId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ mudancas: [{ campo, valor }] }),
-    });
-    avisarSalvo();
-    await recarregarNota();
-  } catch (e) {
-    alerta(e.message);
-  }
+  return registrarSalvamento((async () => {
+    try {
+      await api(`/api/itens/${itemId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ mudancas: [{ campo, valor }] }),
+      });
+      avisarSalvo();
+      await recarregarNota();
+    } catch (e) {
+      alerta(e.message);
+    }
+  })());
+}
+
+/**
+ * Salvamentos de campo ainda em andamento (27/10, queijo coalho da L'Italiana Garden Cucina).
+ *
+ * A Taís digitou 1101 e clicou logo em "☆ é sempre assim". O campo só grava no "change",
+ * que dispara quando ele perde o foco - isto é, NO MESMO clique do botão. O botão leu a
+ * linha como ela estava antes de a gravação terminar (1102), a janela mostrou 1102, ela
+ * confirmou, e o queijo virou padrão fixado em 1102: verde, para sempre, nas próximas notas.
+ *
+ * Toda ação que lê ou decide pela linha (fixar, conferir, aplicar em lote) espera antes o
+ * que ainda está sendo gravado, e só então lê os valores.
+ */
+const salvamentos = new Set();
+function registrarSalvamento(promessa) {
+  salvamentos.add(promessa);
+  promessa.finally(() => salvamentos.delete(promessa));
+  return promessa;
+}
+async function esperarSalvamentos() {
+  // Campo ainda com foco e alterado: o "change" só sai no blur - força agora.
+  const ativo = document.activeElement;
+  if (ativo && ativo.matches?.('[data-campo], [data-mini-cfop]')) ativo.blur();
+  while (salvamentos.size > 0) await Promise.allSettled([...salvamentos]);
 }
 
 /**
@@ -2197,6 +2331,8 @@ async function desconferirItem(id) {
    recarrega uma vez só, quando o último clique termina de salvar. */
 const conferindo = new Set();
 async function conferirUm(itemId, botao) {
+  // Conferir ensina o CFOP que está na linha: tem que ser o que ela acabou de digitar (27/10).
+  await esperarSalvamentos();
   const notaId = estado.notaAberta?.nota?.id;
   if (!notaId || conferindo.has(itemId)) return;
   conferindo.add(itemId);
@@ -2226,8 +2362,10 @@ document.addEventListener('click', (ev) => {
   const c = ev.target.closest('[data-conferir]');
   if (c) return conferirUm(c.dataset.conferir, c);
   if (ev.target.closest('#btn-conferir-certos')) {
-    const ids = itensQueVieramCertos(estado.notaAberta).map((i) => i.id);
-    if (ids.length) return conferirItens(ids);
+    return esperarSalvamentos().then(() => {
+      const ids = itensQueVieramCertos(estado.notaAberta).map((i) => i.id);
+      if (ids.length) return conferirItens(ids);
+    });
   }
   const d = ev.target.closest('[data-desconferir]');
   if (d) return desconferirItem(d.dataset.desconferir);
@@ -2404,9 +2542,13 @@ async function verTrilha(itemId) {
  * outro botao, com outro aviso.
  */
 async function fixarProduto(itemId) {
+  // Primeiro o que ainda está sendo gravado; depois a linha, já com o valor salvo (27/10).
+  await esperarSalvamentos();
   const i = (estado.notaAberta?.itens ?? []).find((x) => x.id === itemId);
   if (!i) return;
-  const cfop = String(i.cfop_novo ?? '').trim();
+  const campo = document.querySelector(`#tbl-itens input.cfop[data-item="${CSS.escape(itemId)}"]`);
+  const digitado = String(campo?.value ?? '').trim();
+  const cfop = /^\d{4}$/.test(digitado) ? digitado : String(i.cfop_novo ?? '').trim();
   if (!cfop) return alerta('Preencha o CFOP antes de salvar como padrão.');
 
   const nome = i.x_prod_novo || i.x_prod_original || 'este produto';
@@ -2436,7 +2578,8 @@ async function fixarProduto(itemId) {
   }
 }
 
-$('#btn-conferir-visiveis').addEventListener('click', () => {
+$('#btn-conferir-visiveis').addEventListener('click', async () => {
+  await esperarSalvamentos();
   const pendentes = itensVisiveis().filter((i) => !i.revisado);
   if (pendentes.length === 0) return alerta('Tudo que está na tela já foi conferido.');
   conferirItens(pendentes.map((i) => i.id));
@@ -2455,6 +2598,7 @@ $('#btn-conferir-visiveis').addEventListener('click', () => {
  * metade feito sem ninguem saber.
  */
 $('#btn-fixar-visiveis').addEventListener('click', async () => {
+  await esperarSalvamentos();
   if (!estado.notaAberta) return;
   const alvos = itensVisiveis().filter((i) => podeFixar(i));
   if (alvos.length === 0) {
@@ -2495,6 +2639,7 @@ $('#btn-bulk-nota').addEventListener('click', () => aplicarEmLote('item'));
 $('#btn-bulk-fornecedor').addEventListener('click', () => aplicarEmLote('fornecedor'));
 
 async function aplicarEmLote(escopo) {
+  await esperarSalvamentos();
   const cfop = $('#bulk-cfop').value;
   if (!cfop) return alerta('Escolha um CFOP na lista antes de aplicar.');
   if (!estado.notaAberta) return;

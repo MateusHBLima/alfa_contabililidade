@@ -695,6 +695,8 @@ tr.nota-estorno td{background:#faf5ff}
 
 /* 15/10, caso da Sprite: regra de OUTRO produto (NCM) e regra que mudou depois */
 .proc-parecido{background:#fff4dc;color:#8a4b00;border:1.5px dashed #c97a00;font-weight:800;font-size:11.5px;padding:2px 8px}
+/* 27/10: NCM com CFOPs diferentes - o sistema não escolhe, pede a decisão dela. */
+.proc-dividido{background:#fdecec;color:#9b1c1c;border:1.5px dashed #c53030;font-weight:800;font-size:11.5px;padding:2px 8px}
 .proc-mudou{background:var(--danger-soft);color:var(--danger);border:1px solid var(--danger);font-weight:800;font-size:11.5px;padding:2px 8px;margin-left:4px}
 .de-onde-tabela tr.de-onde-linha td{background:var(--primary-soft)}
 .de-onde-difere{background:var(--danger-soft);border:1px solid var(--danger);color:var(--txt);border-radius:8px;padding:9px 12px;margin:8px 0;font-size:13px;line-height:1.5}
@@ -716,6 +718,10 @@ tr.nota-estorno td{background:#faf5ff}
 .itens-mini{width:100%;font-size:12.5px}
 .itens-mini td{padding:4px 8px;border-bottom:1px solid var(--line-2)}
 .itens-mini tr.mini-conferido td{color:var(--muted)}
+/* 27/10: CFOP corrigido direto na lista das que vieram prontas. */
+.itens-mini input.mini-cfop{width:74px;font-size:12.5px;font-family:"Cascadia Mono",Consolas,monospace;font-weight:700;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--surface)}
+.itens-mini input.mini-cfop:focus{outline:2px solid var(--accent);outline-offset:1px}
+.mini-dica{margin:6px 8px 2px;color:var(--muted)}
 
 /* Assistente (16/10): painel à direita, conversa e propostas para confirmar */
 .topbar .assistente-btn{margin-left:auto}

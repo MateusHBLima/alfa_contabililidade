@@ -3843,6 +3843,78 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     expect(d.decisoes.map((x: any) => x.cfop_novo)).toEqual(expect.arrayContaining(['1403', '1102']));
   });
 
+  it('27/10 (açúcar): NCM já conferido com CFOPs diferentes não empresta CFOP — a linha fica para ela, dizendo as opções', async () => {
+    /* Italiana Garden Gastronomia: sachês de açúcar em 1556 e açúcar de 5 kg em 1101, mesmo NCM.
+       O açúcar Alto Alegre (novo) chegou 1556, emprestado dos sachês, e ela achou que tinha
+       tratado errado para trás. */
+    const tudoMesmoNcm = (sufixo: string) => comCfop(sufixo, '5102')
+      .replace('<NCM>18069000</NCM>', '<NCM>22021000</NCM>').replace('<NCM>34022000</NCM>', '<NCM>22021000</NCM>');
+    const abrir = async (n: string) => (await (await req(`/api/notas/${n}`)).json()) as any;
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: tudoMesmoNcm('11') }]);
+    const [a1, a2] = itensDa('11');
+    expect((await corrigir(a1.id, '1101')).status).toBe(200);
+    expect((await corrigir(a2.id, '1556')).status).toBe(200);
+    // Nota nova: 1 e 2 vêm pela regra do próprio produto; o 3 (novo, mesmo NCM) fica vazio.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: tudoMesmoNcm('33') }]);
+    const [b1, b2, b3] = itensDa('33');
+    expect(b1.cfop_novo).toBe('1101');
+    expect(b2.cfop_novo).toBe('1556');
+    expect(b3).toMatchObject({ cfop_novo: '', cfop_origem: 'ncm-dividido:1101,1556', confianca: 'nenhuma' });
+    const n = await abrir(b3.nota_id);
+    const l3 = n.itens.find((i: any) => i.n_item === 3);
+    expect(l3.procedencia).toEqual({ fonte: 'dividido', opcoes: ['1101', '1556'] });
+    expect(l3.alertas.map((a: any) => a.codigo)).toContain('cfop_ausente');
+    // Não conta como "veio pronta".
+    const lista = (await (await req(`/api/empresas/${empresaId}/notas`)).json()) as any[];
+    expect(lista.find((x: any) => x.chave.endsWith('33'))).toMatchObject({ total_itens: 3, itens_prontos: 2 });
+    // Ela escolhe; a próxima nota já vem com o dela, pela regra do próprio produto.
+    expect((await corrigir(b3.id, '1556')).status).toBe(200);
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'c.xml', conteudo: tudoMesmoNcm('44') }]);
+    const c3 = itensDa('44')[2];
+    expect(c3.cfop_novo).toBe('1556');
+    expect(String(c3.cfop_origem)).toMatch(/^regra:/);
+  });
+
+  it('27/10: NCM com um CFOP só continua emprestando; nota já importada perde o empréstimo quando o NCM fica dividido', async () => {
+    const tudoMesmoNcm = (sufixo: string) => comCfop(sufixo, '5102')
+      .replace('<NCM>18069000</NCM>', '<NCM>22021000</NCM>').replace('<NCM>34022000</NCM>', '<NCM>22021000</NCM>');
+    const abrir = async (n: string) => (await (await req(`/api/notas/${n}`)).json()) as any;
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: tudoMesmoNcm('11') }]);
+    const [a1, a2] = itensDa('11');
+    await corrigir(a1.id, '1101');
+    // Só um CFOP no NCM: os outros produtos herdam 1101 pelo NCM, como antes.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: tudoMesmoNcm('33') }]);
+    const b3 = itensDa('33')[2];
+    expect(b3.cfop_novo).toBe('1101');
+    expect((await abrir(b3.nota_id)).itens.find((i: any) => i.n_item === 3).procedencia.fonte).toBe('parecido');
+    // Ela trata outro produto do mesmo NCM em 1556: o NCM ficou dividido.
+    await corrigir(a2.id, '1556');
+    // Ao abrir a nota já importada, o item 3 (não conferido, emprestado pelo NCM) fica vazio.
+    const n = await abrir(b3.nota_id);
+    expect(n.itens.find((i: any) => i.n_item === 3)).toMatchObject({
+      cfop_novo: '', cfop_origem: 'ncm-dividido:1101,1556', procedencia: { fonte: 'dividido', opcoes: ['1101', '1556'] },
+    });
+    // O 2 ganhou regra do próprio produto (1556) e o 1 continua 1101.
+    expect(n.itens.find((i: any) => i.n_item === 2).cfop_novo).toBe('1556');
+    expect(n.itens.find((i: any) => i.n_item === 1).cfop_novo).toBe('1101');
+  });
+
+  it('27/10: o que alguém digitou ou já conferiu nunca é tirado pelo NCM dividido', async () => {
+    const tudoMesmoNcm = (sufixo: string) => comCfop(sufixo, '5102')
+      .replace('<NCM>18069000</NCM>', '<NCM>22021000</NCM>').replace('<NCM>34022000</NCM>', '<NCM>22021000</NCM>');
+    const abrir = async (n: string) => (await (await req(`/api/notas/${n}`)).json()) as any;
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: tudoMesmoNcm('11') }]);
+    const [a1, a2] = itensDa('11');
+    await corrigir(a1.id, '1101');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: tudoMesmoNcm('33') }]);
+    const b3 = itensDa('33')[2];
+    // Ela confere o item 3 como veio (1101, emprestado)...
+    expect((await req(`/api/notas/${b3.nota_id}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [b3.id] }) })).status).toBe(200);
+    await corrigir(a2.id, '1556');
+    // ...e ele continua 1101 depois que o NCM ficou dividido.
+    expect((await abrir(b3.nota_id)).itens.find((i: any) => i.n_item === 3)).toMatchObject({ cfop_novo: '1101', revisado: 1 });
+  });
+
   it('15/10 (auditoria): produtos de um CFOP sem abrir nota, e o mesmo produto decidido com CFOPs diferentes', async () => {
     await importarArquivos(repo, r2 as any, empresaId, [
       { nome: 'a.xml', conteudo: comCfop('11', '5102') },

@@ -20,7 +20,7 @@ import { danfeHtml, danfeFolha, DANFE_CSS } from './nfe/danfe';
 import { CRITERIOS, ehTipoApuracao, ehSimples, montarCandidatas, type TipoApuracao } from './relatorios/apuracao';
 import { montarZip } from './nfe/zip';
 import { CAMPOS, TODOS_CAMPOS, ehCampoValido, validarValor, type Campo } from './rules/campos';
-import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, CFOP_PELA_SAIDA, CFOP_SAIDA_COM_ATENCAO, type ContextoNota, type PerfilEmpresa } from './rules/engine';
+import { aprender, chaveDoNivel, chavesParaBuscar, regrasDoItem, sugerir, CFOP_PELA_SAIDA, CFOP_SAIDA_COM_ATENCAO, ORIGEM_NCM_DIVIDIDO, type ContextoNota, type PerfilEmpresa } from './rules/engine';
 import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, resumirNota } from './rules/alertas';
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
@@ -2962,6 +2962,10 @@ app.get('/api/notas/:id', async (c) => {
     if (origem === 'perfil') return { fonte: 'perfil' };
     // 22/10: palpite pelo CFOP que veio (5910 → 1910, 5949 → 1949). Também ninguém ensinou.
     if (origem === 'saida') return { fonte: 'saida' };
+    // 27/10: NCM dividido - ninguém tratou este produto e o NCM já entrou com CFOPs diferentes.
+    if (origem.startsWith(ORIGEM_NCM_DIVIDIDO)) {
+      return { fonte: 'dividido', opcoes: origem.slice(ORIGEM_NCM_DIVIDIDO.length).split(',').filter(Boolean) };
+    }
     // 'manual' e 'manual:fixada' sao o que alguem digitou nesta nota. Sem este
     // caso a linha que a contadora acabou de preencher voltava SEM marca nenhuma -
     // visto em producao: nota tratada por ela, sete linhas, procedencia "nenhuma"

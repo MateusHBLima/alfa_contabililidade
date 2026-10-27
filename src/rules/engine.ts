@@ -278,7 +278,16 @@ export type ContextoNota = {
   perfil: PerfilEmpresa;
   ufEmitente: string | null;
   ufDestinatario: string | null;
+  /**
+   * NCM dividido (27/10): regras de CFOP por NCM (níveis 4 e 6) cujo NCM já foi conferido
+   * com CFOPs DIFERENTES nesta empresa, em produtos diferentes. Chave `${nivel} ${chave}`,
+   * valor = os CFOPs que já entraram. Ver `sugerir`.
+   */
+  ncmDividido?: ReadonlyMap<string, readonly string[]>;
 };
+
+/** Origem do CFOP quando o NCM está dividido: `ncm-dividido:1101,1556`. */
+export const ORIGEM_NCM_DIVIDIDO = 'ncm-dividido:';
 
 function sugestaoDeRegra(regra: Regra): Sugestao {
   const marca = regra.fixada ? 'fixada pela contabilidade' : `usada ${regra.usos}x`;
@@ -321,8 +330,43 @@ export function sugerir(
     }
   }
 
-  const regra = escolherRegra(candidatas, campo);
+  // 27/10 (açúcar da Italiana Garden Gastronomia): produto novo, sem regra própria, e o
+  // sistema emprestou o CFOP de outro produto pelo NCM 17019900 - o dos sachês de açúcar
+  // (1556), quando o açúcar de 5 kg do mesmo fornecedor tinha entrado 1101. Ela achou que
+  // tinha tratado errado para trás. Quando o NCM já foi conferido com CFOPs diferentes, o
+  // NCM não diz nada sobre ESTE produto: não empresta nenhum e deixa a linha para ela,
+  // dizendo quais já entraram. Regra do próprio produto (1, 2, 3), padrão do fornecedor (5)
+  // e regra fixada continuam valendo como sempre.
+  let usaveis = candidatas;
+  let dividido: string[] | null = null;
+  if (campo === 'cfop' && contexto.ncmDividido && contexto.ncmDividido.size > 0) {
+    const mapa = contexto.ncmDividido;
+    const fora = candidatas.filter(
+      (r) => r.campo === 'cfop' && !r.fixada && (r.nivel === 4 || r.nivel === 6) && mapa.has(`${r.nivel} ${r.chave}`),
+    );
+    if (fora.length > 0) {
+      usaveis = candidatas.filter((r) => !fora.includes(r));
+      dividido = [...new Set(fora.flatMap((r) => mapa.get(`${r.nivel} ${r.chave}`) ?? []))].sort();
+    }
+  }
+
+  const regra = escolherRegra(usaveis, campo);
   if (regra) return sugestaoDeRegra(regra);
+
+  if (campo === 'cfop' && dividido) {
+    const lista = dividido.length > 1
+      ? `${dividido.slice(0, -1).join(', ')} e ${dividido[dividido.length - 1]}`
+      : dividido.join('');
+    return {
+      valor: '',
+      campo,
+      origem: `${ORIGEM_NCM_DIVIDIDO}${dividido.join(',')}`,
+      regraId: null,
+      nivel: null,
+      confianca: 'nenhuma',
+      porque: `produto novo; outros produtos com o mesmo NCM já entraram como ${lista} · escolha o deste`,
+    };
+  }
 
   if (campo === 'cfop') {
     const mesmaUF =
