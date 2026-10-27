@@ -40,8 +40,11 @@ export type DefinicaoCampo = {
   validar?: (valor: string) => string | null;
 };
 
+// CFOP de ENTRADA: 4 dígitos começando com 1, 2 ou 3 (27/10, auditoria: 5102 era aceito
+// e ia para a regra e para o XML como se fosse entrada).
 const validaCfop = (v: string): string | null =>
-  /^\d{4}$/.test(v) ? null : 'CFOP precisa ter exatamente 4 dígitos';
+  !/^\d{4}$/.test(v) ? 'CFOP precisa ter exatamente 4 dígitos'
+    : /^[123]/.test(v) ? null : 'use um CFOP de entrada (começa com 1, 2 ou 3)';
 
 const validaCst = (v: string): string | null =>
   /^\d{2,3}$/.test(v) ? null : 'CST/CSOSN precisa ter 2 ou 3 dígitos';

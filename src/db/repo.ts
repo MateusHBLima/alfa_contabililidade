@@ -714,8 +714,16 @@ export class Repo {
       );
     }
 
-    sets.push('revisado = 1', 'revisado_por = ?', 'revisado_em = ?');
-    valores.push(this.ctx.sessao.usuarioId, agora(), this.tenant, itemId);
+    // Linha sem CFOP de entrada não está conferida (27/10, auditoria): apagar o CFOP
+    // (ou ficar sem ele no NCM dividido) deixa a linha pendente, nunca "tratada".
+    const cfopFica = mudancas.find((m) => m.campo === 'cfop')?.valor ?? atual.cfop_novo;
+    if (String(cfopFica ?? '').trim() === '') {
+      sets.push('revisado = 0', 'revisado_por = NULL', 'revisado_em = NULL');
+      valores.push(this.tenant, itemId);
+    } else {
+      sets.push('revisado = 1', 'revisado_por = ?', 'revisado_em = ?');
+      valores.push(this.ctx.sessao.usuarioId, agora(), this.tenant, itemId);
+    }
 
     await this.db
       .prepare(`UPDATE itens SET ${sets.join(', ')} WHERE tenant_id = ? AND id = ?`)
@@ -1557,8 +1565,10 @@ export class Repo {
       const marcas = fatia.map(() => '?').join(',');
       const r = await this.db
         .prepare(
+          // Sem CFOP de entrada não se confere (27/10, auditoria): a linha continua pendente.
           `UPDATE itens SET revisado = 1, revisado_por = ?, revisado_em = ?
-            WHERE tenant_id = ? AND nota_id = ? AND revisado = 0 AND id IN (${marcas})`,
+            WHERE tenant_id = ? AND nota_id = ? AND revisado = 0 AND TRIM(COALESCE(cfop_novo, '')) <> ''
+              AND id IN (${marcas})`,
         )
         .bind(this.ctx.sessao.usuarioId, quando, this.tenant, notaId, ...fatia)
         .run();
@@ -2057,7 +2067,8 @@ export class Repo {
       .prepare(
         `SELECT p.empresa_id, e.razao_social, COUNT(*) AS notas, SUM(p.total - p.rev) AS itens, MIN(p.dh_emi) AS mais_antiga
            FROM (SELECT n.id, n.empresa_id, n.dh_emi, COUNT(i.id) AS total,
-                        COALESCE(SUM(CASE WHEN i.revisado = 1 THEN 1 ELSE 0 END), 0) AS rev
+                        -- linha sem CFOP de entrada conta como pendente, mesmo conferida (27/10)
+                        COALESCE(SUM(CASE WHEN i.revisado = 1 AND TRIM(COALESCE(i.cfop_novo, '')) <> '' THEN 1 ELSE 0 END), 0) AS rev
                    FROM notas n LEFT JOIN itens i ON i.nota_id = n.id
                   WHERE n.tenant_id = ? AND n.cancelada_em IS NULL AND COALESCE(n.estorno, 0) <> 1
                   GROUP BY n.id) p

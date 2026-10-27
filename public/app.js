@@ -1193,7 +1193,9 @@ function faixaEstornos(lista, onde) {
    os produtos (...) eu confio, mas desconfiando." Nada é conferido sozinho: ela vê os
    itens sem abrir a nota e confere por nota ou todas de uma vez. */
 function notaTratada(n) {
-  return !!n.cancelada_em || Number(n.estorno) === 1 || ((n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens);
+  // Linha sem CFOP de entrada deixa a nota pendente, mesmo conferida (27/10, auditoria).
+  return !!n.cancelada_em || Number(n.estorno) === 1
+    || ((n.total_itens ?? 0) > 0 && (n.itens_revisados ?? 0) >= n.total_itens && !(Number(n.itens_sem_cfop ?? 0) > 0));
 }
 function notaVeioPronta(n) {
   if (notaTratada(n)) return false;
@@ -1208,6 +1210,7 @@ function notaVeioPronta(n) {
  */
 async function conferirNotaPronta(notaId, emLote = false) {
   await esperarSalvamentos();
+  if ([...naoSalvos.keys()].some(falhouAgora)) return { ok: false, numero: estado.notas.find((x) => x.id === notaId)?.numero ?? '', naoSalvo: true };
   const n = await api(`/api/notas/${notaId}`);
   const faltam = n.itens.filter((i) => !i.revisado);
   const certos = itensQueVieramCertos(n);
@@ -1292,11 +1295,13 @@ document.addEventListener('change', (ev) => {
         method: 'PATCH',
         body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor }] }),
       });
+      naoSalvos.delete(el.dataset.miniCfop);
       avisarSalvo(`Salvo: ${valor || 'sem CFOP'}`);
       const sub = el.closest('tr.itens-da-nota');
       const n = await api(`/api/notas/${el.dataset.miniNota}`);
       if (sub?.isConnected) desenharItensDaNota(sub, n);
     } catch (e) {
+      naoSalvos.set(el.dataset.miniCfop, Date.now());
       el.value = el.defaultValue;
       alerta(`Não consegui salvar o CFOP: ${e.message}`);
     }
@@ -1314,6 +1319,7 @@ document.addEventListener('click', async (ev) => {
     um.disabled = true;
     try {
       const r = await conferirNotaPronta(um.dataset.conferirPronta);
+      if (!r.ok && r.naoSalvo) return algumNaoSalvo();
       if (!r.ok) { await avisar(`A nota ${r.numero} tem item para olhar (aviso ou algo que não veio pronto). Vou abrir a nota.`); abrirNota(um.dataset.conferirPronta); }
     } catch (e) { alerta(e.message); } finally { um.disabled = false; }
     return;
@@ -1333,6 +1339,7 @@ document.addEventListener('click', async (ev) => {
     try {
       for (const id of ids) {
         const r = await conferirNotaPronta(id, true);
+        if (r.naoSalvo) { esconderEspera(); await carregarNotas(); return algumNaoSalvo(); }
         if (r.ok) feitas += 1; else ficaram.push(r.numero);
       }
     } finally { esconderEspera(); }
@@ -2247,10 +2254,15 @@ async function salvarCampo(itemId, campo, valor) {
         method: 'PATCH',
         body: JSON.stringify({ mudancas: [{ campo, valor }] }),
       });
+      naoSalvos.delete(itemId);
       avisarSalvo();
       await recarregarNota();
     } catch (e) {
-      alerta(e.message);
+      // Não salvou: a linha volta a mostrar o que está gravado, e nenhuma ação usa esse item
+      // até ela corrigir (27/10, auditoria - antes o "é sempre assim" caía no valor antigo).
+      naoSalvos.set(itemId, Date.now());
+      alerta(`Não salvei: ${e.message}`);
+      await recarregarNota().catch(() => {});
     }
   })());
 }
@@ -2267,10 +2279,24 @@ async function salvarCampo(itemId, campo, valor) {
  * que ainda está sendo gravado, e só então lê os valores.
  */
 const salvamentos = new Set();
+/**
+ * Itens cuja gravação acabou de falhar (item -> quando). Vale só para a ação que veio junto
+ * com aquela gravação (o mesmo clique): depois de alguns segundos a tela já mostra o valor
+ * gravado e o aviso já apareceu.
+ */
+const naoSalvos = new Map();
+const JANELA_NAO_SALVO_MS = 10000;
+const falhouAgora = (itemId) => Date.now() - (naoSalvos.get(itemId) ?? 0) < JANELA_NAO_SALVO_MS;
 function registrarSalvamento(promessa) {
   salvamentos.add(promessa);
   promessa.finally(() => salvamentos.delete(promessa));
   return promessa;
+}
+/** Algum item da nota aberta (ou da lista) cuja última gravação falhou? Avisa e devolve true. */
+function algumNaoSalvo() {
+  if (![...naoSalvos.keys()].some(falhouAgora)) return false;
+  alerta('Uma alteração não foi salva (o aviso apareceu na hora). Corrija o CFOP dessa linha antes de seguir.');
+  return true;
 }
 async function esperarSalvamentos() {
   // Campo ainda com foco e alterado: o "change" só sai no blur - força agora.
@@ -2333,6 +2359,7 @@ const conferindo = new Set();
 async function conferirUm(itemId, botao) {
   // Conferir ensina o CFOP que está na linha: tem que ser o que ela acabou de digitar (27/10).
   await esperarSalvamentos();
+  if (falhouAgora(itemId)) return;
   const notaId = estado.notaAberta?.nota?.id;
   if (!notaId || conferindo.has(itemId)) return;
   conferindo.add(itemId);
@@ -2363,6 +2390,7 @@ document.addEventListener('click', (ev) => {
   if (c) return conferirUm(c.dataset.conferir, c);
   if (ev.target.closest('#btn-conferir-certos')) {
     return esperarSalvamentos().then(() => {
+      if (algumNaoSalvo()) return;
       const ids = itensQueVieramCertos(estado.notaAberta).map((i) => i.id);
       if (ids.length) return conferirItens(ids);
     });
@@ -2544,11 +2572,15 @@ async function verTrilha(itemId) {
 async function fixarProduto(itemId) {
   // Primeiro o que ainda está sendo gravado; depois a linha, já com o valor salvo (27/10).
   await esperarSalvamentos();
+  if (falhouAgora(itemId)) return; // a gravação falhou e ela já foi avisada
   const i = (estado.notaAberta?.itens ?? []).find((x) => x.id === itemId);
   if (!i) return;
   const campo = document.querySelector(`#tbl-itens input.cfop[data-item="${CSS.escape(itemId)}"]`);
   const digitado = String(campo?.value ?? '').trim();
-  const cfop = /^\d{4}$/.test(digitado) ? digitado : String(i.cfop_novo ?? '').trim();
+  const salvo = String(i.cfop_novo ?? '').trim();
+  // O que está no campo tem de ser o que está gravado: senão, nada de padrão.
+  if (digitado !== salvo) return alerta(`O CFOP ${digitado || '(vazio)'} desta linha ainda não foi salvo. Confira o campo e tente de novo.`);
+  const cfop = salvo;
   if (!cfop) return alerta('Preencha o CFOP antes de salvar como padrão.');
 
   const nome = i.x_prod_novo || i.x_prod_original || 'este produto';
@@ -2580,6 +2612,7 @@ async function fixarProduto(itemId) {
 
 $('#btn-conferir-visiveis').addEventListener('click', async () => {
   await esperarSalvamentos();
+  if (algumNaoSalvo()) return;
   const pendentes = itensVisiveis().filter((i) => !i.revisado);
   if (pendentes.length === 0) return alerta('Tudo que está na tela já foi conferido.');
   conferirItens(pendentes.map((i) => i.id));
@@ -2599,6 +2632,7 @@ $('#btn-conferir-visiveis').addEventListener('click', async () => {
  */
 $('#btn-fixar-visiveis').addEventListener('click', async () => {
   await esperarSalvamentos();
+  if (algumNaoSalvo()) return;
   if (!estado.notaAberta) return;
   const alvos = itensVisiveis().filter((i) => podeFixar(i));
   if (alvos.length === 0) {
@@ -2640,6 +2674,7 @@ $('#btn-bulk-fornecedor').addEventListener('click', () => aplicarEmLote('fornece
 
 async function aplicarEmLote(escopo) {
   await esperarSalvamentos();
+  if (algumNaoSalvo()) return;
   const cfop = $('#bulk-cfop').value;
   if (!cfop) return alerta('Escolha um CFOP na lista antes de aplicar.');
   if (!estado.notaAberta) return;

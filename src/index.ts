@@ -3127,6 +3127,9 @@ app.patch('/api/itens/:id', async (c) => {
   // de quebra, fixar o padrao do fornecedor inteiro. A permissao existia no papel
   // e nao valia nada na pratica.
   if (corpo.fixar || corpo.escopo === 'fornecedor') exigir(sessao, 'regras.fixar');
+  if (corpo.fixar && validadas.some((m) => m.campo === 'cfop' && m.valor.trim() === '')) {
+    return c.json({ erro: 'Preencha o CFOP antes de salvar como padrão.' }, 400);
+  }
 
   const item = {
     nItem: linha.n_item, cProd: linha.c_prod, cEAN: linha.c_ean, xProd: linha.x_prod_original,
@@ -3172,6 +3175,9 @@ app.patch('/api/itens/:id', async (c) => {
   );
 
   for (const m of validadas) {
+    // Apagar o CFOP não é decisão: não ensina nada (27/10, auditoria - gravava regra vazia
+    // nos seis níveis, inclusive no NCM, que vale para outros produtos).
+    if (m.campo === 'cfop' && m.valor.trim() === '') continue;
     const sugestaoAnterior = sugerir(m.campo, item, candidatas, contexto);
     await repo.aplicarAprendizado(
       empresa.id,
@@ -3675,6 +3681,15 @@ app.get('/api/notas/:id/xml-corrigido', async (c) => {
   const obj = await c.env.XML_ORIGINAL.get(r.nota.r2_original);
   if (!obj) return c.json({ erro: 'XML original não encontrado no arquivo' }, 500);
   const original = await obj.text();
+
+  // 27/10, auditoria: item sem CFOP de entrada saía com o CFOP de SAÍDA do fornecedor (5102).
+  // Agora acontece de propósito no NCM dividido; o .zip já recusava, a nota avulsa não.
+  const semEntrada = r.itens.filter((i: any) => !/^[123]\d{3}$/.test(String(i.cfop_novo ?? '').trim()));
+  if (semEntrada.length > 0) {
+    return c.json({
+      erro: `exportação bloqueada: ${semEntrada.length === 1 ? 'o item' : 'os itens'} ${semEntrada.map((i: any) => i.n_item).join(', ')} ${semEntrada.length === 1 ? 'está' : 'estão'} sem CFOP de entrada`,
+    }, 422);
+  }
 
   const correcoes = r.itens.map((i: any) => ({
     nItem: i.n_item,

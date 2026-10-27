@@ -3915,6 +3915,35 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     expect((await abrir(b3.nota_id)).itens.find((i: any) => i.n_item === 3)).toMatchObject({ cfop_novo: '1101', revisado: 1 });
   });
 
+  it('27/10 (auditoria): linha sem CFOP de entrada não ensina, não fica conferida, não sai no XML e deixa a nota pendente', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: comCfop('11', '5102') }]);
+    const [a1, a2, a3] = itensDa('11');
+    const nota = a1.nota_id;
+    // CFOP de saída não é aceito como entrada.
+    expect((await corrigir(a1.id, '5102')).status).toBe(400);
+    // Apagar o CFOP: grava vazio, a linha fica pendente e nenhuma regra vazia nasce.
+    expect((await corrigir(a1.id, '')).status).toBe(200);
+    expect(itensDa('11')[0]).toMatchObject({ cfop_novo: '', revisado: 0 });
+    expect(db.consultar(`SELECT COUNT(*) AS n FROM regras WHERE campo = 'cfop' AND TRIM(valor) = ''`)[0]).toMatchObject({ n: 0 });
+    // Fixar vazio é recusado.
+    const fixarVazio = await req(`/api/itens/${a1.id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '' }], fixar: true }) });
+    expect(fixarVazio.status).toBe(400);
+    // Conferir a nota inteira não confere a linha sem CFOP.
+    await corrigir(a2.id, '1101'); await corrigir(a3.id, '1556');
+    expect((await req(`/api/notas/${nota}/conferir`, { method: 'POST', body: '{}' })).status).toBe(200);
+    expect(itensDa('11').map((i: any) => i.revisado)).toEqual([0, 1, 1]);
+    // A nota continua nas pendências e o XML dela não sai.
+    const pend = (await (await req('/api/pendencias')).json()) as any;
+    expect(pend.empresas).toEqual([expect.objectContaining({ empresaId, notas: 1, itens: 1 })]);
+    const xml = await req(`/api/notas/${nota}/xml-corrigido`);
+    expect(xml.status).toBe(422);
+    expect(((await xml.json()) as any).erro).toContain('item 1');
+    // Com o CFOP preenchido, sai.
+    await corrigir(a1.id, '1101');
+    expect((await req(`/api/notas/${nota}/xml-corrigido`)).status).toBe(200);
+    expect(((await (await req('/api/pendencias')).json()) as any).empresas).toEqual([]);
+  });
+
   it('15/10 (auditoria): produtos de um CFOP sem abrir nota, e o mesmo produto decidido com CFOPs diferentes', async () => {
     await importarArquivos(repo, r2 as any, empresaId, [
       { nome: 'a.xml', conteudo: comCfop('11', '5102') },
