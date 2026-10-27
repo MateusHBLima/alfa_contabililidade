@@ -16,6 +16,9 @@ const estado = {
   // Vieram prontas (27/10): notas com os itens abertos (▸) na lista e onde ela estava,
   // para a lista não voltar ao começo depois de salvar, conferir ou voltar de uma nota.
   notasAbertasNaLista: new Set(),
+  // O CFOP que a lista das que vieram prontas MOSTROU em cada item (nota -> item -> CFOP).
+  // Vai junto no "✓ Conferir": se a linha mudou por trás, aquela não é conferida (27/10).
+  miniVistos: new Map(),
   rolagemNotas: null, // { notaId, topo } da nota aberta pela lista: o "← Notas" volta para ela
   reabrindo: null,
   pendenciasNaTela: null,
@@ -1218,7 +1221,14 @@ async function conferirNotaPronta(notaId, emLote = false) {
     && String(i.cfop_novo ?? '').trim() !== '' && !(i.alertas ?? []).some((a) => a.severidade === 'critico' || a.bloqueia));
   const conferir = [...certos, ...corrigidos];
   if (conferir.length < faltam.length) return { ok: false, numero: n.nota.numero };
-  await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: conferir.map((i) => i.id) }) });
+  // Com os itens abertos na lista, confere o que ela VIU; se algum mudou por trás, fica de fora.
+  const viu = estado.miniVistos.get(notaId);
+  const esperado = viu ? Object.fromEntries(conferir.filter((i) => i.id in viu).map((i) => [i.id, viu[i.id]])) : undefined;
+  const r = await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: conferir.map((i) => i.id), esperado }) });
+  if (r.divergentes?.length) {
+    if (!emLote) { avisarDivergentes(r.divergentes); await carregarNotas(); }
+    return { ok: false, numero: n.nota.numero, divergentes: r.divergentes };
+  }
   if (!emLote) { avisarSalvo(`Nota ${n.nota.numero} conferida`); await carregarNotas(); }
   return { ok: true, numero: n.nota.numero, itens: conferir.length };
 }
@@ -1230,6 +1240,7 @@ async function verItensDaNota(notaId, botao, manterAberto = false) {
     tr.nextElementSibling.remove();
     botao.textContent = '▸';
     estado.notasAbertasNaLista.delete(notaId);
+    estado.miniVistos.delete(notaId);
     return;
   }
   estado.notasAbertasNaLista.add(notaId);
@@ -1255,6 +1266,8 @@ async function verItensDaNota(notaId, botao, manterAberto = false) {
  */
 function desenharItensDaNota(sub, n) {
   const editar = pode('notas.editar_cfop') && !n.nota.cancelada_em;
+  estado.miniVistos.set(n.nota.id, Object.fromEntries(n.itens.filter((i) => !i.revisado)
+    .map((i) => [i.id, String(i.cfop_novo ?? '').trim()])));
   sub.innerHTML = `<td colspan="8"><table class="itens-mini"><tbody>${n.itens.map((i) => `
       <tr class="${i.revisado ? 'mini-conferido' : ''}">
         <td class="tiny">${i.n_item}</td>
@@ -1291,12 +1304,13 @@ document.addEventListener('change', (ev) => {
   if (valor === el.defaultValue.trim()) return;
   registrarSalvamento((async () => {
     try {
-      await api(`/api/itens/${el.dataset.miniCfop}`, {
+      const r = await api(`/api/itens/${el.dataset.miniCfop}`, {
         method: 'PATCH',
         body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor }] }),
       });
       naoSalvos.delete(el.dataset.miniCfop);
       avisarSalvo(`Salvo: ${valor || 'sem CFOP'}`);
+      await perguntarTrocaDoPadrao(el.dataset.miniCfop, r, valor);
       const sub = el.closest('tr.itens-da-nota');
       const n = await api(`/api/notas/${el.dataset.miniNota}`);
       if (sub?.isConnected) desenharItensDaNota(sub, n);
@@ -1320,6 +1334,7 @@ document.addEventListener('click', async (ev) => {
     try {
       const r = await conferirNotaPronta(um.dataset.conferirPronta);
       if (!r.ok && r.naoSalvo) return algumNaoSalvo();
+      if (!r.ok && r.divergentes) return;
       if (!r.ok) { await avisar(`A nota ${r.numero} tem item para olhar (aviso ou algo que não veio pronto). Vou abrir a nota.`); abrirNota(um.dataset.conferirPronta); }
     } catch (e) { alerta(e.message); } finally { um.disabled = false; }
     return;
@@ -2250,12 +2265,13 @@ function quemConferiu(i) {
 async function salvarCampo(itemId, campo, valor) {
   return registrarSalvamento((async () => {
     try {
-      await api(`/api/itens/${itemId}`, {
+      const r = await api(`/api/itens/${itemId}`, {
         method: 'PATCH',
         body: JSON.stringify({ mudancas: [{ campo, valor }] }),
       });
       naoSalvos.delete(itemId);
       avisarSalvo();
+      if (campo === 'cfop') await perguntarTrocaDoPadrao(itemId, r, valor);
       await recarregarNota();
     } catch (e) {
       // Não salvou: a linha volta a mostrar o que está gravado, e nenhuma ação usa esse item
@@ -2265,6 +2281,49 @@ async function salvarCampo(itemId, campo, valor) {
       await recarregarNota().catch(() => {});
     }
   })());
+}
+
+/**
+ * Corrigiu a linha de um produto que tem padrão FIXADO com outro CFOP (27/10, auditoria).
+ * A linha muda; o padrão, não - e a próxima nota viria de novo com o antigo, verde. Por
+ * isso pergunta na hora: troca o padrão, ou foi só nesta nota?
+ */
+async function perguntarTrocaDoPadrao(itemId, resposta, valor) {
+  const padrao = resposta?.padraoFixado?.valor;
+  const novo = String(valor ?? '').trim();
+  if (!padrao || !novo || !pode('regras.fixar')) return;
+  const trocar = await confirmar({
+    titulo: 'Este produto tem padrão fixado',
+    ok: `Trocar o padrão para ${novo}`,
+    cancelar: 'Só nesta nota',
+    corpo: `
+      <p class="dialogo-texto">O padrão fixado deste produto é <b>${esc(padrao)}</b>. Nesta linha você pôs <b>${esc(novo)}</b>.</p>
+      <ul class="dialogo-lista">
+        <li><b>Trocar o padrão</b>: as próximas notas deste produto já vêm com ${esc(novo)}</li>
+        <li><b>Só nesta nota</b>: esta linha fica ${esc(novo)} e o padrão continua ${esc(padrao)}</li>
+      </ul>`,
+  });
+  if (!trocar) return;
+  try {
+    await api(`/api/itens/${itemId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: novo }], fixar: true }),
+    });
+    avisarSalvo(`Padrão trocado para ${novo}`);
+  } catch (e) {
+    alerta(`A linha ficou salva, mas não consegui trocar o padrão: ${e.message}`);
+  }
+}
+
+/** Conferir não conferiu as linhas que mudaram desde que a tela as mostrou: avisa quais. */
+function avisarDivergentes(divergentes) {
+  if (!divergentes?.length) return false;
+  const lista = divergentes
+    .map((d) => `item ${d.nItem} (na tela estava ${d.esperado || 'sem CFOP'}, agora está ${d.agora || 'sem CFOP'})`)
+    .join('; ');
+  const quantos = divergentes.length === 1 ? 'Um item não foi conferido' : `${divergentes.length} itens não foram conferidos`;
+  alerta(`${quantos}: o CFOP mudou depois que a tela mostrou. ${lista}. Olhe de novo e confira.`);
+  return true;
 }
 
 /**
@@ -2321,6 +2380,12 @@ function avisarSalvo(texto = 'Salvo') {
   sumirAviso = setTimeout(() => el.classList.add('hidden'), 2200);
 }
 
+/** O CFOP que a nota aberta está mostrando em cada item: o que ela olhou ao conferir. */
+function cfopsNaTela(ids) {
+  const porId = new Map((estado.notaAberta?.itens ?? []).map((i) => [i.id, i]));
+  return Object.fromEntries(ids.filter((id) => porId.has(id)).map((id) => [id, String(porId.get(id).cfop_novo ?? '').trim()]));
+}
+
 /** Conferir = "olhei e concordo". Não muda valor nenhum; marca que houve gente. */
 async function conferirItens(ids) {
   if (!estado.notaAberta || ids.length === 0) return;
@@ -2328,11 +2393,12 @@ async function conferirItens(ids) {
   try {
     const r = await api(`/api/notas/${estado.notaAberta.nota.id}/conferir`, {
       method: 'POST',
-      body: JSON.stringify({ itens: ids }),
+      body: JSON.stringify({ itens: ids, esperado: cfopsNaTela(ids) }),
     });
     avisarSalvo(r.conferidos === 1 ? '1 item conferido' : `${r.conferidos} itens conferidos`);
     await recarregarNota();
     await carregarNotas();
+    avisarDivergentes(r.divergentes);
   } catch (e) {
     alerta(e.message);
   } finally {
@@ -2366,14 +2432,17 @@ async function conferirUm(itemId, botao) {
   botao.disabled = true;
   botao.textContent = '✓ salvando…';
   let erro = null;
+  let divergentes = [];
   try {
-    await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [itemId] }) });
+    const r = await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [itemId], esperado: cfopsNaTela([itemId]) }) });
+    divergentes = r.divergentes ?? [];
   } catch (e) {
     erro = e;
   } finally {
     conferindo.delete(itemId);
   }
   if (erro) alerta(`Não consegui conferir o item: ${erro.message}`);
+  else avisarDivergentes(divergentes);
   if (conferindo.size > 0 || estado.notaAberta?.nota?.id !== notaId) return;
   await recarregarNota();
   carregarNotas().catch(() => {}); // lista de notas atualiza por trás
@@ -2634,9 +2703,16 @@ $('#btn-fixar-visiveis').addEventListener('click', async () => {
   await esperarSalvamentos();
   if (algumNaoSalvo()) return;
   if (!estado.notaAberta) return;
-  const alvos = itensVisiveis().filter((i) => podeFixar(i));
+  // Só vira padrão o que alguém decidiu: conferido, ou digitado à mão (27/10, auditoria -
+  // antes o palpite que ninguém olhou virava padrão fixado junto com o resto).
+  const decidido = (i) => !!i.revisado || String(i.cfop_origem ?? '').startsWith('manual');
+  const fixaveis = itensVisiveis().filter((i) => podeFixar(i));
+  const alvos = fixaveis.filter(decidido);
+  const naoDecididos = fixaveis.length - alvos.length;
   if (alvos.length === 0) {
-    return alerta('Não há item para salvar: ou já são padrão, ou estão sem CFOP.');
+    return alerta(naoDecididos > 0
+      ? 'Confira os itens antes: só vira padrão o CFOP que vocês já conferiram ou corrigiram.'
+      : 'Não há item para salvar: ou já são padrão, ou estão sem CFOP.');
   }
 
   const semCfop = itensVisiveis().filter((i) => !String(i.cfop_novo ?? '').trim()).length;
@@ -2651,6 +2727,7 @@ $('#btn-fixar-visiveis').addEventListener('click', async () => {
         <li>Cada item guarda o <b>seu próprio</b> CFOP — nenhum valor é alterado</li>
         <li>A partir da próxima nota deste fornecedor eles já vêm preenchidos</li>
         ${semCfop > 0 ? `<li>${semCfop} item(ns) sem CFOP serão pulados</li>` : ''}
+        ${naoDecididos > 0 ? `<li>${naoDecididos} item(ns) ainda não conferidos ficam de fora: confira antes, se estiverem certos</li>` : ''}
       </ul>`,
   });
   if (!ok) return;
@@ -2662,6 +2739,7 @@ $('#btn-fixar-visiveis').addEventListener('click', async () => {
     });
     avisarSalvo(`${r.fixados} padrão(ões) salvo(s)`);
     await recarregarNota();
+    if (r.naoDecididos > 0) alerta(`${r.naoDecididos} item(ns) não viraram padrão porque ainda não foram conferidos.`);
   } catch (e) {
     alerta('Não consegui salvar os padrões: ' + e.message);
   } finally {
@@ -4861,8 +4939,70 @@ const ROTULO_NIVEL = {
   4: 'fornecedor + NCM', 5: 'padrão do fornecedor', 6: 'NCM', 7: 'perfil',
 };
 
+/**
+ * Padrões do produto que não batem com a última conferência (27/10, auditoria). A regra
+ * ficava com uma decisão antiga e a nota seguinte vinha com ela, verde. Aqui ela vê cada
+ * um e escolhe: usar a última conferência. Padrão fixado aparece, mas não se troca daqui.
+ */
+async function carregarDesencontradas() {
+  const card = $('#card-desencontradas');
+  if (!card || !estado.empresaId) return;
+  let lista = [];
+  try { lista = await api(`/api/empresas/${estado.empresaId}/regras/desencontradas`); } catch { lista = []; }
+  estado.desencontradas = lista;
+  card.classList.toggle('hidden', lista.length === 0);
+  if (!lista.length) return;
+  const corrigir = pode('regras.aprovar');
+  const trocaveis = lista.filter((r) => !r.fixada).length;
+  $('#desenc-resumo').textContent = `${lista.length} padrão(ões) de produto diferentes do que vocês decidiram por último ao conferir. `
+    + 'Enquanto não corrigir, a próxima nota desse produto vem com o padrão de hoje.';
+  $('#tbl-desencontradas tbody').innerHTML = lista.map((r) => `<tr>
+      <td>${!r.fixada && corrigir ? `<input type="checkbox" data-desenc="${esc(r.regraId)}" checked aria-label="Corrigir ${esc(r.produto)}">` : ''}</td>
+      <td>${esc(r.produto)}<span class="porque">${esc(ROTULO_NIVEL[r.nivel] ?? '')} · veio ${esc(r.saida || 'sem CFOP')}</span></td>
+      <td class="mono">${esc(r.valorRegra || '(vazio)')}${r.fixada ? ' <span class="tag ok">fixado</span>' : ''}</td>
+      <td class="mono"><b>${esc(r.decidido)}</b>${r.outrasDecisoes > 0 ? ` <span class="tag warn" title="Em outras notas vocês conferiram outro CFOP para este produto">${r.outrasDecisoes} de ${r.decisoes} diferente(s)</span>` : ''}</td>
+      <td class="tiny">nota ${esc(r.numero)} · item ${esc(r.nItem)}${r.quando ? ` · ${esc(dataCurta(r.quando))}` : ''}${r.fixada ? '<br>fixado: troque pelo ☆ na nota' : ''}</td>
+    </tr>`).join('');
+  $('#desenc-todas').checked = true;
+  $('#desenc-todas').disabled = !corrigir || trocaveis === 0;
+  $('#btn-corrigir-desenc').classList.toggle('hidden', !corrigir || trocaveis === 0);
+}
+
+$('#desenc-todas')?.addEventListener('change', (ev) => {
+  $$('#tbl-desencontradas [data-desenc]').forEach((c) => { c.checked = ev.target.checked; });
+});
+
+$('#btn-corrigir-desenc')?.addEventListener('click', async () => {
+  const marcadas = $$('#tbl-desencontradas [data-desenc]').filter((c) => c.checked).map((c) => c.dataset.desenc);
+  const porId = new Map((estado.desencontradas ?? []).map((r) => [r.regraId, r]));
+  const regras = marcadas.map((id) => porId.get(id)).filter(Boolean);
+  if (!regras.length) return alerta('Marque pelo menos um padrão.');
+  const ok = await confirmar({
+    titulo: 'Usar a última conferência',
+    ok: `Corrigir ${regras.length} padrão(ões)`,
+    corpo: `<p class="dialogo-texto"><b>${regras.length}</b> padrão(ões) passam a ter o CFOP que vocês conferiram por último.</p>
+      <ul class="dialogo-lista">
+        <li>Vale para as próximas notas desses produtos</li>
+        <li>Nenhuma nota já conferida muda</li>
+        <li>Cada troca fica registrada na trilha</li>
+      </ul>`,
+  });
+  if (!ok) return;
+  try {
+    const r = await api(`/api/empresas/${estado.empresaId}/regras/desencontradas/corrigir`, {
+      method: 'POST', body: JSON.stringify({ regras: regras.map((x) => ({ regraId: x.regraId, valor: x.decidido })) }),
+    });
+    avisarSalvo(`${r.corrigidas} padrão(ões) corrigido(s)`);
+    if (r.puladas?.length) alerta(`${r.puladas.length} ficaram como estavam: ${r.puladas.map((p) => p.motivo).join('; ')}.`);
+  } catch (e) {
+    alerta('Não consegui corrigir: ' + e.message);
+  }
+  await carregarRegras();
+});
+
 async function carregarRegras(suspeitas = false) {
   if (!estado.empresaId) return;
+  carregarDesencontradas();
   const rs = await api(`/api/empresas/${estado.empresaId}/regras${suspeitas ? '?suspeitas=1' : ''}`);
   $('#tbl-regras tbody').innerHTML = rs.map((r) => {
     const selo = r.fixada
@@ -4967,6 +5107,7 @@ function abrirModal(titulo, html, aoSalvar) {
   // Cancelar e troca o rótulo do botão; sem este reset, o próximo modal a abrir
   // herdaria isso e apareceria sem saída — bug que só se vê duas telas adiante.
   $('#modal-cancelar').classList.remove('hidden');
+  $('#modal-cancelar').textContent = 'Cancelar';
   $('#modal-ok').textContent = 'Salvar';
   $('#modal-ok').classList.remove('perigo');
   $('#modal-fundo').classList.remove('hidden');
@@ -5014,11 +5155,12 @@ $('#modal-ok').addEventListener('click', async () => {
  * E havia incoerencia: a tela ja tinha modal proprio (editar cliente, papeis),
  * e estas caixas passavam por fora dele.
  */
-function confirmar({ titulo, corpo, ok = 'Confirmar', perigo = false }) {
+function confirmar({ titulo, corpo, ok = 'Confirmar', perigo = false, cancelar = null }) {
   return new Promise((resolve) => {
     let decidiu = false;
     abrirModal(titulo, corpo, () => { decidiu = true; resolve(true); });
     aoDesistir = () => { if (!decidiu) resolve(false); };
+    if (cancelar) $('#modal-cancelar').textContent = cancelar;
     $('#modal-ok').textContent = ok;
     $('#modal-ok').classList.toggle('perigo', perigo);
     $('#modal-ok').focus();

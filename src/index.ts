@@ -2949,9 +2949,10 @@ app.get('/api/notas/:id', async (c) => {
   const fichas = await repo.regrasDeOrigem(r.nota.empresa_id, idsRegra);
   // Padrao fixado deste fornecedor, para a linha mostrar o "PADRAO FIXADO" logo
   // depois do "e sempre assim" (antes so aparecia na proxima nota).
-  const fixadas = new Set(
-    (await repo.regrasFixadasDoFornecedor(r.nota.empresa_id, r.nota.emit_cnpj)).map((x: any) => `${x.nivel} ${x.chave} ${x.valor}`),
-  );
+  const listaFixadas = await repo.regrasFixadasDoFornecedor(r.nota.empresa_id, r.nota.emit_cnpj);
+  const fixadas = new Set(listaFixadas.map((x: any) => `${x.nivel} ${x.chave} ${x.valor}`));
+  // O padrão fixado de cada produto (nível 1 ou 2), para avisar a linha que está diferente (27/10).
+  const fixadaPorChave = new Map<string, string>(listaFixadas.map((x: any) => [`${x.nivel} ${x.chave}`, String(x.valor)]));
 
   // De onde veio o valor que a contadora esta vendo. O CFOP manda, porque e o campo
   // que ela de fato decide; a descricao acompanha. Sem isto a tela nao tem como
@@ -3042,6 +3043,21 @@ app.get('/api/notas/:id', async (c) => {
       });
     }
     const cfopLinha = String(i.cfop_novo ?? '').trim();
+    // 27/10 (queijo coalho, auditoria): a linha diz uma coisa e o padrão FIXADO do produto
+    // diz outra. Corrigir a linha não muda o padrão, e a próxima nota voltaria com o padrão.
+    if (cfopLinha && !CFOP_PELA_SAIDA[veio] && !r!.nota.cancelada_em) {
+      const padrao = ([1, 2] as const)
+        .map((n) => { const k = chaveDoNivel(item as any, r!.nota.emit_cnpj, n, 'cfop'); return k === null ? undefined : fixadaPorChave.get(`${n} ${k}`); })
+        .find((v) => v !== undefined);
+      if (padrao !== undefined && padrao !== cfopLinha) {
+        alertas.push({
+          codigo: 'difere-do-padrao', severidade: 'atencao',
+          titulo: `Padrão fixado deste produto: ${padrao}`,
+          detalhe: `Esta linha está ${cfopLinha}. Se o certo é ${cfopLinha}, troque o padrão em "☆ é sempre assim"; se não, volte a linha para ${padrao}.`,
+          bloqueia: false,
+        });
+      }
+    }
     if (segmento.nome && cfopLinha && cfopLinha in segmento.proibidos && !r!.nota.cancelada_em) {
       const motivo = segmento.proibidos[cfopLinha];
       alertas.push({
@@ -3174,6 +3190,13 @@ app.patch('/api/itens/:id', async (c) => {
     validadas.map((m) => ({ ...m, origem: corpo.fixar ? 'manual:fixada' : 'manual' })),
   );
 
+  // 27/10 (queijo coalho): corrigir a linha de um produto com padrão FIXADO não muda o
+  // padrão. A tela pergunta se é para trocar; aqui só se diz qual é o padrão de hoje.
+  const novoCfop = validadas.find((m) => m.campo === 'cfop')?.valor.trim();
+  const padraoDoProduto = !corpo.fixar && corpo.escopo === 'item' && novoCfop
+    ? candidatas.find((r) => r.campo === 'cfop' && r.fixada && r.ativa && (r.nivel === 1 || r.nivel === 2) && r.valor !== novoCfop)
+    : undefined;
+
   for (const m of validadas) {
     // Apagar o CFOP não é decisão: não ensina nada (27/10, auditoria - gravava regra vazia
     // nos seis níveis, inclusive no NCM, que vale para outros produtos).
@@ -3188,7 +3211,7 @@ app.patch('/api/itens/:id', async (c) => {
     );
   }
 
-  return c.json({ ok: true });
+  return c.json(padraoDoProduto ? { ok: true, padraoFixado: { valor: padraoDoProduto.valor } } : { ok: true });
 });
 
 /**
@@ -3251,9 +3274,9 @@ app.post('/api/notas/:id/fixar-padrao', async (c) => {
 
   // Sem lista = a nota inteira.
   const ids = corpo.itens ?? r.itens.map((i: any) => i.id);
-  const { fixados, semCfop } = await repo.fixarPadraoDeItens(r.nota.id, ids);
+  const { fixados, semCfop, naoDecididos } = await repo.fixarPadraoDeItens(r.nota.id, ids);
 
-  return c.json({ ok: true, fixados, semCfop });
+  return c.json({ ok: true, fixados, semCfop, naoDecididos });
 });
 
 /**
@@ -3335,7 +3358,12 @@ app.post('/api/notas/:id/conferir', async (c) => {
   exigirAlguma(sessao, EDITAR_NOTA);
 
   const corpo = z
-    .object({ itens: z.array(z.string()).max(500).optional() })
+    .object({
+      itens: z.array(z.string()).max(500).optional(),
+      // 27/10 (auditoria): o CFOP que ela VIU em cada linha. Se a linha mudou no meio do
+      // caminho (gravação atrasada, palpite atualizado ao abrir), aquela não é conferida.
+      esperado: z.record(z.string(), z.string()).optional(),
+    })
     .parse(await c.req.json().catch(() => ({})));
 
   const repo = c.get('repo');
@@ -3343,7 +3371,20 @@ app.post('/api/notas/:id/conferir', async (c) => {
   if (!r) return c.json({ erro: 'nota não encontrada' }, 404);
 
   // Sem lista = a nota inteira.
-  const ids = corpo.itens ?? r.itens.map((i: any) => i.id);
+  let ids = corpo.itens ?? r.itens.map((i: any) => i.id);
+  const divergentes: { itemId: string; nItem: number; agora: string; esperado: string }[] = [];
+  if (corpo.esperado) {
+    const porId = new Map(r.itens.map((i: any) => [i.id, i]));
+    ids = ids.filter((id) => {
+      const viu = corpo.esperado![id];
+      const i: any = porId.get(id);
+      if (viu === undefined || !i) return true;
+      const agora = String(i.cfop_novo ?? '').trim();
+      if (agora === viu.trim()) return true;
+      divergentes.push({ itemId: id, nItem: i.n_item, agora, esperado: viu.trim() });
+      return false;
+    });
+  }
 
   // Conferir ensina (22/09): o CFOP que ela conferiu vira padrao aprendido, como se
   // tivesse digitado o mesmo valor. So o CFOP - descricao conferida pode ser a do
@@ -3356,7 +3397,7 @@ app.post('/api/notas/:id/conferir', async (c) => {
 
   const conferidos = await repo.conferirItens(r.nota.id, ids);
 
-  return c.json({ ok: true, conferidos });
+  return c.json({ ok: true, conferidos, divergentes });
 });
 
 /** Desfaz a conferência de um item — o "me arrependi, quero olhar de novo". */
@@ -3376,6 +3417,21 @@ app.get('/api/empresas/:id/regras', async (c) => {
       suspeitas: c.req.query('suspeitas') === '1',
     }),
   );
+});
+
+// 27/10 (auditoria): padrão do produto que não bate com o que a contabilidade decidiu
+// por último ao conferir. Mostra; corrigir é outro passo, escolhido na tela.
+app.get('/api/empresas/:id/regras/desencontradas', async (c) => {
+  exigir(c.get('sessao'), 'regras.visualizar');
+  return c.json(await c.get('repo').regrasDesencontradas(c.req.param('id')));
+});
+
+app.post('/api/empresas/:id/regras/desencontradas/corrigir', async (c) => {
+  exigir(c.get('sessao'), 'regras.aprovar');
+  const corpo = z
+    .object({ regras: z.array(z.object({ regraId: z.string(), valor: z.string() })).min(1).max(500) })
+    .parse(await c.req.json().catch(() => ({})));
+  return c.json({ ok: true, ...(await c.get('repo').corrigirRegrasDesencontradas(c.req.param('id'), corpo.regras)) });
 });
 
 // ------------------------------------------------------------------ exportação

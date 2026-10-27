@@ -4,7 +4,7 @@ import type { Sessao } from '../auth/permissoes';
 import { podeVerEmpresa } from '../auth/permissoes';
 import type { Campo } from '../rules/campos';
 import type { Nivel, Regra } from '../rules/engine';
-import { aplicarAcerto, aplicarErro, aprender, recalcularConfianca, partesDaChave, chaveDoNivel, chavesDoItem, regrasDoItem, sugerir } from '../rules/engine';
+import { aprender, recalcularConfianca, partesDaChave, chaveDoNivel, chavesDoItem, regrasDoItem, sugerir } from '../rules/engine';
 
 /**
  * Repositorio.
@@ -85,10 +85,39 @@ export type FichaRegra = {
 const SE_A_REGRA_JA_EXISTE = `
   ON CONFLICT (tenant_id, empresa_id, nivel, chave, campo) DO UPDATE SET
     valor = excluded.valor, atualizada_em = excluded.criada_em, suspeita = 0, erros_seguidos = 0,
+    usos = CASE WHEN regras.valor <> excluded.valor THEN 0 ELSE regras.usos END,
+    acertos = CASE WHEN regras.valor <> excluded.valor THEN 0 ELSE regras.acertos END,
+    erros = CASE WHEN regras.valor <> excluded.valor THEN 0 ELSE regras.erros END,
+    confianca = CASE WHEN regras.valor <> excluded.valor THEN 0.5 ELSE regras.confianca END,
     fixada = MAX(regras.fixada, excluded.fixada),
     fixada_por = COALESCE(excluded.fixada_por, regras.fixada_por),
     fixada_em = COALESCE(excluded.fixada_em, regras.fixada_em)
   WHERE excluded.fixada = 1 OR (regras.fixada = 0 AND regras.valor <> excluded.valor)`;
+
+/**
+ * Acerto e erro de uma regra direto no banco (27/10, auditoria). Antes: ler a regra,
+ * calcular no servidor e gravar os números absolutos - duas gravações juntas perdiam uma,
+ * e um conferir que lia antes de um "é sempre assim" gravava por cima. Agora soma no
+ * próprio UPDATE e só vale se a regra ainda diz o valor que foi confirmado ou corrigido.
+ * Confiança = (acertos + 1) / (acertos + erros + 2), como `recalcularConfianca`.
+ * Regra fixada não é rebaixada: o erro conta, mas não vira "suspeita".
+ */
+const SQL_ACERTO = `UPDATE regras SET usos = usos + 1, acertos = acertos + 1, erros_seguidos = 0,
+    confianca = (acertos + 2.0) / (acertos + erros + 3), atualizada_em = ?
+  WHERE tenant_id = ? AND id = ? AND valor = ?`;
+const SQL_ERRO = `UPDATE regras SET usos = usos + 1, erros = erros + 1,
+    erros_seguidos = CASE WHEN fixada = 1 THEN erros_seguidos ELSE erros_seguidos + 1 END,
+    suspeita = CASE WHEN fixada = 0 AND erros_seguidos + 1 >= 3 THEN 1 ELSE suspeita END,
+    confianca = (acertos + 1.0) / (acertos + erros + 3), atualizada_em = ?
+  WHERE tenant_id = ? AND id = ? AND valor = ?`;
+
+/** Regra do próprio produto que não bate com a última decisão conferida (27/10). */
+export type RegraDesencontrada = {
+  regraId: string; nivel: number; chave: string; fixada: boolean;
+  valorRegra: string; decidido: string; quando: string;
+  notaId: string; numero: string; nItem: number; produto: string; saida: string;
+  decisoes: number; outrasDecisoes: number; usos: number;
+};
 
 export class Repo {
   private aud: Auditoria;
@@ -430,21 +459,11 @@ export class Repo {
         .all<any>();
       for (const r of results) regras.set(r.id, r);
     }
-    const novas = new Map<string, Regra>();
     for (const a of confirmar) {
       const linha = regras.get(a.acao.regraId);
       if (!linha || linha.valor !== a.valor) continue;
-      const atual = novas.get(linha.id) ?? linhaParaRegra(linha);
-      novas.set(linha.id, a.acao.tipo === 'confirmar' ? aplicarAcerto(atual) : aplicarErro(atual));
-    }
-    for (const n of novas.values()) {
       comandos.push(
-        this.db
-          .prepare(
-            `UPDATE regras SET usos=?, acertos=?, erros=?, erros_seguidos=?, confianca=?, suspeita=?, atualizada_em=?
-             WHERE tenant_id = ? AND id = ?`,
-          )
-          .bind(n.usos, n.acertos, n.erros, n.errosSeguidos, n.confianca, n.suspeita ? 1 : 0, quando, this.tenant, n.id),
+        this.db.prepare(a.acao.tipo === 'confirmar' ? SQL_ACERTO : SQL_ERRO).bind(quando, this.tenant, linha.id, a.valor),
       );
     }
 
@@ -485,19 +504,28 @@ export class Repo {
         );
       } else if (u.fixada) {
         // Fixacao explicita sobrescreve, inclusive outra fixada (e o que o caminho de um item faz).
+        // Valor novo comeca do zero (27/10): o historico era do valor antigo.
         comandos.push(
           this.db
             .prepare(
-              `UPDATE regras SET valor=?, fixada=1, fixada_por=?, fixada_em=?, atualizada_em=?, suspeita=0, erros_seguidos=0
+              `UPDATE regras SET
+                 usos = CASE WHEN valor <> ? THEN 0 ELSE usos END, acertos = CASE WHEN valor <> ? THEN 0 ELSE acertos END,
+                 erros = CASE WHEN valor <> ? THEN 0 ELSE erros END, confianca = CASE WHEN valor <> ? THEN 0.5 ELSE confianca END,
+                 valor=?, fixada=1, fixada_por=?, fixada_em=?, atualizada_em=?, suspeita=0, erros_seguidos=0
                WHERE tenant_id = ? AND id = ?`,
             )
-            .bind(u.valor, quem, quando, quando, this.tenant, e.id),
+            .bind(u.valor, u.valor, u.valor, u.valor, u.valor, quem, quando, quando, this.tenant, e.id),
         );
       } else if (e.valor !== u.valor && e.fixada !== 1) {
+        // So se ninguem fixou nem mudou a regra desde a leitura (27/10, auditoria: um conferir
+        // que corria junto com um "e sempre assim" gravava o valor velho na regra recem-fixada).
         comandos.push(
           this.db
-            .prepare(`UPDATE regras SET valor=?, atualizada_em=?, suspeita=0, erros_seguidos=0 WHERE tenant_id = ? AND id = ?`)
-            .bind(u.valor, quando, this.tenant, e.id),
+            .prepare(
+              `UPDATE regras SET valor=?, usos=0, acertos=0, erros=0, confianca=0.5, atualizada_em=?, suspeita=0, erros_seguidos=0
+                WHERE tenant_id = ? AND id = ? AND fixada = 0 AND valor = ?`,
+            )
+            .bind(u.valor, quando, this.tenant, e.id, e.valor),
         );
       }
     }
@@ -599,18 +627,9 @@ export class Repo {
           .first<any>();
         if (!linha) continue;
 
-        const regra = linhaParaRegra(linha);
-        const nova = acao.tipo === 'confirmar' ? aplicarAcerto(regra) : aplicarErro(regra);
-
         await this.db
-          .prepare(
-            `UPDATE regras SET usos=?, acertos=?, erros=?, erros_seguidos=?, confianca=?, suspeita=?, atualizada_em=?
-             WHERE tenant_id = ? AND id = ?`,
-          )
-          .bind(
-            nova.usos, nova.acertos, nova.erros, nova.errosSeguidos, nova.confianca,
-            nova.suspeita ? 1 : 0, agora(), this.tenant, acao.regraId,
-          )
+          .prepare(acao.tipo === 'confirmar' ? SQL_ACERTO : SQL_ERRO)
+          .bind(agora(), this.tenant, acao.regraId, linha.valor)
           .run();
         continue;
       }
@@ -645,6 +664,119 @@ export class Repo {
       .bind(this.tenant, empresaId)
       .all<any>();
     return results;
+  }
+
+  /**
+   * Regras do próprio produto (níveis 1, 2 e 3) que não batem com a última decisão
+   * conferida daquele produto (27/10, auditoria: 14 regras assim em produção - a regra
+   * ficava com uma decisão antiga e a nota seguinte vinha com ela, verde).
+   *
+   * "Última decisão" = o item conferido mais recente (revisado_em) com aquela chave.
+   * Nota cancelada não conta. Padrão fixado vem na lista, marcado: esse não se troca daqui.
+   */
+  async regrasDesencontradas(empresaId: string): Promise<RegraDesencontrada[]> {
+    this.exigirEmpresa(empresaId);
+    const { results: regras } = await this.db
+      .prepare(
+        `SELECT id, nivel, chave, valor, fixada, usos, acertos, erros FROM regras
+          WHERE tenant_id = ? AND empresa_id = ? AND campo = 'cfop' AND ativa = 1 AND nivel IN (1, 2, 3)`,
+      )
+      .bind(this.tenant, empresaId)
+      .all<any>();
+    if (regras.length === 0) return [];
+    const { results: itens } = await this.db
+      .prepare(
+        `SELECT i.n_item, i.c_prod, i.c_ean, i.ncm, i.cfop_original, i.cfop_novo, i.revisado_em,
+                COALESCE(i.x_prod_novo, i.x_prod_original) AS produto,
+                n.id AS nota_id, n.numero, n.emit_cnpj, n.dh_emi
+           FROM itens i JOIN notas n ON n.id = i.nota_id AND n.tenant_id = i.tenant_id
+          WHERE i.tenant_id = ? AND n.empresa_id = ? AND i.revisado = 1 AND n.cancelada_em IS NULL
+            AND TRIM(COALESCE(i.cfop_novo, '')) <> ''`,
+      )
+      .bind(this.tenant, empresaId)
+      .all<any>();
+
+    type Decisao = { valor: string; quando: string; dhEmi: string; nItem: number; notaId: string; numero: string; produto: string; saida: string };
+    const porChave = new Map<string, { ultima: Decisao; contagem: Map<string, number> }>();
+    for (const i of itens) {
+      const item = { cProd: i.c_prod, cEAN: i.c_ean, NCM: i.ncm, CFOP: i.cfop_original } as any;
+      const d: Decisao = {
+        valor: String(i.cfop_novo).trim(), quando: String(i.revisado_em ?? ''), dhEmi: String(i.dh_emi ?? ''),
+        nItem: Number(i.n_item), notaId: i.nota_id, numero: String(i.numero ?? ''), produto: String(i.produto ?? ''),
+        saida: String(i.cfop_original ?? '').trim(),
+      };
+      for (const nivel of [1, 2, 3] as const) {
+        const chave = chaveDoNivel(item, String(i.emit_cnpj ?? ''), nivel, 'cfop');
+        if (!chave) continue;
+        const k = `${nivel}|${chave}`;
+        const atual = porChave.get(k);
+        if (!atual) { porChave.set(k, { ultima: d, contagem: new Map([[d.valor, 1]]) }); continue; }
+        atual.contagem.set(d.valor, (atual.contagem.get(d.valor) ?? 0) + 1);
+        const u = atual.ultima;
+        if (d.quando > u.quando || (d.quando === u.quando && (d.dhEmi > u.dhEmi || (d.dhEmi === u.dhEmi && d.nItem > u.nItem)))) atual.ultima = d;
+      }
+    }
+
+    const fora: RegraDesencontrada[] = [];
+    for (const r of regras) {
+      const dec = porChave.get(`${r.nivel}|${r.chave}`);
+      if (!dec) continue;
+      const valorRegra = String(r.valor ?? '').trim();
+      if (valorRegra === dec.ultima.valor) continue;
+      const total = [...dec.contagem.values()].reduce((a, b) => a + b, 0);
+      fora.push({
+        regraId: r.id, nivel: Number(r.nivel), chave: r.chave, fixada: Number(r.fixada) === 1,
+        valorRegra, decidido: dec.ultima.valor, quando: dec.ultima.quando,
+        notaId: dec.ultima.notaId, numero: dec.ultima.numero, nItem: dec.ultima.nItem,
+        produto: dec.ultima.produto, saida: dec.ultima.saida,
+        decisoes: total, outrasDecisoes: total - (dec.contagem.get(dec.ultima.valor) ?? 0),
+        usos: Number(r.usos ?? 0),
+      });
+    }
+    return fora.sort((a, b) => a.produto.localeCompare(b.produto) || a.nivel - b.nivel);
+  }
+
+  /**
+   * Põe na regra a última decisão conferida. Só regra NÃO fixada, e só se ainda estiver
+   * desencontrada com o mesmo valor que a pessoa viu na tela. O histórico zera: os
+   * acertos eram de outro valor. Nada é apagado; cada troca fica na trilha.
+   */
+  async corrigirRegrasDesencontradas(
+    empresaId: string,
+    pedidas: { regraId: string; valor: string }[],
+  ): Promise<{ corrigidas: number; puladas: { regraId: string; motivo: string }[] }> {
+    const atuais = new Map((await this.regrasDesencontradas(empresaId)).map((r) => [r.regraId, r]));
+    const quando = agora();
+    const puladas: { regraId: string; motivo: string }[] = [];
+    const stmts: D1PreparedStatement[] = [];
+    const eventos: EventoAuditoria[] = [];
+    for (const p of pedidas) {
+      const r = atuais.get(p.regraId);
+      if (!r) { puladas.push({ regraId: p.regraId, motivo: 'já está igual à última decisão (ou não existe mais)' }); continue; }
+      if (r.fixada) { puladas.push({ regraId: p.regraId, motivo: 'padrão fixado: troque pelo ☆ na nota' }); continue; }
+      if (r.decidido !== p.valor.trim()) { puladas.push({ regraId: p.regraId, motivo: `a última decisão agora é ${r.decidido}` }); continue; }
+      stmts.push(this.db
+        .prepare(
+          `UPDATE regras SET valor = ?, usos = 0, acertos = 0, erros = 0, erros_seguidos = 0, suspeita = 0,
+                  confianca = 0.5, atualizada_em = ?
+            WHERE tenant_id = ? AND empresa_id = ? AND id = ? AND fixada = 0 AND TRIM(COALESCE(valor, '')) = ?`,
+        )
+        .bind(r.decidido, quando, this.tenant, empresaId, r.regraId, r.valorRegra));
+      eventos.push(this.evento({
+        acao: 'alterar', entidade: 'regra', entidadeId: r.regraId, campo: 'valor',
+        valorAntes: r.valorRegra, valorDepois: r.decidido,
+        origem: `conferencia:nota ${r.numero} item ${r.nItem}`,
+      }));
+    }
+    let corrigidas = 0;
+    if (stmts.length) {
+      const res = await this.db.batch(stmts);
+      // Trilha só do que mudou de fato (outra pessoa pode ter mexido no meio).
+      const feitos = eventos.filter((_, k) => Number(res[k]?.meta?.changes ?? 0) > 0);
+      corrigidas = feitos.length;
+      if (feitos.length) await this.aud.registrarLote(feitos);
+    }
+    return { corrigidas, puladas };
   }
 
   // ---------------------------------------------------------------- itens
@@ -783,11 +915,14 @@ export class Repo {
       return id0
         ? this.db
             .prepare(
-              `UPDATE regras SET valor = ?, fixada = 1, fixada_por = ?, fixada_em = ?,
+              `UPDATE regras SET
+                 usos = CASE WHEN valor <> ? THEN 0 ELSE usos END, acertos = CASE WHEN valor <> ? THEN 0 ELSE acertos END,
+                 erros = CASE WHEN valor <> ? THEN 0 ELSE erros END, confianca = CASE WHEN valor <> ? THEN 0.5 ELSE confianca END,
+                 valor = ?, fixada = 1, fixada_por = ?, fixada_em = ?,
                  atualizada_em = ?, suspeita = 0, erros_seguidos = 0
                WHERE tenant_id = ? AND id = ?`,
             )
-            .bind(a.valor, quem, quando, quando, this.tenant, id0)
+            .bind(a.valor, a.valor, a.valor, a.valor, a.valor, quem, quando, quando, this.tenant, id0)
         : this.db
             .prepare(
               `INSERT INTO regras
@@ -1361,8 +1496,8 @@ export class Repo {
   async fixarPadraoDeItens(
     notaId: string,
     itemIds: string[],
-  ): Promise<{ fixados: number; semCfop: number }> {
-    if (itemIds.length === 0) return { fixados: 0, semCfop: 0 };
+  ): Promise<{ fixados: number; semCfop: number; naoDecididos: number }> {
+    if (itemIds.length === 0) return { fixados: 0, semCfop: 0, naoDecididos: 0 };
 
     const nota = await this.db
       .prepare('SELECT id, empresa_id, emit_cnpj FROM notas WHERE tenant_id = ? AND id = ?')
@@ -1395,6 +1530,7 @@ export class Repo {
     // de consultas importa mais que o milissegundo" - as outras duas foram o
     // limite de 100 parametros.
     let semCfop = 0;
+    let naoDecididos = 0;
     const acoes: { nivel: Nivel; chave: string; valor: string }[] = [];
 
     for (const l of linhas) {
@@ -1402,6 +1538,10 @@ export class Repo {
       // Fixar vazio nao fixa nada, e gravaria uma regra que manda preencher com
       // nada - pior que nao ter regra.
       if (!cfop) { semCfop += 1; continue; }
+      // So vira padrao o que alguem decidiu: linha conferida ou digitada (27/10, auditoria).
+      // Palpite do perfil, CFOP emprestado do NCM ou pelo CFOP que veio, sem ninguem olhar,
+      // nao: padrao fixado nasce verde e nunca e rebaixado.
+      if (Number(l.revisado) !== 1 && !String(l.cfop_origem ?? '').startsWith('manual')) { naoDecididos += 1; continue; }
 
       const item = {
         nItem: l.n_item, cProd: l.c_prod, cEAN: l.c_ean, xProd: l.x_prod_original,
@@ -1418,11 +1558,11 @@ export class Repo {
       }
     }
 
-    if (acoes.length === 0) return { fixados: 0, semCfop };
+    if (acoes.length === 0) return { fixados: 0, semCfop, naoDecididos };
 
     await this.gravarRegrasFixas(empresaId, acoes);
 
-    const fixados = linhas.length - semCfop;
+    const fixados = linhas.length - semCfop - naoDecididos;
 
     await this.aud.registrar(
       this.evento({
@@ -1433,7 +1573,7 @@ export class Repo {
       }),
     );
 
-    return { fixados, semCfop };
+    return { fixados, semCfop, naoDecididos };
   }
 
   /**

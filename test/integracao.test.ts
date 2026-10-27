@@ -2650,7 +2650,13 @@ describe('teste geral de 22/09: o "é sempre assim" aparece na hora, e conferir 
     const n = await json(`/api/notas/${notaId}`);
     await req(`/api/itens/${n.itens[0].id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1556' }], fixar: true }) });
     expect((await json(`/api/notas/${notaId}`)).itens[0].procedencia.fonte).toBe('fixada');
-    const r = await req(`/api/notas/${notaId}/fixar-padrao`, { method: 'POST', body: JSON.stringify({ itens: n.itens.map((i: any) => i.id) }) });
+    // 27/10: palpite que ninguém conferiu não vira padrão.
+    let r = await req(`/api/notas/${notaId}/fixar-padrao`, { method: 'POST', body: JSON.stringify({ itens: n.itens.map((i: any) => i.id) }) });
+    expect(await r.json()).toMatchObject({ fixados: 1, naoDecididos: 2 });
+    expect((await json(`/api/notas/${notaId}`)).itens.map((i: any) => i.procedencia.fonte)).toEqual(['fixada', 'perfil', 'perfil']);
+    // Conferidas, viram.
+    await req(`/api/notas/${notaId}/conferir`, { method: 'POST', body: '{}' });
+    r = await req(`/api/notas/${notaId}/fixar-padrao`, { method: 'POST', body: JSON.stringify({ itens: n.itens.map((i: any) => i.id) }) });
     expect(r.status).toBe(200);
     expect((await json(`/api/notas/${notaId}`)).itens.map((i: any) => i.procedencia.fonte)).toEqual(['fixada', 'fixada', 'fixada']);
   });
@@ -3942,6 +3948,138 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     await corrigir(a1.id, '1101');
     expect((await req(`/api/notas/${nota}/xml-corrigido`)).status).toBe(200);
     expect(((await (await req('/api/pendencias')).json()) as any).empresas).toEqual([]);
+  });
+
+  it('27/10 (auditoria 1): corrigir a linha de produto com padrão fixado avisa qual é o padrão e não troca sozinho', async () => {
+    const abrir = async (n: string) => (await (await req(`/api/notas/${n}`)).json()) as any;
+    const regra1 = () => db.consultar(`SELECT valor, fixada, usos, acertos, erros FROM regras WHERE campo = 'cfop' AND nivel = 1 AND chave LIKE '%|7891#5102'`)[0] as any;
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: comCfop('11', '5102') }]);
+    const a1 = itensDa('11')[0];
+    const fixar = (id: string, cfop: string) =>
+      req(`/api/itens/${id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: cfop }], fixar: true }) });
+    expect((await fixar(a1.id, '1101')).status).toBe(200);
+    expect(regra1()).toMatchObject({ valor: '1101', fixada: 1 });
+    // Nota nova: vem 1101 pelo padrão. Ela põe 1102 só nesta linha.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: comCfop('33', '5102') }]);
+    const b1 = itensDa('33')[0];
+    expect(b1.cfop_novo).toBe('1101');
+    const r = await corrigir(b1.id, '1102');
+    expect(await r.json()).toEqual({ ok: true, padraoFixado: { valor: '1101' } });
+    // O padrão continua 1101, e a nota mostra que a linha difere dele.
+    expect(regra1()).toMatchObject({ valor: '1101', fixada: 1 });
+    const l1 = (await abrir(b1.nota_id)).itens.find((i: any) => i.n_item === 1);
+    expect(l1.cfop_novo).toBe('1102');
+    expect(l1.alertas.map((a: any) => a.codigo)).toContain('difere-do-padrao');
+    // Igual ao padrão: sem pergunta.
+    expect(await (await corrigir(itensDa('33')[1].id, '1102')).json()).toEqual({ ok: true });
+    // Ela escolhe trocar: o padrão passa a 1102, com o histórico zerado (era de outro valor).
+    expect((await fixar(b1.id, '1102')).status).toBe(200);
+    expect(regra1()).toMatchObject({ valor: '1102', fixada: 1, acertos: 0, erros: 0 });
+    expect((await abrir(b1.nota_id)).itens.find((i: any) => i.n_item === 1).alertas.map((a: any) => a.codigo)).not.toContain('difere-do-padrao');
+  });
+
+  it('27/10 (auditoria 2 e 6): regra que muda de valor começa do zero; acerto do valor antigo não conta para o novo', async () => {
+    const regra1 = () => db.consultar(`SELECT valor, usos, acertos, erros, confianca FROM regras WHERE campo = 'cfop' AND nivel = 1 AND chave LIKE '%|7891#5102'`)[0] as any;
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: comCfop('11', '5102') }]);
+    await corrigir(itensDa('11')[0].id, '1101');
+    // Nota 2: vem 1101 pela regra e ela confere: um acerto do 1101.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: comCfop('33', '5102') }]);
+    const b1 = itensDa('33')[0];
+    expect(b1.cfop_novo).toBe('1101');
+    await req(`/api/notas/${b1.nota_id}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [b1.id] }) });
+    expect(regra1().acertos).toBeGreaterThanOrEqual(1);
+    // Nota 3: vem 1101 e ela corrige para 1102. A regra vira 1102 sem herdar os acertos do 1101.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'c.xml', conteudo: comCfop('44', '5102') }]);
+    const c1 = itensDa('44')[0];
+    expect(c1.cfop_novo).toBe('1101');
+    await corrigir(c1.id, '1102');
+    const r = regra1();
+    expect(r.valor).toBe('1102');
+    expect(r.acertos).toBe(0);
+    expect(r.erros).toBe(0);
+    // Conferir uma linha que ainda mostra 1101 com a origem na regra (hoje 1102): é decisão
+    // nova (a regra volta a 1101, a última vale), mas o "acerto" não vai para o 1102.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'd.xml', conteudo: comCfop('55', '5102') }]);
+    const d1 = itensDa('55')[0];
+    expect(d1.cfop_novo).toBe('1102');
+    db.consultar(`UPDATE itens SET cfop_novo = '1101' WHERE id = '${d1.id}'`);
+    await req(`/api/notas/${d1.nota_id}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [d1.id] }) });
+    expect(regra1()).toEqual({ valor: '1101', usos: 0, acertos: 0, erros: 0, confianca: 0.5 });
+  });
+
+  it('27/10 (auditoria 5): conferir com o CFOP que a tela mostrou — se a linha mudou por trás, aquela não é conferida', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: comCfop('11', '5102') }]);
+    const [a1, a2] = itensDa('11');
+    const nota = a1.nota_id;
+    db.consultar(`UPDATE itens SET cfop_novo = '1101', cfop_origem = 'regra:x' WHERE id IN ('${a1.id}', '${a2.id}')`);
+    // A tela mostrava 1102 no item 1 (o valor mudou por trás) e 1101 no item 2.
+    const r = await req(`/api/notas/${nota}/conferir`, {
+      method: 'POST', body: JSON.stringify({ itens: [a1.id, a2.id], esperado: { [a1.id]: '1102', [a2.id]: '1101' } }),
+    });
+    expect(await r.json()).toEqual({ ok: true, conferidos: 1, divergentes: [{ itemId: a1.id, nItem: 1, agora: '1101', esperado: '1102' }] });
+    expect(itensDa('11').map((i: any) => i.revisado)).toEqual([0, 1, 0]);
+    // Sem "esperado", como antes.
+    expect(((await (await req(`/api/notas/${nota}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [a1.id] }) })).json()) as any).divergentes).toEqual([]);
+    expect(itensDa('11')[0].revisado).toBe(1);
+  });
+
+  it('27/10 (auditoria): padrões do produto que não batem com a última conferência — lista, corrige o escolhido e deixa o fixado', async () => {
+    const base = `/api/empresas/${empresaId}/regras/desencontradas`;
+    const listar = async () => (await (await req(base)).json()) as any[];
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: comCfop('11', '5102') }]);
+    const [a1, a2] = itensDa('11');
+    await corrigir(a1.id, '1101');
+    await req(`/api/itens/${a2.id}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1102' }], fixar: true }) });
+    expect(await listar()).toEqual([]);
+    // A regra do produto 1 ficou com uma decisão antiga (1556); a do 2, fixada, com 1403.
+    db.consultar(`UPDATE regras SET valor = '1556', usos = 7, acertos = 5 WHERE campo = 'cfop' AND nivel IN (1, 2, 3) AND chave LIKE '%7891%'`);
+    db.consultar(`UPDATE regras SET valor = '1403' WHERE campo = 'cfop' AND nivel = 1 AND chave LIKE '%|7892#5102'`);
+    const lista = await listar();
+    const do1 = lista.filter((x: any) => x.chave.includes('7891'));
+    expect(do1.length).toBeGreaterThanOrEqual(2); // fornecedor + produto, e o EAN
+    for (const x of do1) expect(x).toMatchObject({ valorRegra: '1556', decidido: '1101', fixada: false, nItem: 1, saida: '5102', outrasDecisoes: 0 });
+    const do2 = lista.find((x: any) => x.chave.endsWith('|7892#5102'));
+    expect(do2).toMatchObject({ valorRegra: '1403', decidido: '1102', fixada: true });
+    // Pedido com valor que não é a última decisão: pula. O fixado: pula.
+    const r = await req(`${base}/corrigir`, {
+      method: 'POST',
+      body: JSON.stringify({ regras: [
+        { regraId: do1[0].regraId, valor: '1101' },
+        ...do1.slice(1).map((x: any) => ({ regraId: x.regraId, valor: '1999' })),
+        { regraId: do2.regraId, valor: '1102' },
+      ] }),
+    });
+    const res = (await r.json()) as any;
+    expect(res.corrigidas).toBe(1);
+    expect(res.puladas.map((p: any) => p.motivo)).toEqual(expect.arrayContaining(['padrão fixado: troque pelo ☆ na nota', 'a última decisão agora é 1101']));
+    const corrigida = db.consultar(`SELECT valor, usos, acertos, fixada FROM regras WHERE id = '${do1[0].regraId}'`)[0] as any;
+    expect(corrigida).toEqual({ valor: '1101', usos: 0, acertos: 0, fixada: 0 });
+    expect(db.consultar(`SELECT valor FROM regras WHERE id = '${do2.regraId}'`)[0]).toEqual({ valor: '1403' });
+    // Fica na trilha, com de onde veio.
+    const trilha = db.consultar(`SELECT valor_antes, valor_depois, origem FROM auditoria WHERE entidade = 'regra' AND entidade_id = '${do1[0].regraId}'`) as any[];
+    expect(trilha).toEqual([{ valor_antes: '1556', valor_depois: '1101', origem: 'conferencia:nota 504711 item 1' }]);
+    // A corrigida sai da lista.
+    expect((await listar()).map((x: any) => x.regraId)).not.toContain(do1[0].regraId);
+    // Nota cancelada não conta como decisão.
+    db.consultar(`UPDATE notas SET cancelada_em = '2026-10-27T00:00:00Z'`);
+    expect(await listar()).toEqual([]);
+  });
+
+  it('27/10 (auditoria): a última decisão é a conferência mais recente, e conta quantas foram diferentes', async () => {
+    const listar = async () => (await (await req(`/api/empresas/${empresaId}/regras/desencontradas`)).json()) as any[];
+    await importarArquivos(repo, r2 as any, empresaId, [
+      { nome: 'a.xml', conteudo: comCfop('11', '5102') },
+      { nome: 'b.xml', conteudo: comCfop('33', '5102') },
+    ]);
+    await corrigir(itensDa('11')[0].id, '1101');
+    await corrigir(itensDa('33')[0].id, '1102');
+    // A regra seguiu a última (1102): nada desencontrado.
+    expect((await listar()).filter((x: any) => x.chave.includes('7891'))).toEqual([]);
+    // Se a de 33 tivesse sido conferida ANTES da de 11, a última seria 1101.
+    db.consultar(`UPDATE itens SET revisado_em = '2026-01-01T00:00:00.000Z' WHERE id = '${itensDa('33')[0].id}'`);
+    const l = (await listar()).filter((x: any) => x.chave.includes('7891'));
+    expect(l.length).toBeGreaterThan(0);
+    for (const x of l) expect(x).toMatchObject({ valorRegra: '1102', decidido: '1101', decisoes: 2, outrasDecisoes: 1 });
   });
 
   it('15/10 (auditoria): produtos de um CFOP sem abrir nota, e o mesmo produto decidido com CFOPs diferentes', async () => {
