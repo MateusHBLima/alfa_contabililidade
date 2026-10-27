@@ -1,7 +1,7 @@
 import { parseNFe, lerEventoNFe, hashXml } from './parser';
 import { ErroParserNFe } from './tipos';
 import type { Repo } from '../db/repo';
-import { chavesParaBuscar, regrasDoItem, sugerir, CFOP_PELA_SAIDA, type ContextoNota, type PerfilEmpresa } from '../rules/engine';
+import { chavesParaBuscar, regrasDoItem, sugerir, CFOP_PELA_SAIDA, ORIGEM_NCM_DIVIDIDO, type ContextoNota, type PerfilEmpresa } from '../rules/engine';
 import { TODOS_CAMPOS, type Campo } from '../rules/campos';
 
 /**
@@ -279,6 +279,8 @@ async function importarUma(
     perfil: (empresa.perfil ?? 'revenda') as PerfilEmpresa,
     ufEmitente: nota.emit.uf,
     ufDestinatario: empresa.uf ?? nota.dest.uf,
+    // 27/10: NCM já conferido com CFOPs diferentes não empresta CFOP (ver `sugerir`).
+    ncmDividido: await repo.ncmDivididos(empresa.id, candidatas),
   };
 
   let preenchidos = 0;
@@ -441,7 +443,10 @@ export async function atualizarPalpitesDaNota(repo: Repo, nota: any, itens: any[
     perfil: (empresa.perfil ?? 'revenda') as PerfilEmpresa,
     ufEmitente: nota.emit_uf ?? null,
     ufDestinatario: empresa.uf ?? null,
+    ncmDividido: await repo.ncmDivididos(empresa.id, candidatas),
   };
+  // A regra que preencheu o campo (origem `regra:<id>`), se está entre as candidatas.
+  const regraDaOrigem = (origem: unknown) => candidatas.find((r) => `regra:${r.id}` === String(origem ?? ''));
 
   const comandos: D1PreparedStatement[] = [];
   for (const i of pendentes) {
@@ -462,7 +467,14 @@ export async function atualizarPalpitesDaNota(repo: Repo, nota: any, itens: any[
       // Só troca quando agora há uma regra aprendida; palpite por palpite, fica como está -
       // menos o CFOP que veio (26/10: regra fixa), que vale sobre perfil e regra aprendida.
       const pelaSaida = campo === 'cfop' && s.origem === 'saida';
-      if (!s.regraId && !pelaSaida) continue;
+      // 27/10: NCM dividido. O CFOP emprestado de outro produto pelo NCM (níveis 4 e 6)
+      // sai da linha não conferida, que fica vazia para ela escolher. Só o emprestado:
+      // palpite do perfil continua como está.
+      const atual = regraDaOrigem(i[col.origem]);
+      const tirarEmprestado = campo === 'cfop' && s.origem.startsWith(ORIGEM_NCM_DIVIDIDO)
+        && ((!!atual && (atual.nivel === 4 || atual.nivel === 6) && !atual.fixada)
+          || String(i[col.origem] ?? '').startsWith(ORIGEM_NCM_DIVIDIDO));
+      if (!s.regraId && !pelaSaida && !tirarEmprestado) continue;
       const valor = campo === 'cfop' || campo === 'descricao' ? s.valor : vazioParaNulo(s.valor);
       if ((i[col.valor] ?? null) === valor && i[col.origem] === s.origem) {
         // Mesmo valor, mas importado quando ainda era palpite (confiança baixa): só sobe a confiança.

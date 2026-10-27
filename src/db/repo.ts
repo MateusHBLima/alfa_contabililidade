@@ -347,6 +347,57 @@ export class Repo {
   }
 
   /**
+   * NCM dividido (27/10, açúcar da Italiana Garden Gastronomia): das regras de CFOP por
+   * NCM entre as candidatas (níveis 4 e 6), as que têm o NCM já CONFERIDO com CFOPs
+   * diferentes nesta empresa - no mesmo CFOP que veio (e, no nível 4, do mesmo
+   * fornecedor). Ali o NCM não diz qual é o deste produto: sachê de açúcar é 1556, o
+   * açúcar de 5 kg é 1101, e os dois são 17019900. Chave `${nivel} ${chave}`, valor =
+   * os CFOPs que já entraram. Uma consulta por nota (fatias de 90 NCMs).
+   */
+  async ncmDivididos(empresaId: string, candidatas: Regra[]): Promise<Map<string, string[]>> {
+    const porNcm = candidatas
+      .filter((r) => r.campo === 'cfop' && (r.nivel === 4 || r.nivel === 6))
+      .map((r) => ({ r, p: partesDaChave(r.nivel, r.chave) }))
+      .filter((x) => x.p?.ncm);
+    const saida = new Map<string, string[]>();
+    if (porNcm.length === 0) return saida;
+    const ncms = [...new Set(porNcm.map((x) => x.p!.ncm!))];
+    // cnpj|ncm#saida -> CFOPs conferidos; e ncm#saida (qualquer fornecedor).
+    const doFornecedor = new Map<string, Set<string>>();
+    const deQualquer = new Map<string, Set<string>>();
+    const juntar = (m: Map<string, Set<string>>, k: string, v: string) => {
+      const s = m.get(k) ?? new Set<string>();
+      s.add(v);
+      m.set(k, s);
+    };
+    for (let i = 0; i < ncms.length; i += 90) {
+      const fatia = ncms.slice(i, i + 90);
+      const { results } = await this.db
+        .prepare(
+          `SELECT n.emit_cnpj AS cnpj, TRIM(i.ncm) AS ncm, TRIM(COALESCE(i.cfop_original, '')) AS saida,
+                  TRIM(i.cfop_novo) AS cfop
+             FROM itens i JOIN notas n ON n.id = i.nota_id
+            WHERE n.tenant_id = ? AND n.empresa_id = ? AND i.revisado = 1 AND n.cancelada_em IS NULL
+              AND TRIM(COALESCE(i.cfop_novo, '')) <> '' AND TRIM(i.ncm) IN (${fatia.map(() => '?').join(',')})
+            GROUP BY 1, 2, 3, 4`,
+        )
+        .bind(this.tenant, empresaId, ...fatia)
+        .all<any>();
+      for (const l of results) {
+        const cnpj = String(l.cnpj ?? '').replace(/\D/g, '');
+        const sai = String(l.saida ?? '') || '?';
+        juntar(doFornecedor, `${cnpj}|${l.ncm}#${sai}`, String(l.cfop));
+        juntar(deQualquer, `${l.ncm}#${sai}`, String(l.cfop));
+      }
+    }
+    for (const { r } of porNcm) {
+      const cfops = (r.nivel === 4 ? doFornecedor : deQualquer).get(r.chave);
+      if (cfops && cfops.size > 1) saida.set(`${r.nivel} ${r.chave}`, [...cfops].sort());
+    }
+    return saida;
+  }
+
+  /**
    * O que o "Conferido" ensina (pedido de 22/09, teste geral). Conferir e concordar
    * com o CFOP que esta na linha - e concordar tambem e decisao. Antes o sistema so
    * aprendia do que era digitado: um palpite do perfil que ela conferia voltava como
@@ -663,8 +714,16 @@ export class Repo {
       );
     }
 
-    sets.push('revisado = 1', 'revisado_por = ?', 'revisado_em = ?');
-    valores.push(this.ctx.sessao.usuarioId, agora(), this.tenant, itemId);
+    // Linha sem CFOP de entrada não está conferida (27/10, auditoria): apagar o CFOP
+    // (ou ficar sem ele no NCM dividido) deixa a linha pendente, nunca "tratada".
+    const cfopFica = mudancas.find((m) => m.campo === 'cfop')?.valor ?? atual.cfop_novo;
+    if (String(cfopFica ?? '').trim() === '') {
+      sets.push('revisado = 0', 'revisado_por = NULL', 'revisado_em = NULL');
+      valores.push(this.tenant, itemId);
+    } else {
+      sets.push('revisado = 1', 'revisado_por = ?', 'revisado_em = ?');
+      valores.push(this.ctx.sessao.usuarioId, agora(), this.tenant, itemId);
+    }
 
     await this.db
       .prepare(`UPDATE itens SET ${sets.join(', ')} WHERE tenant_id = ? AND id = ?`)
@@ -1506,8 +1565,10 @@ export class Repo {
       const marcas = fatia.map(() => '?').join(',');
       const r = await this.db
         .prepare(
+          // Sem CFOP de entrada não se confere (27/10, auditoria): a linha continua pendente.
           `UPDATE itens SET revisado = 1, revisado_por = ?, revisado_em = ?
-            WHERE tenant_id = ? AND nota_id = ? AND revisado = 0 AND id IN (${marcas})`,
+            WHERE tenant_id = ? AND nota_id = ? AND revisado = 0 AND TRIM(COALESCE(cfop_novo, '')) <> ''
+              AND id IN (${marcas})`,
         )
         .bind(this.ctx.sessao.usuarioId, quando, this.tenant, notaId, ...fatia)
         .run();
@@ -2006,7 +2067,8 @@ export class Repo {
       .prepare(
         `SELECT p.empresa_id, e.razao_social, COUNT(*) AS notas, SUM(p.total - p.rev) AS itens, MIN(p.dh_emi) AS mais_antiga
            FROM (SELECT n.id, n.empresa_id, n.dh_emi, COUNT(i.id) AS total,
-                        COALESCE(SUM(CASE WHEN i.revisado = 1 THEN 1 ELSE 0 END), 0) AS rev
+                        -- linha sem CFOP de entrada conta como pendente, mesmo conferida (27/10)
+                        COALESCE(SUM(CASE WHEN i.revisado = 1 AND TRIM(COALESCE(i.cfop_novo, '')) <> '' THEN 1 ELSE 0 END), 0) AS rev
                    FROM notas n LEFT JOIN itens i ON i.nota_id = n.id
                   WHERE n.tenant_id = ? AND n.cancelada_em IS NULL AND COALESCE(n.estorno, 0) <> 1
                   GROUP BY n.id) p
