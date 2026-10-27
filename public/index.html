@@ -827,6 +827,19 @@
         <h1>Padrões aprendidos <span class="escopo-empresa" id="escopo-regras"></span></h1>
         <p class="page-desc">O que o sistema já sabe sobre esta empresa. Padrão fixado pela contabilidade
           não é rebaixado sozinho; padrão aprendido cai depois de três correções seguidas.</p>
+        <!-- 27/10 (auditoria): padrão do produto diferente do que vocês decidiram por último. -->
+        <div class="card hidden" id="card-desencontradas">
+          <header><h2>Padrões que não batem com a última conferência</h2></header>
+          <div class="body">
+            <p class="page-desc" id="desenc-resumo"></p>
+            <div class="scroll"><table id="tbl-desencontradas">
+              <thead><tr><th><input type="checkbox" id="desenc-todas" aria-label="Marcar todos"></th>
+                <th>Produto</th><th>Padrão hoje</th><th>Última conferência</th><th>Onde</th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+            <p style="margin-top:10px"><button type="button" class="btn primary" id="btn-corrigir-desenc">Usar a última conferência nos marcados</button></p>
+          </div>
+        </div>
         <div class="card">
           <header><h2>Regras</h2>
             <div style="margin-left:auto" class="filters" id="filtro-regras">

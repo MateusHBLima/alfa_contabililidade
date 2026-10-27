@@ -85,10 +85,12 @@ describe('a nota no tamanho máximo que a NF-e admite', () => {
     const ids = db.consultar('SELECT id FROM itens WHERE nota_id = ?', notaId).map((i: any) => i.id);
     expect(ids).toHaveLength(990);
 
+    // Só vira padrão o que alguém decidiu (27/10): sem conferir, nada é fixado.
+    expect((await repo.fixarPadraoDeItens(notaId, ids)).fixados).toBe(0);
+    expect(await repo.conferirItens(notaId, ids)).toBe(990);
     const r = await repo.fixarPadraoDeItens(notaId, ids);
     expect(r.fixados).toBe(990);
     expect(r.semCfop).toBe(0);
-    expect(await repo.conferirItens(notaId, ids)).toBe(990);
   }, 60000);
 
   it('e faz isso sem estourar o banco de idas e voltas', async () => {
@@ -102,6 +104,7 @@ describe('a nota no tamanho máximo que a NF-e admite', () => {
     const notaId = db.consultar('SELECT id FROM notas')[0].id;
     const ids = db.consultar('SELECT id FROM itens WHERE nota_id = ?', notaId).map((i: any) => i.id);
 
+    await repo.conferirItens(notaId, ids);
     const c = contarIdas();
     await repo.fixarPadraoDeItens(notaId, ids);
     const idas = c.ler();
@@ -151,6 +154,7 @@ describe('a nota no tamanho máximo que a NF-e admite', () => {
     const notaId = db.consultar('SELECT id FROM notas')[0].id;
     const ids = db.consultar('SELECT id FROM itens WHERE nota_id = ?', notaId).map((i: any) => i.id);
 
+    await repo.conferirItens(notaId, ids);
     const r = await repo.fixarPadraoDeItens(notaId, ids);
     expect(r.fixados).toBe(120);
 
@@ -172,6 +176,7 @@ describe('a nota no tamanho máximo que a NF-e admite', () => {
 
     await db.prepare('UPDATE itens SET cfop_novo = NULL WHERE id IN (?,?)')
       .bind(ids[0], ids[1]).run();
+    await repo.conferirItens(notaId, ids);
 
     const r = await repo.fixarPadraoDeItens(notaId, ids);
     expect(r.semCfop).toBe(2);

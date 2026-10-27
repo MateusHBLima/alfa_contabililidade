@@ -59,8 +59,8 @@ describe('catálogo de permissões x rotas', () => {
 
   /** Ainda sem rota, de propósito e com data para resolver. */
   const PENDENTES = new Set([
-    // Precisam de endpoint novo: hoje as regras só podem ser lidas.
-    'regras.aprovar',
+    // Precisa de endpoint novo. `regras.aprovar` saiu daqui em 27/10: corrigir os padrões
+    // que não batem com a última conferência.
     'regras.apagar',
     // Desativar cliente ainda não tem rota própria (só apagar, que é outra coisa).
     'empresas.desativar',
@@ -263,21 +263,21 @@ describe('tela: salvar o padrão de todos de uma vez', () => {
     // A versão óbvia seria um PATCH por item. Numa nota de 990 isso é minutos,
     // e uma falha no meio deixa metade feito sem ninguém saber.
     const i = APP.indexOf("$('#btn-fixar-visiveis')");
-    const fn = APP.slice(i, i + 1600);
+    const fn = APP.slice(i, i + 3000);
     expect(fn).toContain('/fixar-padrao');
     expect(fn, 'não pode haver laço de requisições aqui').not.toMatch(/for\s*\([^)]*\)\s*\{[^}]*await api/);
   });
 
   it('avisa quantos, e que nenhum valor muda', () => {
     const i = APP.indexOf("$('#btn-fixar-visiveis')");
-    const fn = APP.slice(i, i + 1600);
+    const fn = APP.slice(i, i + 3000);
     expect(fn).toContain('await confirmar(');
     expect(fn).toMatch(/nenhum valor é alterado/);
   });
 
   it('não some em silêncio quando não há o que salvar', () => {
     const i = APP.indexOf("$('#btn-fixar-visiveis')");
-    const fn = APP.slice(i, i + 1600);
+    const fn = APP.slice(i, i + 3000);
     expect(fn).toMatch(/Não há item para salvar/);
   });
 });
@@ -672,5 +672,38 @@ describe('tela: ação na linha espera o que está sendo gravado', () => {
 
   it('o "é sempre assim" usa o valor que está no campo', () => {
     expect(corpoDe('async function fixarProduto(')).toContain('input.cfop[data-item=');
+  });
+});
+
+/** 27/10, auditoria (pacote 2): o que a tela manda junto para não decidir pelo que ela não viu. */
+describe('tela: auditoria 27/10 — padrão fixado, CFOP visto ao conferir, fixar só o conferido', () => {
+  const corpoDe = (inicio: string, n = 1600) => {
+    const i = APP.indexOf(inicio);
+    expect(i, inicio).toBeGreaterThan(-1);
+    return APP.slice(i, i + n);
+  };
+  it('corrigir a linha de produto com padrão fixado pergunta se troca o padrão (nota e lista)', () => {
+    expect(corpoDe('async function salvarCampo(')).toContain('perguntarTrocaDoPadrao(itemId, r, valor)');
+    expect(corpoDe("const el = ev.target.closest?.('[data-mini-cfop]')")).toContain('perguntarTrocaDoPadrao(');
+    const f = corpoDe('async function perguntarTrocaDoPadrao(');
+    expect(f).toContain('padraoFixado');
+    expect(f).toContain("cancelar: 'Só nesta nota'");
+    expect(f).toContain('fixar: true');
+  });
+  it('conferir manda o CFOP que a tela mostrou e avisa o que não foi conferido', () => {
+    for (const inicio of ['async function conferirUm(', 'async function conferirItens(', 'async function conferirNotaPronta(']) {
+      expect(corpoDe(inicio), inicio).toMatch(/esperado/);
+      expect(corpoDe(inicio), inicio).toMatch(/avisarDivergentes|divergentes/);
+    }
+  });
+  it('"salvar o padrão de todos" deixa de fora o que ninguém conferiu', () => {
+    const c = corpoDe("$('#btn-fixar-visiveis').addEventListener('click'");
+    expect(c).toContain("startsWith('manual')");
+    expect(c).toContain('naoDecididos');
+  });
+  it('a tela de padrões mostra os que não batem com a última conferência', () => {
+    expect(APP).toContain('/regras/desencontradas');
+    expect(APP).toContain('/regras/desencontradas/corrigir');
+    expect(corpoDe('async function carregarRegras(', 200)).toContain('carregarDesencontradas()');
   });
 });

@@ -144,12 +144,21 @@ describe('regra fixada pela contabilidade', () => {
     expect(classificarConfianca(r)).toBe('alta');
   });
 
-  it('ganha de qualquer outra, mesmo mais específica', () => {
+  it('padrão do fornecedor fixado NÃO passa por cima do que ela decidiu no próprio produto (27/10, auditoria)', () => {
     const candidatas = [
       regra({ id: 'prod', nivel: 1, chave: `${CNPJ}|7891`, campo: 'cfop', valor: '1102', acertos: 9, confianca: 0.95 }),
       regra({ id: 'fixa', nivel: 5, chave: CNPJ, campo: 'cfop', valor: '1403', fixada: true }),
     ];
-    expect(escolherRegra(candidatas, 'cfop')!.id).toBe('fixa');
+    expect(escolherRegra(candidatas, 'cfop')!.id).toBe('prod');
+  });
+
+  it('ganha das regras que não são do próprio produto (NCM), e entre as do produto a fixada ganha', () => {
+    const ncm = regra({ id: 'ncm', nivel: 4, chave: `${CNPJ}|18069000`, campo: 'cfop', valor: '1102', acertos: 9, confianca: 0.95 });
+    const forn = regra({ id: 'fixa', nivel: 5, chave: CNPJ, campo: 'cfop', valor: '1403', fixada: true });
+    expect(escolherRegra([ncm, forn], 'cfop')!.id).toBe('fixa');
+    const ean = regra({ id: 'ean', nivel: 2, chave: `${CNPJ}|789`, campo: 'cfop', valor: '1556', fixada: true });
+    const cod = regra({ id: 'cod', nivel: 1, chave: `${CNPJ}|7891`, campo: 'cfop', valor: '1102', acertos: 9, confianca: 0.95 });
+    expect(escolherRegra([cod, ean, forn], 'cfop')!.id).toBe('ean');
   });
 
   it('não é rebaixada sozinha por divergência', () => {

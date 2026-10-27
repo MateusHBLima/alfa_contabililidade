@@ -260,12 +260,23 @@ export function recalcularConfianca(regra: Pick<Regra, 'acertos' | 'erros'>): nu
 
 const LIMITE_ERROS_SEGUIDOS = 3;
 
+/**
+ * Regra do PRÓPRIO produto (níveis 1, 2 e 3) vem antes de qualquer outra, fixada ou não
+ * (27/10, auditoria). Antes a fixada ganhava de tudo: com o padrão do FORNECEDOR fixado
+ * em 1102 (nível 5), ela corrigia o detergente para 1556, a próxima nota voltava 1102
+ * "padrão seu", e conferir apagava a correção. O padrão do fornecedor vale para o que
+ * ela ainda não decidiu produto a produto - não por cima do que ela decidiu.
+ */
+const doProprioProduto = (r: Regra) => r.nivel <= 3;
+
 export function escolherRegra(candidatas: Regra[], campo: Campo): Regra | null {
   const validas = candidatas.filter((r) => r.campo === campo && r.ativa && !r.suspeita);
   if (validas.length === 0) return null;
-  // regra fixada ganha de tudo; depois nivel menor (mais especifico); depois confianca.
+  // do próprio produto primeiro; dentro de cada grupo, fixada ganha; depois nivel menor
+  // (mais especifico); depois confianca.
   validas.sort(
     (a, b) =>
+      Number(doProprioProduto(b)) - Number(doProprioProduto(a)) ||
       Number(b.fixada ?? false) - Number(a.fixada ?? false) ||
       a.nivel - b.nivel ||
       b.confianca - a.confianca ||
