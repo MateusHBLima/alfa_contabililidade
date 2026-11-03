@@ -233,7 +233,7 @@ describe('tela: o botão de fixar padrão do produto', () => {
   });
 
   it('não aparece sem CFOP preenchido, nem no que já é padrão fixado', () => {
-    const fn = APP.slice(APP.indexOf('function podeFixar'), APP.indexOf('function podeFixar') + 300);
+    const fn = APP.slice(APP.indexOf('function podeFixar'), APP.indexOf('function podeFixar') + 700);
     expect(fn).toContain('cfop_novo');
     expect(fn).toContain("'fixada'");
   });
@@ -705,5 +705,15 @@ describe('tela: auditoria 27/10 — padrão fixado, CFOP visto ao conferir, fixa
     expect(APP).toContain('/regras/desencontradas');
     expect(APP).toContain('/regras/desencontradas/corrigir');
     expect(corpoDe('async function carregarRegras(', 200)).toContain('carregarDesencontradas()');
+  });
+});
+
+/** 30/10, Taís: "só não troca o que vier no 5949 e 5910". O "é sempre assim" não aparece nessas linhas. */
+describe('tela: 5910/5949 não oferece "é sempre assim"', () => {
+  it('podeFixar recusa a linha que veio 5910, 6910, 5949 ou 6949', () => {
+    const i = APP.indexOf('function podeFixar(');
+    const corpo = APP.slice(i, i + 700);
+    expect(corpo).toContain('CFOP_QUE_VEIO_DECIDE.has(');
+    expect(APP).toContain("const CFOP_QUE_VEIO_DECIDE = new Set(['5910', '6910', '5949', '6949']);");
   });
 });

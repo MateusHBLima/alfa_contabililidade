@@ -2183,6 +2183,8 @@ function linhaItem(i) {
   </tr>`;
 }
 
+const CFOP_QUE_VEIO_DECIDE = new Set(['5910', '6910', '5949', '6949']);
+
 /**
  * Quando oferecer o "é sempre assim".
  *
@@ -2199,6 +2201,9 @@ function linhaItem(i) {
 function podeFixar(i) {
   if (!pode('regras.fixar')) return false;
   if (!String(i.cfop_novo ?? '').trim()) return false;
+  // 30/10 (Taís): o que vem 5910, 6910, 5949 ou 6949 "nunca troca" - o CFOP que veio decide
+  // (1910, 2910, 1949, 2949). Padrão do produto nessas linhas não teria efeito nenhum.
+  if (CFOP_QUE_VEIO_DECIDE.has(String(i.cfop_original ?? '').trim())) return false;
   return i.procedencia?.fonte !== 'fixada';
 }
 
