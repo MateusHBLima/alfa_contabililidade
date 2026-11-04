@@ -53,6 +53,19 @@ describe('02/10: conferência com o Questor — leitura do PDF', () => {
     ]);
   });
 
+  it('04/11: lê produto com espaço no código (PA 00019), e a soma fecha', () => {
+    const r = lerTextoQuestor([
+      ...cabecalho,
+      '10 0804.40.00 ABACATE KG 4,41 31,72 0,00 0,00 0,00 0,00',
+      'PA 00019 1905.90.90 Fatia - Torta Opera 30,00 540,00 540,00 64,80 0,00 0,00',
+      'Total de Entradas do Período de 01/07/2026 a 31/07/2026 34,41 571,72 540,00 64,80 0,00 0,00',
+    ]);
+    expect(r.linhas).toEqual([
+      { codigo: '10', ncm: '08044000', descricao: 'ABACATE KG', quantidade: 4.41, valor: 31.72 },
+      { codigo: 'PA 00019', ncm: '19059090', descricao: 'Fatia - Torta Opera', quantidade: 30, valor: 540 },
+    ]);
+  });
+
   it('recusa quando a soma não fecha, quando falta o total e quando não é o relatório certo', () => {
     const corpo = ['1 1806.90.00 CHOC 1,00 85,00 0,00 0,00 0,00 0,00'];
     expect(() => lerTextoQuestor([...cabecalho, ...corpo, 'Total de Entradas do Período 1,00 99,00 0,00 0,00 0,00 0,00']))
