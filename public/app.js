@@ -3352,7 +3352,11 @@ function formularioEmpresa(empresa) {
           segmento: $('#e-segmento').value.trim() || null,
           liberarParaTodos: true,
         }),
-      }).then(async (r) => { await salvarResponsaveis(r.id); });
+      }).then(async (r) => {
+        await salvarResponsaveis(r.id);
+        // 04/11: a busca no SAT já liga no cadastro, daqui para frente.
+        if (r.buscaAutomaticaDesde) avisarSalvo(`Cliente cadastrado · busca no SAT ligada a partir de ${r.buscaAutomaticaDesde.split('-').reverse().join('/')}`);
+      });
     } else {
       // O CNPJ fica de fora de propósito: ele é a identidade do cliente e das
       // notas dele. Trocar o CNPJ é outro cliente, não uma correção.
