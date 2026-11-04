@@ -46,8 +46,11 @@ export type RelatorioQuestor = {
 export type TextoNaPagina = { str: string; x: number; y: number; largura?: number };
 
 const NUMERO = String.raw`-?\d{1,3}(?:\.\d{3})*,\d{2,4}`;
+// 04/11 (Taís, Cucina, outubro): o código do produto pode ter espaço ("PA 00019 1905.90.90
+// Fatia - Torta Opera ..."). Com `\S+` essa linha ficava de fora, a soma não fechava por
+// 540,00 e a conferência inteira era recusada. O código vai até o primeiro NCM.
 const LINHA_PRODUTO = new RegExp(
-  String.raw`^(\S+)\s+(\d{4}\.\d{2}\.\d{2}|\d{8})\s+(.*?)\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s*$`,
+  String.raw`^(\S.*?)\s+(\d{4}\.\d{2}\.\d{2}|\d{8})\s+(.*?)\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s*$`,
 );
 const LINHA_TOTAL = new RegExp(String.raw`^Total de Entradas.*?(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s+(${NUMERO})\s*$`, 'i');
 
