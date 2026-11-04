@@ -1884,7 +1884,23 @@ app.post('/api/empresas', async (c) => {
   }
 
   const id = await c.get('repo').criarEmpresa(corpo);
-  return c.json({ id }, 201);
+
+  // 04/11 (Taís): "eu não queria que buscasse para trás, queria que começasse a buscar no
+  // SAT dali para frente". Empresa nova já entra com a busca automática ligada, a partir
+  // do dia do cadastro, em nome de quem cadastrou. Antes era preciso ligar à mão em
+  // "Buscar na SEF", e as três empresas do fim de semana ficaram sem buscar nada.
+  // Quem não pode importar notas cadastra sem a busca. Se falhar, o cadastro vale assim mesmo.
+  let buscaAutomaticaDesde: string | null = null;
+  if (c.get('sessao').permissoes.has('notas.importar')) {
+    try {
+      const hoje = diaBrasilia(new Date());
+      await c.get('repo').configurarBuscaAutomatica(id, true, hoje);
+      buscaAutomaticaDesde = hoje;
+    } catch (e) {
+      console.error(`busca automática não ligou no cadastro de ${id}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return c.json({ id, buscaAutomaticaDesde }, 201);
 });
 
 app.patch('/api/empresas/:id', async (c) => {
@@ -3526,6 +3542,9 @@ app.delete('/api/empresas/:id', async (c) => {
     c.env.DB.prepare('DELETE FROM produto_atencao WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM apuracao_marcas WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM usuario_empresas WHERE empresa_id = ?').bind(id),
+    // 04/11: captura_empresas aponta para a empresa (chave estrangeira). Sem esta linha,
+    // apagar empresa com a busca no SAT ligada dava erro 500.
+    c.env.DB.prepare('DELETE FROM captura_empresas WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM empresas WHERE tenant_id = ? AND id = ?').bind(s.tenantId, id),
   ]);
 

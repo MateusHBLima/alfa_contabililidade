@@ -5446,6 +5446,19 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
   const automatica = (corpo: unknown) => chamar(`/api/empresas/${empresaId}/sef/automatica`, corpo);
   const rodar = async () => (await import('../src/captura/captura')).executarBuscaAutomatica(amb() as any);
 
+  it('04/11 (Taís): empresa nova já entra com a busca automática ligada, a partir do dia do cadastro', async () => {
+    const r = await chamar('/api/empresas', { cnpj: '04123046000159', razaoSocial: 'EMPRESA NOVA DO FIM DE SEMANA LTDA', perfil: 'revenda' });
+    expect(r.status).toBe(201);
+    const { id, buscaAutomaticaDesde } = (await r.json()) as any;
+    const hoje = new Date(Date.now() - 3 * 3600_000).toISOString().slice(0, 10);
+    expect(buscaAutomaticaDesde).toBe(hoje);
+    const info: any = await (await chamar(`/api/empresas/${id}/sef`)).json();
+    expect(info.automatica).toMatchObject({ ligada: true, desde: hoje, ligadaPor: 'Contadora' });
+    // Fica na trilha como qualquer "Ligar busca automática".
+    expect(db.consultar<any>(`SELECT valor_depois FROM auditoria WHERE entidade = 'captura' AND entidade_id = '${id}'`))
+      .toEqual([{ valor_depois: `ligada desde ${hoje}` }]);
+  });
+
   it('busca automática: baixa quando a SEF libera e importa sozinha só as notas a partir da data, em nome de quem ligou', async () => {
     expect((await automatica({ ligada: true })).status).toBe(400);
     expect((await automatica({ ligada: true, desde: '2026-08-01' })).status).toBe(200);
