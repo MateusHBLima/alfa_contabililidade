@@ -5446,11 +5446,11 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
   const automatica = (corpo: unknown) => chamar(`/api/empresas/${empresaId}/sef/automatica`, corpo);
   const rodar = async () => (await import('../src/captura/captura')).executarBuscaAutomatica(amb() as any);
 
-  it('04/11 (Taís): empresa nova já entra com a busca automática ligada, a partir do dia do cadastro', async () => {
+  it('04/11 (Taís): empresa nova já entra com a busca automática ligada, desde o dia 01 do mês do cadastro (05/11)', async () => {
     const r = await chamar('/api/empresas', { cnpj: '04123046000159', razaoSocial: 'EMPRESA NOVA DO FIM DE SEMANA LTDA', perfil: 'revenda' });
     expect(r.status).toBe(201);
     const { id, buscaAutomaticaDesde } = (await r.json()) as any;
-    const hoje = new Date(Date.now() - 3 * 3600_000).toISOString().slice(0, 10);
+    const hoje = `${new Date(Date.now() - 3 * 3600_000).toISOString().slice(0, 8)}01`;
     expect(buscaAutomaticaDesde).toBe(hoje);
     const info: any = await (await chamar(`/api/empresas/${id}/sef`)).json();
     expect(info.automatica).toMatchObject({ ligada: true, desde: hoje, ligadaPor: 'Contadora' });

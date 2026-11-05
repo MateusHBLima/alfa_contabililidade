@@ -19,6 +19,9 @@ const estado = {
   // O CFOP que a lista das que vieram prontas MOSTROU em cada item (nota -> item -> CFOP).
   // Vai junto no "✓ Conferir": se a linha mudou por trás, aquela não é conferida (27/10).
   miniVistos: new Map(),
+  // Notas "prontas" em que, ao conferir, ficou item com aviso (preço fora do normal, NCM
+  // mudou...): saem das prontas e vão para "precisam de você" (05/11).
+  notasComAviso: new Set(),
   rolagemNotas: null, // { notaId, topo } da nota aberta pela lista: o "← Notas" volta para ela
   reabrindo: null,
   pendenciasNaTela: null,
@@ -742,6 +745,10 @@ async function aplicarCompetencia() {
   // Mes sem ano nao existe como filtro: "setembro" de qual exercicio?
   estado.competencia = ano && mes ? `${ano}-${mes}` : ano || '';
   await carregarNotas();
+  // 05/11: com relatórios, DIFAL ou XML corrigido abertos, a tela acompanha o mês de cima.
+  if (!$('#vRelatorios').classList.contains('hidden')) await abrirRelatorios();
+  if (!$('#vApuracao').classList.contains('hidden')) await abrirApuracao();
+  if (!$('#v3').classList.contains('hidden')) await abrirXmlCorrigido();
 }
 
 const MESES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
@@ -1202,14 +1209,32 @@ function notaTratada(n) {
 }
 function notaVeioPronta(n) {
   if (notaTratada(n)) return false;
+  // Já tentou conferir e ficou item com aviso: não é mais "pronta", é para ela olhar (05/11).
+  if (estado.notasComAviso.has(n.id)) return false;
   const faltam = (n.total_itens ?? 0) - (n.itens_revisados ?? 0);
   return faltam > 0 && Number(n.itens_prontos ?? 0) >= faltam;
 }
 
+/** Por que um item que faltava não entrou no "conferir as prontas": o aviso dele, em poucas palavras. */
+function motivoDeFicar(i) {
+  const aviso = (i.alertas ?? []).find((a) => a.severidade === 'critico' || a.severidade === 'atencao');
+  if (aviso) return aviso.titulo || aviso.codigo;
+  if (i.procedencia?.regraAgora) return `a regra hoje é ${i.procedencia.regraAgora}`;
+  if (!String(i.cfop_novo ?? '').trim()) return 'sem CFOP';
+  if (i.procedencia?.fonte === 'parecido') return 'veio de outro produto (NCM)';
+  if (i.procedencia?.fonte === 'perfil') return 'palpite do perfil';
+  return 'precisa de você';
+}
+
 /**
- * Confere uma nota que veio pronta - só se, aberta, todos os que faltam vieram certos.
- * 27/10: o que ela corrigiu ali mesmo na lista (✎ preenchido por vocês) também entra -
- * foi ela que decidiu. Antes, corrigir obrigava a abrir a nota, e a lista voltava ao começo.
+ * Confere uma nota que veio pronta: os itens que vieram certos (ensinados para o próprio
+ * produto ou padrão fixado, sem aviso) e o que ela corrigiu ali mesmo na lista (27/10).
+ *
+ * 05/11 (Taís, conferir em massa): a lista dizia "veio pronta" (o servidor conta a regra
+ * do produto), mas aberta a nota tinha um item com aviso - preço fora do normal, NCM
+ * mudou - e aí a nota inteira ficava de fora. Na Filomena eram as 3: "0 notas
+ * conferidas", e nada salvo. Agora confere o que veio certo, deixa só o item com aviso
+ * para ela, diz qual é e por quê, e a nota sai das "prontas".
  */
 async function conferirNotaPronta(notaId, emLote = false) {
   await esperarSalvamentos();
@@ -1220,17 +1245,31 @@ async function conferirNotaPronta(notaId, emLote = false) {
   const corrigidos = faltam.filter((i) => !certos.includes(i) && i.procedencia?.fonte === 'manual'
     && String(i.cfop_novo ?? '').trim() !== '' && !(i.alertas ?? []).some((a) => a.severidade === 'critico' || a.bloqueia));
   const conferir = [...certos, ...corrigidos];
-  if (conferir.length < faltam.length) return { ok: false, numero: n.nota.numero };
-  // Com os itens abertos na lista, confere o que ela VIU; se algum mudou por trás, fica de fora.
-  const viu = estado.miniVistos.get(notaId);
-  const esperado = viu ? Object.fromEntries(conferir.filter((i) => i.id in viu).map((i) => [i.id, viu[i.id]])) : undefined;
-  const r = await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: conferir.map((i) => i.id), esperado }) });
-  if (r.divergentes?.length) {
-    if (!emLote) { avisarDivergentes(r.divergentes); await carregarNotas(); }
-    return { ok: false, numero: n.nota.numero, divergentes: r.divergentes };
+  const ficaram = faltam.filter((i) => !conferir.includes(i)).map((i) => ({ nItem: i.n_item, motivo: motivoDeFicar(i) }));
+  let conferidos = 0;
+  let divergentes = [];
+  if (conferir.length) {
+    // Com os itens abertos na lista, confere o que ela VIU; se algum mudou por trás, fica de fora.
+    const viu = estado.miniVistos.get(notaId);
+    const esperado = viu ? Object.fromEntries(conferir.filter((i) => i.id in viu).map((i) => [i.id, viu[i.id]])) : undefined;
+    const r = await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: conferir.map((i) => i.id), esperado }) });
+    conferidos = r.conferidos ?? 0;
+    divergentes = r.divergentes ?? [];
   }
-  if (!emLote) { avisarSalvo(`Nota ${n.nota.numero} conferida`); await carregarNotas(); }
-  return { ok: true, numero: n.nota.numero, itens: conferir.length };
+  if (ficaram.length || divergentes.length) estado.notasComAviso.add(notaId);
+  const numero = n.nota.numero;
+  if (!emLote) {
+    if (divergentes.length) avisarDivergentes(divergentes);
+    else if (conferidos && !ficaram.length) avisarSalvo(`Nota ${numero} conferida`);
+    else if (conferidos) avisarSalvo(`Nota ${numero}: ${conferidos} item(ns) conferido(s)`);
+    await carregarNotas();
+  }
+  return { ok: !ficaram.length && !divergentes.length, numero, itens: conferidos, ficaram, divergentes: divergentes.length ? divergentes : undefined };
+}
+
+/** "NF 1717 (item 2: preço fora do normal)" - o que ficou para ela olhar, nota a nota. */
+function textoDoQueFicou(numero, ficaram) {
+  return `NF ${numero} (${ficaram.map((f) => `item ${f.nItem}: ${f.motivo}`).join('; ')})`;
 }
 
 async function verItensDaNota(notaId, botao, manterAberto = false) {
@@ -1335,7 +1374,10 @@ document.addEventListener('click', async (ev) => {
       const r = await conferirNotaPronta(um.dataset.conferirPronta);
       if (!r.ok && r.naoSalvo) return algumNaoSalvo();
       if (!r.ok && r.divergentes) return;
-      if (!r.ok) { await avisar(`A nota ${r.numero} tem item para olhar (aviso ou algo que não veio pronto). Vou abrir a nota.`); abrirNota(um.dataset.conferirPronta); }
+      if (!r.ok) {
+        await avisar(`${r.itens ? `Conferi ${r.itens} item(ns) da nota ${r.numero}. ` : ''}Ficou para você olhar: ${textoDoQueFicou(r.numero, r.ficaram)}. Vou abrir a nota.`);
+        abrirNota(um.dataset.conferirPronta);
+      }
     } catch (e) { alerta(e.message); } finally { um.disabled = false; }
     return;
   }
@@ -1346,20 +1388,29 @@ document.addEventListener('click', async (ev) => {
       titulo: 'Conferir as notas que vieram prontas',
       ok: `Conferir ${ids.length} nota${ids.length === 1 ? '' : 's'}`,
       corpo: `<p class="dialogo-texto">Todos os itens que faltam nestas ${ids.length} notas vêm do que vocês ensinaram para o próprio produto (ou de padrão fixado).</p>
-        <p class="dialogo-texto sutil">Nota que, aberta, tiver algum aviso fica de fora, para você olhar.</p>`,
+        <p class="dialogo-texto sutil">Item com aviso (preço fora do normal, NCM mudou...) não é conferido: fica para você olhar, e eu digo qual é.</p>`,
     });
     if (!ok) return;
-    let feitas = 0; const ficaram = [];
+    let feitas = 0; let itensEmParte = 0; const ficaram = []; const mudaram = [];
     mostrarEspera(`Conferindo ${ids.length} nota(s)…`);
     try {
       for (const id of ids) {
         const r = await conferirNotaPronta(id, true);
         if (r.naoSalvo) { esconderEspera(); await carregarNotas(); return algumNaoSalvo(); }
-        if (r.ok) feitas += 1; else ficaram.push(r.numero);
+        if (r.ok) { feitas += 1; continue; }
+        itensEmParte += r.itens ?? 0;
+        if (r.ficaram?.length) ficaram.push(textoDoQueFicou(r.numero, r.ficaram));
+        if (r.divergentes?.length) mudaram.push(`NF ${r.numero}`);
       }
     } finally { esconderEspera(); }
     await carregarNotas();
-    avisar(`${feitas} nota${feitas === 1 ? '' : 's'} conferida${feitas === 1 ? '' : 's'}.${ficaram.length ? ` Ficaram para você olhar: ${ficaram.join(', ')}.` : ''}`, 'Vieram prontas');
+    const partes = [];
+    if (feitas) partes.push(`${feitas} nota${feitas === 1 ? '' : 's'} conferida${feitas === 1 ? '' : 's'} inteira${feitas === 1 ? '' : 's'}.`);
+    if (itensEmParte) partes.push(`${feitas ? 'Nas outras, conferi' : 'Conferi'} ${itensEmParte} item(ns) que vieram certos.`);
+    if (!feitas && !itensEmParte) partes.push('Nenhum item foi conferido.');
+    if (ficaram.length) partes.push(`Ficaram para você olhar: ${ficaram.join(' · ')}.`);
+    if (mudaram.length) partes.push(`Mudaram enquanto a tela mostrava, confira de novo: ${mudaram.join(', ')}.`);
+    avisar(partes.join(' '), 'Vieram prontas');
   }
 });
 
@@ -3023,7 +3074,7 @@ async function abrirXmlCorrigido() {
   // Se ha nota aberta no Tratamento, a pagina abre na competencia dela e ja mostra o XML dela.
   const daNota = estado.notaAberta?.nota?.competencia;
   if (daNota && comps.includes(daNota)) xc.competencia = daNota;
-  if (!comps.includes(xc.competencia)) xc.competencia = comps.includes(estado.competencia) ? estado.competencia : (comps[0] ?? '');
+  else xc.competencia = mesDoTopo(comps, xc.competencia, comps[0] ?? '');
   const sel = $('#xc-competencia');
   sel.innerHTML = comps.length
     ? comps.map((c) => `<option value="${c}">${MESES[Number(c.slice(5)) - 1] ?? c.slice(5)} de ${c.slice(0, 4)}</option>`).join('')
@@ -4001,15 +4052,29 @@ function mostrarPeriodoRel() {
   el.innerHTML = t ? `📅 <b>${esc(t)}</b> — os totais abaixo são só desse período.` : '';
 }
 
+/**
+ * O mês que as telas de mês (relatórios, DIFAL, XML corrigido) abrem: o escolhido lá em
+ * cima (05/11, Taís: "se está em outubro, os relatórios têm que estar de outubro"). Antes
+ * a tela guardava o último mês visto e, sem ele, ia para o mês mais recente. Lá em cima só
+ * o ano: o mês da tela, se for daquele ano, senão o mais recente do ano. "Todos": como antes.
+ */
+function mesDoTopo(comps, atual, padrao) {
+  const topo = estado.competencia;
+  if (/^\d{4}-\d{2}$/.test(topo) && comps.includes(topo)) return topo;
+  if (/^\d{4}$/.test(topo)) {
+    const doAno = comps.filter((c) => c.startsWith(`${topo}-`));
+    if (doAno.length) return doAno.includes(atual) ? atual : doAno[0];
+  }
+  return comps.includes(atual) ? atual : padrao;
+}
+
 async function abrirRelatorios() {
   if (!estado.empresaId) return;
   if (estado.competencias.length === 0) await carregarCompetencias();
   const sel = $('#rel-competencia');
   // As opcoes vem do universo inteiro de competencias, nunca de um resultado filtrado.
   const comps = estado.competencias.map((c) => c.competencia);
-  if (!comps.includes(rel.competencia)) {
-    rel.competencia = comps.includes(estado.competencia) ? estado.competencia : (comps[0] ?? '');
-  }
+  rel.competencia = mesDoTopo(comps, rel.competencia, comps[0] ?? '');
   sel.innerHTML = comps.length
     ? comps.map((c) => `<option value="${c}">${MESES[Number(c.slice(5)) - 1] ?? c.slice(5)} de ${c.slice(0, 4)}</option>`).join('')
     : '<option value="">nenhuma nota importada</option>';
@@ -5409,8 +5474,9 @@ function mostrarBuscaAutomatica(a) {
   $('#sef-auto-ligar-btn').classList.toggle('primary', !ligada);
   $('#sef-auto-desligar').classList.toggle('hidden', !ligada);
   const campo = $('#sef-auto-desde');
-  // Padrão: hoje — "a partir de hoje", como a Taís pediu. Ligada: a data que está valendo.
-  campo.value = ligada ? (a.desde || '') : (campo.value || a?.desde || isoLocal(new Date()));
+  // Padrão: dia 01 do mês corrente (05/11, Mateus: "puxar somente a partir do dia 01 daquele
+  // mês"). Ligada: a data que está valendo.
+  campo.value = ligada ? (a.desde || '') : (campo.value || a?.desde || `${isoLocal(new Date()).slice(0, 8)}01`);
 }
 
 /**
@@ -5779,12 +5845,11 @@ async function abrirApuracao() {
   if (!estado.empresaId) return;
   if (!estado.competencias.length) await carregarCompetencias();
   const comps = estado.competencias.map((c) => c.competencia);
-  if (!comps.includes(ap.competencia)) {
-    // O mês que se fecha é o anterior: é ele que vem primeiro, se tiver nota.
-    const h = new Date();
-    const anterior = `${new Date(h.getFullYear(), h.getMonth() - 1, 1).getFullYear()}-${String(new Date(h.getFullYear(), h.getMonth() - 1, 1).getMonth() + 1).padStart(2, '0')}`;
-    ap.competencia = comps.includes(anterior) ? anterior : (comps[0] ?? '');
-  }
+  // O mês que se fecha é o anterior: é ele que vem primeiro, se tiver nota - a não ser que
+  // lá em cima esteja escolhido um mês (05/11): aí vale o de cima.
+  const h = new Date();
+  const anterior = `${new Date(h.getFullYear(), h.getMonth() - 1, 1).getFullYear()}-${String(new Date(h.getFullYear(), h.getMonth() - 1, 1).getMonth() + 1).padStart(2, '0')}`;
+  ap.competencia = mesDoTopo(comps, ap.competencia, comps.includes(anterior) ? anterior : (comps[0] ?? ''));
   $('#ap-competencia').innerHTML = comps.length
     ? comps.map((c) => `<option value="${c}">${MESES[Number(c.slice(5)) - 1] ?? c.slice(5)} de ${c.slice(0, 4)}</option>`).join('')
     : '<option value="">nenhuma nota importada</option>';
@@ -5854,9 +5919,42 @@ function mostrarPdfApuracao(notaId) {
   const fr = $('#ap-iframe');
   $('#ap-pdf-vazio').classList.toggle('hidden', !!notaId);
   fr.classList.toggle('hidden', !notaId);
-  if (notaId) fr.src = `/api/notas/${encodeURIComponent(notaId)}/danfe?imprimir=0`;
-  else fr.removeAttribute('src');
+  $('#ap-zoom').classList.toggle('hidden', !notaId);
+  if (notaId) {
+    const url = `/api/notas/${encodeURIComponent(notaId)}/danfe?imprimir=0`;
+    fr.src = url;
+    $('#ap-zoom-aba').href = url;
+  } else fr.removeAttribute('src');
 }
+
+/*
+ * Zoom na nota do DIFAL (05/11, Taís: "não dá para ver os valores direito"). A nota é uma
+ * página do próprio sistema, então dá para aumentar o texto dela; "Nota maior" dá mais
+ * espaço para ela e menos para a lista. O zoom escolhido vale para as próximas notas.
+ */
+let zoomApuracao = 1;
+try { zoomApuracao = Number(localStorage.getItem('alfa-zoom-difal')) || 1; } catch { zoomApuracao = 1; }
+function aplicarZoomApuracao() {
+  $('#ap-zoom-valor').textContent = `${Math.round(zoomApuracao * 100)}%`;
+  try {
+    const doc = $('#ap-iframe').contentDocument;
+    if (doc?.documentElement) doc.documentElement.style.zoom = String(zoomApuracao);
+  } catch { /* outra origem: sem zoom */ }
+}
+$('#ap-iframe')?.addEventListener('load', aplicarZoomApuracao);
+$('#ap-zoom')?.addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-ap-zoom]');
+  if (!b) return;
+  const acao = b.dataset.apZoom;
+  if (acao === 'larga') {
+    const larga = $('#ap-corpo').classList.toggle('larga');
+    b.textContent = larga ? '⇔ Lista maior' : '⇔ Nota maior';
+    return;
+  }
+  zoomApuracao = Math.min(2.5, Math.max(0.6, Math.round((zoomApuracao + (acao === '+' ? 0.15 : -0.15)) * 100) / 100));
+  try { localStorage.setItem('alfa-zoom-difal', String(zoomApuracao)); } catch { /* sem problema */ }
+  aplicarZoomApuracao();
+});
 
 $('#tbl-apuracao')?.addEventListener('click', async (ev) => {
   const tr = ev.target.closest('tr[data-ap-nota]');

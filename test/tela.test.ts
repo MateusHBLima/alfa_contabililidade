@@ -717,3 +717,35 @@ describe('tela: 5910/5949 não oferece "é sempre assim"', () => {
     expect(APP).toContain("const CFOP_QUE_VEIO_DECIDE = new Set(['5910', '6910', '5949', '6949']);");
   });
 });
+
+/** 05/11, pedidos da Taís depois da visita do Mateus. */
+describe('tela: pedidos de 05/11', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const corpoDe = (inicio: string, n = 2400) => {
+    const i = APP.indexOf(inicio);
+    expect(i, inicio).toBeGreaterThan(-1);
+    return APP.slice(i, i + n);
+  };
+  it('relatórios, DIFAL e XML corrigido abrem no mês escolhido lá em cima', () => {
+    expect(corpoDe('function mesDoTopo(', 600)).toContain('estado.competencia');
+    for (const f of ['async function abrirRelatorios(', 'async function abrirApuracao(', 'async function abrirXmlCorrigido(']) {
+      expect(corpoDe(f, 900), f).toContain('mesDoTopo(');
+    }
+    expect(corpoDe('async function aplicarCompetencia(', 700)).toContain('abrirRelatorios()');
+  });
+  it('a nota do DIFAL tem zoom e "abrir em outra aba"', () => {
+    expect(HTML).toContain('id="ap-zoom"');
+    expect(HTML).toContain('data-ap-zoom="+"');
+    expect(HTML).toContain('id="ap-zoom-aba"');
+    expect(APP).toContain('documentElement.style.zoom');
+  });
+  it('conferir as prontas confere o que veio certo e diz o item que ficou e por quê', () => {
+    const f = corpoDe('async function conferirNotaPronta(', 2600);
+    expect(f).toContain('motivoDeFicar(');
+    expect(f).toContain('notasComAviso.add(');
+    expect(corpoDe('function notaVeioPronta(', 400)).toContain('notasComAviso.has(');
+  });
+  it('o campo da busca automática começa no dia 01 do mês', () => {
+    expect(APP).toContain("`${isoLocal(new Date()).slice(0, 8)}01`");
+  });
+});

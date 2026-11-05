@@ -611,10 +611,18 @@
           <div class="tiny" id="ap-criterio" style="margin:0 14px 6px"></div>
           <div id="ap-aviso" class="placar sutil hidden" style="margin:0 14px 8px"></div>
           <div id="ap-placar" class="questor-placar" style="margin:0 14px 8px"></div>
-          <div class="ap-corpo">
+          <div class="ap-corpo" id="ap-corpo">
             <div class="ap-lista scroll"><table id="tbl-apuracao"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>
             <div class="ap-pdf">
               <div class="ap-pdf-vazio" id="ap-pdf-vazio">Clique numa nota para ver o PDF dela aqui.</div>
+              <!-- 05/11 (Taís): "não dá para ver os valores direito" - zoom na nota. -->
+              <div class="ap-zoom hidden" id="ap-zoom">
+                <button type="button" class="btn sm" data-ap-zoom="-" title="Diminuir">−</button>
+                <span class="tiny" id="ap-zoom-valor">100%</span>
+                <button type="button" class="btn sm" data-ap-zoom="+" title="Aumentar">+</button>
+                <button type="button" class="btn sm sutil" data-ap-zoom="larga" id="ap-zoom-larga" title="A nota ocupa mais espaço na tela; a lista fica mais estreita">⇔ Nota maior</button>
+                <a class="btn sm sutil" id="ap-zoom-aba" target="_blank" rel="noopener" title="Abre a nota inteira numa aba só para ela">↗ Abrir em outra aba</a>
+              </div>
               <iframe id="ap-iframe" class="hidden" title="PDF da nota"></iframe>
             </div>
           </div>
