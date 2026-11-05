@@ -844,6 +844,9 @@ function destinoDepoisDoLogin() {
 
 async function carregarEmpresas() {
   estado.empresas = await api('/api/empresas');
+  // 05/11 (Mateus): apagou a empresa e ela continuava na tabela até dar F5.
+  // Toda recarga da lista redesenha a tabela da tela Empresas.
+  renderEmpresas();
   const sel = $('#sel-empresa');
   if (estado.empresas.length === 0) {
     sel.innerHTML = '<option value="">nenhuma empresa cadastrada</option>';
@@ -3278,8 +3281,9 @@ function apagarEmpresa(id) {
     const digitado = ($('#apagar-cnpj').value || '').replace(/\D/g, '');
     if (digitado !== (e?.cnpj ?? '')) throw new Error('o CNPJ digitado não confere');
     await api(`/api/empresas/${id}?confirmar=${digitado}`, { method: 'DELETE' });
+    avisarSalvo('Cliente apagado');
     await carregarEmpresas();
-    await carregarNotas();
+    atualizarPendencias();
   });
   $('#modal-ok').textContent = 'Apagar';
   $('#modal-ok').classList.add('perigo');
@@ -3426,7 +3430,6 @@ function formularioEmpresa(empresa) {
       avisarSalvo('Cliente atualizado');
     }
     await carregarEmpresas();
-    renderEmpresas();
   });
 
   carregarResponsaveis(empresa?.id ?? null);
