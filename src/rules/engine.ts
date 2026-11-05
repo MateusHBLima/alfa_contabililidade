@@ -82,6 +82,9 @@ const CFOP_POR_PERFIL: Record<PerfilEmpresa, { dentroUF: string; foraUF: string 
   uso_consumo: { dentroUF: '1556', foraUF: '2556' },
 };
 
+/** CFOPs de saída com substituição tributária (ICMS-ST): no uso e consumo viram 1407/2407 (05/11). */
+const CFOP_SAIDA_COM_ST: ReadonlySet<string> = new Set(['5401', '5402', '5403', '5405', '6401', '6402', '6403', '6404']);
+
 /**
  * CFOP de entrada pelo CFOP que veio na nota (22/10; pedido da Taís na reunião de 15/10:
  * "sempre que vir 5910 é 1910, sempre que vir 5949 é 1949, não muda. Como é o mesmo
@@ -385,6 +388,21 @@ export function sugerir(
       contexto.ufDestinatario !== null &&
       contexto.ufEmitente === contexto.ufDestinatario;
     const mapa = CFOP_POR_PERFIL[contexto.perfil];
+    // 05/11 (Taís, rádios): uso e consumo comprado com substituição tributária entra
+    // 1407 (2407 de fora do estado), não 1556. O CFOP que veio diz se é dentro ou fora.
+    const saida = String(item.CFOP ?? '').trim();
+    if (contexto.perfil === 'uso_consumo' && CFOP_SAIDA_COM_ST.has(saida)) {
+      const dentro = saida.startsWith('5');
+      return {
+        valor: dentro ? '1407' : '2407',
+        campo,
+        origem: 'perfil',
+        regraId: null,
+        nivel: 7,
+        confianca: 'media',
+        porque: `perfil "uso_consumo" · veio ${saida} (com ST) · ${dentro ? 'dentro do estado' : 'interestadual'} · confirme`,
+      };
+    }
     return {
       valor: mesmaUF ? mapa.dentroUF : mapa.foraUF,
       campo,
