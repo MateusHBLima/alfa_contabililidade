@@ -1886,16 +1886,18 @@ app.post('/api/empresas', async (c) => {
   const id = await c.get('repo').criarEmpresa(corpo);
 
   // 04/11 (Taís): "eu não queria que buscasse para trás, queria que começasse a buscar no
-  // SAT dali para frente". Empresa nova já entra com a busca automática ligada, a partir
-  // do dia do cadastro, em nome de quem cadastrou. Antes era preciso ligar à mão em
-  // "Buscar na SEF", e as três empresas do fim de semana ficaram sem buscar nada.
-  // Quem não pode importar notas cadastra sem a busca. Se falhar, o cadastro vale assim mesmo.
+  // SAT dali para frente". Empresa nova já entra com a busca automática ligada, em nome
+  // de quem cadastrou. Antes era preciso ligar à mão em "Buscar na SEF", e as três
+  // empresas do fim de semana ficaram sem buscar nada.
+  // 05/11 (Mateus): começa no dia 01 do mês do cadastro (cadastrou em 05/11, busca desde
+  // 01/11), para o mês ficar inteiro. Quem não pode importar notas cadastra sem a busca.
+  // Se falhar, o cadastro vale assim mesmo.
   let buscaAutomaticaDesde: string | null = null;
   if (c.get('sessao').permissoes.has('notas.importar')) {
     try {
-      const hoje = diaBrasilia(new Date());
-      await c.get('repo').configurarBuscaAutomatica(id, true, hoje);
-      buscaAutomaticaDesde = hoje;
+      const inicio = `${diaBrasilia(new Date()).slice(0, 8)}01`;
+      await c.get('repo').configurarBuscaAutomatica(id, true, inicio);
+      buscaAutomaticaDesde = inicio;
     } catch (e) {
       console.error(`busca automática não ligou no cadastro de ${id}: ${e instanceof Error ? e.message : String(e)}`);
     }
