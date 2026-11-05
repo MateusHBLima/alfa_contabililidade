@@ -98,6 +98,16 @@ describe('sugestão de CFOP', () => {
     expect(s.valor).toBe('1556');
   });
 
+  it('05/11 (rádios): uso e consumo com ST (5403, 5405, 6403...) sugere 1407 / 2407; revenda não muda', () => {
+    const uso = { ...contexto, perfil: 'uso_consumo' as const };
+    expect(sugerirCfop({ ...item1, CFOP: '5403' }, [], uso).valor).toBe('1407');
+    expect(sugerirCfop({ ...item1, CFOP: '5405' }, [], uso).valor).toBe('1407');
+    expect(sugerirCfop({ ...item1, CFOP: '6403' }, [], { ...uso, ufEmitente: 'PR' }).valor).toBe('2407');
+    expect(sugerirCfop({ ...item1, CFOP: '5102' }, [], uso).valor).toBe('1556');
+    expect(sugerirCfop({ ...item1, CFOP: '6102' }, [], { ...uso, ufEmitente: 'PR' }).valor).toBe('2556');
+    expect(sugerirCfop({ ...item1, CFOP: '5403' }, [], contexto).valor).toBe('1102');
+  });
+
   it('regra nível 1 já provada vem verde', () => {
     const r = regra({
       id: 'r1', nivel: 1, chave: `${CNPJ}|7891`, campo: 'cfop', valor: '1403',
