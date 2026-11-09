@@ -193,6 +193,8 @@ export type Sessao = {
   empresas: Set<string> | null;
   /** Senha redefinida por um administrador: a sessão só serve para trocá-la. */
   deveTrocarSenha: boolean;
+  /** A sessão deste navegador (09/11): "Sair" encerra só ela. */
+  sessaoId?: string;
 };
 
 /**

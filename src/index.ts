@@ -148,6 +148,7 @@ async function lerSessao(
     permissoes: resolverPermissoes(perms.map((p) => p.permissao), exc),
     empresas: emps.length ? new Set(emps.map((e) => e.empresa_id)) : null,
     deveTrocarSenha: linha.deve_trocar_senha === 1,
+    sessaoId: linha.id,
   };
 }
 
@@ -1481,9 +1482,9 @@ app.put('/api/usuarios/:id', async (c) => {
            VALUES (?,?,?,?,?)`,
         )
         .bind(id, e.permissao, e.concedida ? 1 : 0, agora, s.usuarioId)),
-    // Permissão que muda tem de valer AGORA. Deixar a sessão viva com o poder
-    // antigo faria "tirei o acesso dele" ser mentira por até 12 horas.
-    c.env.DB.prepare('UPDATE sessoes SET revogada = 1 WHERE usuario_id = ?').bind(id),
+    // Permissão que muda vale AGORA sem derrubar a sessão: papel, exceções e empresas
+    // são lidos de novo a cada requisição (lerSessao). Derrubar só deslogava a pessoa
+    // (09/11). Desativar e trocar senha continuam derrubando.
   ]);
 
   await new Auditoria(c.env.DB, c.env.AUDIT_SEED).registrar({
@@ -1802,11 +1803,17 @@ app.post('/api/usuarios/:id/desativar-mfa', async (c) => {
   return c.json({ ok: true, email: u.email });
 });
 
+/**
+ * Sair encerra só a sessão DESTE navegador (09/11, Mateus: "o manter conectado não está
+ * funcionando"). Antes derrubava todas as sessões da pessoa: clicar em Sair num
+ * computador deslogava os outros. Derrubar todas continua onde faz sentido: trocar ou
+ * redefinir senha, desativar o usuário, mexer no segundo fator.
+ */
 app.post('/api/logout', async (c) => {
   const sessao = c.get('sessao');
   await c.env.DB
-    .prepare('UPDATE sessoes SET revogada = 1 WHERE usuario_id = ?')
-    .bind(sessao.usuarioId)
+    .prepare('UPDATE sessoes SET revogada = 1 WHERE id = ? AND usuario_id = ?')
+    .bind(sessao.sessaoId ?? '', sessao.usuarioId)
     .run();
   c.header('Set-Cookie', `${COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`);
   return c.json({ ok: true });
@@ -1977,10 +1984,8 @@ app.put('/api/empresas/:id/responsaveis', async (c) => {
       .prepare('INSERT OR IGNORE INTO usuario_empresas (usuario_id, empresa_id) VALUES (?,?)').bind(id, empresaId)),
     ...saem.map((id) => c.env.DB
       .prepare('DELETE FROM usuario_empresas WHERE usuario_id = ? AND empresa_id = ?').bind(id, empresaId)),
-    // Mesmo princípio da tela de usuário: acesso que muda vale agora. A própria
-    // pessoa que está mexendo não é derrubada no meio do trabalho.
-    ...[...entram, ...saem].filter((id) => id !== s.usuarioId).map((id) => c.env.DB
-      .prepare('UPDATE sessoes SET revogada = 1 WHERE usuario_id = ?').bind(id)),
+    // Acesso que muda vale na próxima requisição (lerSessao relê as empresas a cada
+    // uma). Não derruba mais a sessão de ninguém (09/11).
   ]);
 
   await new Auditoria(c.env.DB, c.env.AUDIT_SEED).registrar({
