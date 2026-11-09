@@ -748,6 +748,14 @@ describe('tela: pedidos de 05/11', () => {
   it('o campo da busca automática começa no dia 01 do mês', () => {
     expect(APP).toContain("`${isoLocal(new Date()).slice(0, 8)}01`");
   });
+  it('DIFAL no ITC (09/11): botão e alíquota interna só no DIFAL, uma chamada por nota que fica', () => {
+    expect(HTML).toContain('id="ap-itc"');
+    expect(HTML).toContain('id="ap-interna"');
+    const f = corpoDe("$('#ap-itc')?.addEventListener('click'", 2200);
+    expect(f).toContain("n.situacao === 'fica'");
+    expect(f).toContain('/apuracao/difal/itc');
+    expect(corpoDe('function desenharApuracao(', 1200)).toContain("ap.tipo === 'difal'");
+  });
   it('apagar empresa tira ela da tabela na hora, sem precisar de F5', () => {
     expect(corpoDe('async function carregarEmpresas(', 400)).toContain('renderEmpresas()');
     const apagar = corpoDe('function apagarEmpresa(', 1400);

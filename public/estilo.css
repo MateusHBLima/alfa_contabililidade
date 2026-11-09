@@ -648,6 +648,9 @@ tr.nota-estorno td{background:#faf5ff}
 .ap-lista td.ap-forn{min-width:200px}
 .ap-acoes .btn{padding:3px 8px;display:block;width:100%;margin:0 0 4px}
 .ap-acoes{width:88px}
+/* DIFAL no ITC (09/11): uma coluna a mais sem empurrar a lista para o lado. */
+.ap-lista table.com-itc th,.ap-lista table.com-itc td{padding-left:6px;padding-right:6px}
+.ap-lista table.com-itc td.ap-forn{min-width:160px}
 .ap-acoes .btn.on{background:var(--ok);border-color:var(--ok);color:#fff}
 .ap-acoes .btn.on.nao{background:#b42318;border-color:#b42318}
 .ap-pdf{position:sticky;top:8px}

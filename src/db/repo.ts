@@ -2700,7 +2700,9 @@ export class Repo {
                 TRIM(i.cfop_novo) AS cfop, COALESCE(i.valor_total, 0) AS valor_produto,
                 COALESCE(i.valor_contabil, i.valor_total, 0) AS valor_contabil,
                 COALESCE(i.v_bc_icms, 0) AS base, COALESCE(i.v_icms, 0) AS icms,
-                COALESCE(i.v_ipi, 0) AS ipi, COALESCE(i.v_st, 0) + COALESCE(i.v_fcp_st, 0) AS st
+                COALESCE(i.v_ipi, 0) AS ipi, COALESCE(i.v_st, 0) + COALESCE(i.v_fcp_st, 0) AS st,
+                COALESCE(i.v_desc, 0) AS desconto, COALESCE(i.v_frete, 0) AS frete,
+                COALESCE(i.v_seg, 0) AS seguro, COALESCE(i.v_outro, 0) AS outras
            FROM itens i JOIN notas n ON n.id = i.nota_id
           WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0 ${r.sql}
             AND TRIM(i.cfop_novo) IN (${cfops.map(() => '?').join(',')})

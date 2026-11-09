@@ -30,6 +30,7 @@ import { ErroSef } from './captura/sefsc';
 import { montarRelatorioCfop, montarRelatorioProdutos, montarRelatorioFornecedores, csvFornecedores, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, grupoIcms, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
 import { valoresFiscaisBind } from './nfe/importador';
 import { lerPaginasQuestor, conferirComQuestor, ErroQuestor } from './relatorios/questor';
+import { SessaoItc, ErroItc, camposDoItem, aliquotaInterestadual, type ResultadoItc } from './relatorios/itc';
 import { conversar, ErroAssistente, MODELO_PADRAO } from './assistente/assistente';
 
 type Env = {
@@ -73,6 +74,12 @@ type Env = {
   IA_MODELO?: string;
   /** Opcional: outro endereço para a API da IA (teste local). Sem ela, a da OpenAI. */
   IA_URL?: string;
+  /**
+   * DIFAL pelo simulador do ITCNET (09/11): login da Alfa no ITCNET, segredos no painel
+   * (wrangler secret put ITC_USUARIO / ITC_SENHA). Sem eles, o botão diz que falta configurar.
+   */
+  ITC_USUARIO?: string;
+  ITC_SENHA?: string;
   // Os certificados ligados no wrangler.jsonc (`mtls_certificates`) chegam como
   // MTLS_<id no cofre>. São lidos pelo nome em src/captura/captura.ts.
 };
@@ -2617,7 +2624,7 @@ async function candidatasDaApuracao(c: any, empresaId: string, tipo: TipoApuraca
   await garantirValoresFiscais(c, empresaId, competencia);
   const itens = bloqueada ? [] : await repo.itensParaApuracao(empresaId, competencia, crit.cfops);
   const r = montarCandidatas(tipo, itens, await repo.marcasApuracao(empresaId, tipo, competencia));
-  return { empresa, criterio: crit, aviso, ...r };
+  return { empresa, criterio: crit, aviso, ...r, brutos: itens };
 }
 
 const competenciaValida = (v: string | undefined) => !!v && /^\d{4}-\d{2}$/.test(v);
@@ -2630,8 +2637,60 @@ app.get('/api/empresas/:id/apuracao/:tipo', async (c) => {
   if (!competenciaValida(competencia)) return c.json({ erro: 'escolha o mês (AAAA-MM)' }, 400);
   const r = await candidatasDaApuracao(c, c.req.param('id'), tipo, competencia!);
   if (!r) return c.json({ erro: 'empresa não encontrada' }, 404);
-  const { empresa, ...resto } = r;
+  const { empresa, brutos: _brutos, ...resto } = r;
   return c.json({ tipo, competencia, regime: empresa.regime ?? null, ...resto });
+});
+
+/**
+ * DIFAL de uma nota pelo simulador do ITCNET (09/11, pedido do Mateus). Para cada item
+ * da nota que entra no DIFAL, preenche o simulador com os valores do XML e traz o
+ * resultado. Nada é gravado: o cálculo volta para a tela. Ver src/relatorios/itc.ts.
+ */
+app.post('/api/empresas/:id/apuracao/difal/itc', async (c) => {
+  exigir(c.get('sessao'), 'notas.editar_escrituracao');
+  const corpo = z.object({
+    competencia: z.string().regex(/^\d{4}-\d{2}$/),
+    notaId: z.string().min(1),
+    aliquotaInterna: z.number().min(1).max(40).default(17),
+  }).safeParse(await c.req.json().catch(() => null));
+  if (!corpo.success) return c.json({ erro: 'Escolha o mês, a nota e a alíquota interna.' }, 400);
+  if (!c.env.ITC_USUARIO || !c.env.ITC_SENHA) {
+    return c.json({ erro: 'O robô do ITC ainda não está configurado: falta cadastrar o login do ITCNET (ITC_USUARIO e ITC_SENHA) nos segredos do Cloudflare.' }, 400);
+  }
+  const r = await candidatasDaApuracao(c, c.req.param('id'), 'difal', corpo.data.competencia);
+  if (!r) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const nota = r.notas.find((n) => n.notaId === corpo.data.notaId);
+  if (!nota) return c.json({ erro: 'Esta nota não está entre as do DIFAL deste mês.' }, 404);
+  const entram = new Set(nota.itens.map((i) => i.nItem));
+  const itens = r.brutos.filter((i: any) => i.nota_id === nota.notaId && entram.has(Number(i.n_item)));
+  if (itens.length > 200) return c.json({ erro: 'Nota com mais de 200 itens: calcule no ITC à mão.' }, 400);
+
+  const itc = new SessaoItc(c.env.ITC_USUARIO, c.env.ITC_SENHA);
+  const n = (v: unknown) => Number(v ?? 0) || 0;
+  const cent = (v: number) => Math.round(v * 100) / 100;
+  const saida: (ResultadoItc & { nItem: number; descricao: string; aliquota: number; icmsNota: number })[] = [];
+  try {
+    for (const i of itens) {
+      const item = {
+        valorProduto: n(i.valor_produto), frete: n(i.frete), seguro: n(i.seguro), outras: n(i.outras),
+        desconto: n(i.desconto), ipi: n(i.ipi), base: n(i.base), icms: n(i.icms),
+      };
+      const res = await itc.simular(camposDoItem(item, corpo.data.aliquotaInterna));
+      saida.push({
+        nItem: Number(i.n_item), descricao: i.descricao, aliquota: aliquotaInterestadual(item.base, item.icms),
+        icmsNota: item.icms, ...res,
+      });
+    }
+  } catch (e) {
+    if (e instanceof ErroItc) return c.json({ erro: e.message }, 502);
+    console.error('itc', e);
+    return c.json({ erro: 'Não consegui falar com o ITC agora. Tente de novo em alguns minutos.' }, 502);
+  }
+  const soma = (k: 'difal' | 'fcp' | 'total' | 'icmsNota' | 'icmsProprio' | 'baseDifal') => cent(saida.reduce((t, x) => t + x[k], 0));
+  return c.json({
+    notaId: nota.notaId, aliquotaInterna: corpo.data.aliquotaInterna, itens: saida,
+    total: { difal: soma('difal'), fcp: soma('fcp'), total: soma('total'), icmsNota: soma('icmsNota'), icmsItc: soma('icmsProprio'), baseDifal: soma('baseDifal') },
+  });
 });
 
 app.put('/api/empresas/:id/apuracao/:tipo/:notaId', async (c) => {

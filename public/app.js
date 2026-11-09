@@ -5842,7 +5842,7 @@ document.querySelectorAll('input[type="date"]').forEach(campoDataBr);
    O sistema separa as notas candidatas do mês; ela abre o PDF ao lado, marca se fica
    ou não fica, e tira o relatório para o cliente (resumo + PDF de cada nota que fica).
    Sem cálculo de guia por enquanto. */
-const ap = { tipo: 'antecipacao', competencia: '', ultimo: null, notaAberta: null };
+const ap = { tipo: 'antecipacao', competencia: '', ultimo: null, notaAberta: null, itc: {}, calculando: false };
 
 async function abrirApuracao() {
   if (!estado.empresaId) return;
@@ -5872,6 +5872,7 @@ async function carregarApuracao() {
   }
   corpo.innerHTML = '<tr><td class="vazio">procurando as notas…</td></tr>';
   const pedido = `${estado.empresaId}|${ap.tipo}|${ap.competencia}`;
+  if (ap.pedido !== pedido) ap.itc = {};
   ap.pedido = pedido;
   try {
     const r = await api(`/api/empresas/${estado.empresaId}/apuracao/${ap.tipo}?competencia=${ap.competencia}`);
@@ -5887,6 +5888,10 @@ function desenharApuracao() {
   const r = ap.ultimo;
   if (!r) return;
   const [cab, corpo, pe] = [$('#tbl-apuracao thead'), $('#tbl-apuracao tbody'), $('#tbl-apuracao tfoot')];
+  // DIFAL no ITC (09/11): só no DIFAL e para quem pode marcar as notas.
+  const comItc = ap.tipo === 'difal' && pode('notas.editar_escrituracao');
+  $$('.ap-itc').forEach((e) => e.classList.toggle('hidden', !comItc));
+  $('#tbl-apuracao').classList.toggle('com-itc', comItc);
   $('#ap-criterio').innerHTML = `<b>Quais notas aparecem:</b> ${esc(r.criterio.descricao)}. Conta o CFOP de entrada que você deu ao item.`;
   $('#ap-aviso').classList.toggle('hidden', !r.aviso);
   $('#ap-aviso').textContent = r.aviso ? `⚠ ${r.aviso}` : '';
@@ -5896,6 +5901,7 @@ function desenharApuracao() {
     `<span>${t.notas} nota(s) candidata(s)</span>`,
     chip(`✓ ${t.fica} ficam`, false), `<span>✗ ${t.sai} não ficam</span>`, chip(`${t.conferir} a conferir`, t.conferir > 0),
     `<span>Das que ficam: valor contábil <b>R$ ${moeda(t.valorContabilFica)}</b> · ICMS da nota <b>R$ ${moeda(t.icmsFica)}</b></span>`,
+    ...(comItc ? [itcPlacar()] : []),
   ].join('') : '';
   if (!r.notas.length) {
     cab.innerHTML = pe.innerHTML = '';
@@ -5903,20 +5909,72 @@ function desenharApuracao() {
     return;
   }
   const podeMarcar = pode('notas.editar_escrituracao');
-  cab.innerHTML = '<tr><th>Nota</th><th>Fornecedor</th><th class="num">Alíq.</th><th class="num">Valor contábil</th><th class="num">ICMS da nota</th><th>Fica?</th></tr>';
+  cab.innerHTML = `<tr><th>Nota</th><th>Fornecedor</th><th class="num">Alíq.</th><th class="num">Valor contábil</th><th class="num">ICMS da nota</th>${comItc ? '<th class="num">DIFAL (ITC)</th>' : ''}<th>Fica?</th></tr>`;
   corpo.innerHTML = r.notas.map((n) => `<tr data-ap-nota="${esc(n.notaId)}" class="${n.situacao === 'fica' ? 'ap-fica' : n.situacao === 'sai' ? 'ap-sai' : ''}${ap.notaAberta === n.notaId ? ' ap-aberta' : ''}">
       <td class="mono">${esc(n.numero)}<span class="porque">${esc(dataCurta(n.emissao))}</span></td>
       <td class="ap-forn">${esc(n.fornecedor ?? '')}<span class="porque">${esc(n.uf ?? '')} · CFOP ${esc(n.cfops.join(', '))} · ${n.itens.length} item(ns) entram${n.foraPelaAliquota ? ` · ${n.foraPelaAliquota} com outra alíquota ficam de fora` : ''}</span></td>
       <td class="num">${esc(n.aliquotas.map((a) => a + '%').join(', '))}</td>
       <td class="num">${moeda(n.valorContabil)}</td>
       <td class="num">${moeda(n.icms)}</td>
+      ${comItc ? `<td class="num">${itcCelula(n.notaId)}</td>` : ''}
       <td class="ap-acoes">
         <button type="button" class="btn sm${n.situacao === 'fica' ? ' on' : ''}" data-ap-marcar="fica" ${podeMarcar ? '' : 'disabled'} title="Esta nota entra">✓ Fica</button>
         <button type="button" class="btn sm${n.situacao === 'sai' ? ' on nao' : ''}" data-ap-marcar="sai" ${podeMarcar ? '' : 'disabled'} title="Esta nota não entra">✗ Não</button>
         ${n.marcadoPor ? `<span class="porque">${esc(n.marcadoPor)}</span>` : ''}
       </td></tr>`).join('');
-  pe.innerHTML = `<tr><th colspan="3">Total · ${t.notas} nota(s)</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.icms)}</th><th></th></tr>`;
+  const totItc = Object.values(ap.itc).filter((x) => x.total).reduce((s, x) => s + x.total.total, 0);
+  pe.innerHTML = `<tr><th colspan="3">Total · ${t.notas} nota(s)</th><th class="num">${moeda(t.valorContabil)}</th><th class="num">${moeda(t.icms)}</th>${comItc ? `<th class="num">${totItc ? moeda(Math.round(totItc * 100) / 100) : ''}</th>` : ''}<th></th></tr>`;
 }
+
+/* DIFAL no ITC (09/11): o resultado de cada nota fica só na tela (ap.itc), não é gravado. */
+function itcCelula(notaId) {
+  const x = ap.itc[notaId];
+  if (!x) return '';
+  if (x.calculando) return '<span class="porque">calculando…</span>';
+  if (x.erro) return `<span class="porque" title="${esc(x.erro)}">⚠ não calculou</span>`;
+  const icmsDiferente = Math.abs(x.total.icmsItc - x.total.icmsNota) >= 0.01;
+  return `<b>${moeda(x.total.total)}</b>${icmsDiferente
+    ? `<span class="porque" title="O ITC deduziu ICMS de ${moeda(x.total.icmsItc)} (a nota tem ${moeda(x.total.icmsNota)}): o simulador põe o IPI na base do ICMS próprio">ICMS ${moeda(x.total.icmsItc)}</span>` : ''}`;
+}
+function itcPlacar() {
+  const feitas = Object.values(ap.itc).filter((x) => x.total);
+  if (ap.calculando) return `<span>Calculando no ITC: nota ${ap.calculando}</span>`;
+  if (!feitas.length) return '';
+  const total = Math.round(feitas.reduce((s, x) => s + x.total.total, 0) * 100) / 100;
+  return `<span>DIFAL no ITC (${feitas.length} nota(s), interna ${esc(String(feitas[0].aliquotaInterna).replace('.', ','))}%): <b>R$ ${moeda(total)}</b></span>`;
+}
+
+$('#ap-itc')?.addEventListener('click', async () => {
+  const r = ap.ultimo;
+  if (!r || ap.calculando) return;
+  const fica = r.notas.filter((n) => n.situacao === 'fica');
+  if (!fica.length) return alerta('Marque com “✓ Fica” as notas que entram e depois calcule no ITC.');
+  const interna = Number(String($('#ap-interna').value).replace(',', '.'));
+  if (!(interna >= 1 && interna <= 40)) return alerta('Alíquota interna inválida.');
+  const pedido = ap.pedido;
+  $('#ap-itc').disabled = true;
+  let erros = 0, parou = false;
+  for (const [i, n] of fica.entries()) {
+    if (ap.pedido !== pedido) break;
+    ap.calculando = `${i + 1} de ${fica.length}`;
+    ap.itc[n.notaId] = { calculando: true };
+    desenharApuracao();
+    try {
+      ap.itc[n.notaId] = await api(`/api/empresas/${estado.empresaId}/apuracao/difal/itc`, {
+        method: 'POST', body: JSON.stringify({ competencia: ap.competencia, notaId: n.notaId, aliquotaInterna: interna }),
+      });
+    } catch (e) {
+      ap.itc[n.notaId] = { erro: e.message };
+      erros++;
+      // Falta de configuração ou login recusado vale para todas: para na primeira.
+      if (/configurad|usuário ou a senha|segundo fator/.test(e.message)) { parou = true; alerta(e.message); break; }
+    }
+  }
+  ap.calculando = false;
+  $('#ap-itc').disabled = false;
+  desenharApuracao();
+  if (erros && !parou) alerta(`${erros} nota(s) não calcularam no ITC. Passe o mouse no aviso da linha para ver o motivo.`);
+});
 
 function mostrarPdfApuracao(notaId) {
   const fr = $('#ap-iframe');

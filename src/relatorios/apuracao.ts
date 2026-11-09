@@ -50,6 +50,8 @@ export type ItemApuracao = {
   nota_id: string; numero: string; serie: string | null; dh_emi: string; emit_nome: string | null; emit_cnpj: string | null;
   emit_uf: string | null; valor_nota: number; n_item: number; descricao: string; ncm: string | null; cfop: string;
   valor_produto: number; valor_contabil: number; base: number; icms: number; ipi: number; st: number;
+  /** Do XML do item, para o cálculo no simulador do ITC (09/11). */
+  desconto?: number; frete?: number; seguro?: number; outras?: number;
 };
 
 export type NotaCandidata = {
