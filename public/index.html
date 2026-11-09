@@ -597,7 +597,7 @@
         <h1>Antecipação e DIFAL <span class="escopo-empresa" id="escopo-apuracao"></span></h1>
         <p class="page-desc">O sistema separa as notas do mês que se enquadram. Clique na nota para ver o PDF ao lado, marque
           se ela <b>fica</b> ou <b>não fica</b> e tire o relatório para o cliente (resumo + PDF de cada nota que fica).
-          O cálculo da guia ainda não está aqui.</p>
+          No DIFAL, <b>Calcular no ITC</b> passa as notas que ficam no simulador do ITCNET, item por item, e traz o valor.</p>
         <div class="card">
           <div class="toolbar">
             <div class="filters" id="ap-tipo">
@@ -605,6 +605,10 @@
               <button data-ap="difal">DIFAL (uso e consumo)</button>
             </div>
             <select id="ap-competencia" style="font-size:12px;width:210px"></select>
+            <!-- 09/11 (Mateus): DIFAL calculado no simulador do ITCNET. -->
+            <label class="tiny ap-itc hidden" for="ap-interna" title="Alíquota interna do produto em SC usada no simulador do ITC">Alíquota interna
+              <input type="number" id="ap-interna" value="17" min="1" max="40" step="0.01" style="width:58px;font-size:12px">%</label>
+            <button class="btn sm ap-itc hidden" id="ap-itc" title="Passa cada item das notas que ficam no simulador do ITCNET e traz o DIFAL">Calcular no ITC</button>
             <div class="sep"></div>
             <button class="btn sm primary" id="ap-relatorio" title="Folha de resumo com as notas que ficam e, depois, o PDF de cada uma. Salve como PDF e mande ao cliente.">⇩ Relatório para o cliente (PDF)</button>
           </div>

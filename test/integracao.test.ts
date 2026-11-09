@@ -5787,15 +5787,15 @@ describe('02/10: conferência do relatório por produto com o Questor', async ()
 describe('09/10: antecipação e DIFAL — lista, marca e relatório para o cliente', async () => {
   let empresaId: string;
   let ck = '';
-  const amb = () => ({
+  const amb = (extra: Record<string, unknown> = {}) => ({
     DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
     ASSETS: { fetch: async () => new Response('', { status: 404 }) },
-    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao', ...extra,
   }) as never;
-  const chamar = (url: string, metodo = 'GET', corpo?: unknown) => app.fetch(new Request(`http://x${url}`, {
+  const chamar = (url: string, metodo = 'GET', corpo?: unknown, extra: Record<string, unknown> = {}) => app.fetch(new Request(`http://x${url}`, {
     method: metodo, headers: { Cookie: ck, 'content-type': 'application/json' },
     body: corpo === undefined ? undefined : JSON.stringify(corpo),
-  }), amb());
+  }), amb(extra));
   const lista = async (tipo: string) => (await (await chamar(`/api/empresas/${empresaId}/apuracao/${tipo}?competencia=2026-07`)).json()) as any;
   const itens = () => db.consultar<any>('SELECT id, n_item FROM itens ORDER BY n_item');
 
@@ -5812,6 +5812,41 @@ describe('09/10: antecipação e DIFAL — lista, marca e relatório para o clie
       body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
     }), amb());
     ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  });
+
+  it('09/11: DIFAL no ITC — sem o login configurado avisa; com ele, passa cada item no simulador e soma', async () => {
+    const dif = await lista('difal');
+    const notaId = dif.notas[0].notaId;
+    const corpo = { competencia: '2026-07', notaId, aliquotaInterna: 17 };
+    const url = `/api/empresas/${empresaId}/apuracao/difal/itc`;
+    let r = await chamar(url, 'POST', corpo);
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as any).erro).toMatch(/não está configurado/);
+
+    // O simulador (já logado) devolve a página com o resultado.
+    const html = `<input name="c10" type="text" class="dinheiro" id="c10" value="R$ 4,61" disabled>
+      <input name="c17" type="text" class="dinheiro" id="c17" value="R$ 40,71" disabled>
+      <strong><u>Valor do DIFAL a ser recolhido</u></strong><td><b><u>R$ 2,31</u></b></td>
+      <strong><u>Valor Total do DIFAL</u></strong><td><b><u>R$ 2,31</u></b></td>`;
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (u: string) => { urls.push(String(u)); return new Response(html, { status: 200 }); }));
+    try {
+      r = await chamar(url, 'POST', corpo, { ITC_USUARIO: 'u', ITC_SENHA: 's' });
+      expect(r.status).toBe(200);
+      const j = (await r.json()) as any;
+      expect(j.itens).toHaveLength(1);
+      expect(j.itens[0]).toMatchObject({ aliquota: 12, icmsNota: 4.61, icmsProprio: 4.61, baseDifal: 40.71, difal: 2.31, total: 2.31 });
+      expect(j.total).toMatchObject({ total: 2.31, difal: 2.31, icmsNota: 4.61, icmsItc: 4.61 });
+      expect(urls).toHaveLength(1);
+      const q = new URL(urls[0]!).searchParams;
+      expect([q.get('c9'), q.get('c18'), q.get('Enviar')]).toEqual(['12', '17', 'Calcular']);
+
+      // Nota que não é do DIFAL deste mês.
+      r = await chamar(url, 'POST', { ...corpo, notaId: 'outra' }, { ITC_USUARIO: 'u', ITC_SENHA: 's' });
+      expect(r.status).toBe(404);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('separa as candidatas, guarda a marca (com trilha) e o relatório leva o resumo e o PDF de cada nota que fica', async () => {
