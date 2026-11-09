@@ -1541,23 +1541,43 @@ describe('permissões por verbo e administração', () => {
     expect(u.linkExpira).toBeNull();
   });
 
-  it('mudar permissão derruba as sessões da pessoa na hora', async () => {
-    // "Tirei o acesso dele" não pode ser mentira por até 12 horas.
-    const papeis = await (await req('/api/papeis')).json() as any[];
+  it('mudar permissão vale na hora, sem derrubar a sessão da pessoa (09/11)', async () => {
+    // "Tirei o acesso dele" não pode ser mentira nem por um minuto: a permissão é relida a
+    // cada requisição. Mas a pessoa não é mais deslogada por isso.
     const novo = await req('/api/usuarios', {
       method: 'POST',
-      body: JSON.stringify({ email: 'ses@alfacontabil.net', nome: 'Sessão', papelId: papeis[0].id }),
+      body: JSON.stringify({ email: 'ses@alfacontabil.net', nome: 'Sessão', papelId: 'papel-operador' }),
     });
     const criado = await novo.json() as any;
     const id = criado.id as string;
     const senhaProvisoria = await senhaPeloLink(ambiente, criado);
     const l = await entrar('ses@alfacontabil.net', senhaProvisoria);
     const ck = (l.headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    const perms = async () => ((await (await req('/api/eu', {}, ck)).json()) as any).permissoes as string[];
+    expect(await perms()).not.toContain('usuarios.visualizar');
+    expect((await req('/api/usuarios', {}, ck)).status).toBe(403);
 
-    await req(`/api/usuarios/${id}`, {
-      method: 'PUT', body: JSON.stringify({ nome: 'Sessão', papelId: papeis[0].id }),
+    await req(`/api/usuarios/${id}`, { method: 'PUT', body: JSON.stringify({ nome: 'Sessão', papelId: 'papel-admin' }) });
+    expect(await perms()).toContain('usuarios.visualizar');
+    expect((await req('/api/usuarios', {}, ck)).status).toBe(200);
+
+    await req(`/api/usuarios/${id}`, { method: 'PUT', body: JSON.stringify({ nome: 'Sessão', papelId: 'papel-operador' }) });
+    expect((await req('/api/usuarios', {}, ck)).status).toBe(403);
+    expect((await req('/api/eu', {}, ck)).status).toBe(200);
+  });
+
+  it('Sair encerra só a sessão daquele navegador; as outras continuam (09/11)', async () => {
+    const novo = await req('/api/usuarios', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'dois@alfacontabil.net', nome: 'Dois PCs', papelId: 'papel-operador' }),
     });
-    expect((await req('/api/eu', {}, ck)).status).toBe(401);
+    const criado = await novo.json() as any;
+    const senha = await senhaPeloLink(ambiente, criado);
+    const ckA = ((await entrar('dois@alfacontabil.net', senha)).headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    const ckB = ((await entrar('dois@alfacontabil.net', senha)).headers.get('Set-Cookie') ?? '').split(';')[0]!;
+    expect((await req('/api/logout', { method: 'POST' }, ckA)).status).toBe(200);
+    expect((await req('/api/eu', {}, ckA)).status).toBe(401);
+    expect((await req('/api/eu', {}, ckB)).status).toBe(200);
   });
 
   it('o papel Admin não pode ser alterado nem apagado', async () => {
@@ -4966,6 +4986,8 @@ describe('25/09: PDF da nota, regime e responsáveis da empresa', () => {
     await req(`/api/empresas/${empresaId}/responsaveis`, { method: 'PUT', body: JSON.stringify({ usuarios: ['u3'] }) });
     expect(db.consultar(`SELECT usuario_id FROM usuario_empresas WHERE empresa_id = '${empresaId}'`)).toEqual([{ usuario_id: 'u3' }]);
     expect(db.consultar(`SELECT campo FROM auditoria WHERE entidade = 'empresa' AND campo = 'responsaveis'`)).toHaveLength(2);
+    // Mudar o vínculo não desloga a pessoa (09/11): o acesso é relido a cada requisição.
+    expect(db.consultar(`SELECT revogada FROM sessoes WHERE id = 's-u2'`)).toEqual([{ revogada: 0 }]);
     // Usuário de fora do escritório não entra.
     expect((await req(`/api/empresas/${empresaId}/responsaveis`, { method: 'PUT', body: JSON.stringify({ usuarios: ['zzz'] }) })).status).toBe(404);
     // Sem permissão de editar usuários, não altera.
