@@ -5489,13 +5489,9 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
       `<distNFeSC NSU="1" chAcesso="${CHAVE_ORIGINAL}">${NOTA}</distNFeSC>`,
       `<distNFeSC NSU="2" chAcesso="${CHAVE_AGOSTO}">${NOTA_AGOSTO}</distNFeSC>`,
     ]) })));
-    // 1ª rodada: a SEF está liberada, então só baixa para a caixa.
-    expect((await rodar())?.resultado).toMatch(/A SEF mandou 2 documento/);
-    expect(posts()).toHaveLength(1);
-    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
-
-    // 2ª rodada: a SEF só libera daqui a 12 h; importa o que é de 01/08 em diante.
-    expect((await rodar())?.resultado).toMatch(/Importou 1 nota/);
+    // A SEF está liberada: baixa e, na mesma rodada (10/11, Taís: "pode puxar tudo as notas de
+    // uma vez"), importa o que é de 01/08 em diante. Antes só importava numa rodada seguinte.
+    expect((await rodar())?.resultado).toMatch(/A SEF mandou 2 documento\(s\); Importou 1 nota/);
     expect(posts()).toHaveLength(1);
     const notas = db.consultar<any>('SELECT chave, origem, criado_por FROM notas');
     expect(notas).toEqual([expect.objectContaining({ chave: CHAVE_AGOSTO, origem: 'sefaz-auto' })]);
@@ -5503,7 +5499,8 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     expect(notas[0].criado_por).toBe(contadora);
     expect(db.consultar<any>("SELECT envio_id FROM lotes_importacao WHERE origem = 'sefaz-auto'")[0].envio_id).toMatch(/^auto-\d{4}-\d{2}-\d{2}-/);
 
-    // 3ª rodada: nada a fazer. A nota de julho segue na caixa para a busca manual.
+    // Rodada seguinte: a SEF só libera daqui a 12 h e não há nada a importar.
+    // A nota de julho segue na caixa para a busca manual.
     expect(await rodar()).toBeNull();
     expect(posts()).toHaveLength(1);
     const manual = await consultar('2026-07-01', '2026-07-31');
@@ -5532,15 +5529,31 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
       `<distNFeSC NSU="2" chAcesso="${CHAVE_AGOSTO}">${NOTA_AGOSTO}</distNFeSC>`,
       `<distNFeSC NSU="3">${cancelaAgosto}</distNFeSC>`,
     ]) })));
-    await rodar();
-    // Uma nota "emitida pela empresa" (saída): o índice da caixa diz quem emitiu.
-    db.consultar(`UPDATE captura_caixa SET emit_cnpj = '11222333000181' WHERE chave = '${CHAVE_ORIGINAL}' AND tipo = 'nota'`);
-    expect((await rodar())?.resultado).toMatch(/2 ficaram na caixa/);
-    expect(db.consultar('SELECT * FROM notas')).toHaveLength(0);
-    const caixa = db.consultar<any>("SELECT chave, auto_recusada FROM captura_caixa WHERE tipo = 'nota' ORDER BY chave");
+    // Uma nota "emitida pela empresa" (saída) já na caixa: o índice da caixa diz quem emitiu.
+    const PROPRIA = '42260711222333000181550010000009991000009990';
+    db.consultar(`INSERT INTO captura_caixa (tenant_id, empresa_id, nsu, chave, tipo, dh_emi, emit_cnpj, r2_chave, recebido_em)
+      SELECT tenant_id, id, '0', '${PROPRIA}', 'nota', '2026-07-10T10:00:00-03:00', '11222333000181', 'x', '2026-07-11' FROM empresas WHERE id = '${empresaId}'`);
+    // Baixa e importa na mesma rodada: a do fornecedor entra; a cancelada e a da própria empresa ficam.
+    expect((await rodar())?.resultado).toMatch(/A SEF mandou 3 documento\(s\); Importou 1 nota\(s\); 2 ficaram na caixa/);
+    expect(db.consultar('SELECT chave FROM notas')).toEqual([{ chave: CHAVE_ORIGINAL }]);
+    const caixa = db.consultar<any>("SELECT chave, auto_recusada FROM captura_caixa WHERE tipo = 'nota' AND auto_recusada IS NOT NULL ORDER BY chave");
     expect(Object.fromEntries(caixa.map((c) => [c.chave, c.auto_recusada]))).toEqual({
-      [CHAVE_ORIGINAL]: 'emitida pela própria empresa', [CHAVE_AGOSTO]: 'cancelada na SEF',
+      [PROPRIA]: 'emitida pela própria empresa', [CHAVE_AGOSTO]: 'cancelada na SEF',
     });
+    expect(await rodar()).toBeNull();
+  });
+
+  it('busca automática: numa rodada passa de 20 notas (10/11, as notas ficavam paradas na caixa)', async () => {
+    await automatica({ ligada: true, desde: '2026-07-01' });
+    // SEF fechada para esta empresa: a rodada só trabalha a caixa.
+    db.consultar(`UPDATE captura_empresas SET proxima_consulta = '2099-01-01T00:00:00Z' WHERE empresa_id = '${empresaId}'`);
+    for (let i = 0; i < 25; i++) {
+      const chave = `4226071122233300018155001${String(i).padStart(9, '0')}1000000000`.slice(0, 44);
+      db.consultar(`INSERT INTO captura_caixa (tenant_id, empresa_id, nsu, chave, tipo, dh_emi, emit_cnpj, r2_chave, recebido_em)
+        SELECT tenant_id, id, '${100 + i}', '${chave}', 'nota', '2026-07-10T10:00:00-03:00', '11222333000181', 'x', '2026-07-11' FROM empresas WHERE id = '${empresaId}'`);
+    }
+    expect((await rodar())?.resultado).toMatch(/^25 ficaram na caixa/);
+    expect(db.consultar<any>("SELECT COUNT(*) AS n FROM captura_caixa WHERE auto_recusada IS NOT NULL")[0].n).toBe(25);
     expect(await rodar()).toBeNull();
   });
 

@@ -334,6 +334,8 @@ export async function importarDaCaixa(
  */
 export const AUTO_LOTES = 10;
 export const AUTO_NOTAS = 20;
+/** Até quantos pacotes de AUTO_NOTAS importar numa rodada (10/11: 100 notas). */
+export const AUTO_PACOTES = 5;
 
 type AmbienteAuto = AmbienteCaptura & { AUDIT_SEED: string };
 
@@ -367,6 +369,7 @@ export async function executarBuscaAutomatica(env: AmbienteAuto, agora = new Dat
   const repo = new Repo(env.DB, { sessao, ip: null, requestId: `sef-auto-${crypto.randomUUID()}`, automatica: true }, env.AUDIT_SEED);
   const empresa = { id: alvo.empresa_id as string, cnpj: alvo.cnpj as string };
 
+  let baixou = '';
   if (alvo.sef_liberada) {
     const certs = await repo.listarCertificados();
     if (!certs.length) return registrar('Nenhum certificado no cofre.', repo);
@@ -380,41 +383,50 @@ export async function executarBuscaAutomatica(env: AmbienteAuto, agora = new Dat
       if (!ultimo.consultou || !ultimo.temMais || ultimo.erro) break;
     }
     await aplicarEventosDaCaixa(env, repo, empresa.id);
-    const texto = ultimo?.erro
-      ? `Consulta à SEF: ${ultimo.erro}`
-      : documentos ? `A SEF mandou ${documentos} documento(s); importando as notas a partir de ${dataBr(alvo.auto_desde)}.` : 'Nada novo na SEF.';
-    return registrar(texto, repo);
+    if (ultimo?.erro) return registrar(`Consulta à SEF: ${ultimo.erro}`, repo);
+    baixou = documentos ? `A SEF mandou ${documentos} documento(s)` : 'Nada novo na SEF';
   }
 
-  // Importar o que está na caixa, a partir da data de início.
-  const pendentes = await repo.pendentesDaBuscaAutomatica(empresa.id, alvo.auto_desde, AUTO_NOTAS);
+  // Importar o que está na caixa, a partir da data de início. 10/11 (Taís: "pode puxar
+  // tudo as notas de uma vez"): importa logo depois de baixar, na mesma rodada. Antes
+  // a rodada que baixava não importava, e a que importava (20 notas) só acontecia quando
+  // nenhuma empresa estava liberada na SEF; com 47 empresas quase nunca, e as notas
+  // ficavam paradas na caixa.
   const so = (v: unknown) => String(v ?? '').replace(/\D/g, '');
-  const pular: { chave: string; motivo: string }[] = [];
-  const importar: string[] = [];
-  for (const n of pendentes) {
-    if (so(n.emit_cnpj) && so(n.emit_cnpj) === so(empresa.cnpj)) pular.push({ chave: n.chave, motivo: 'emitida pela própria empresa' });
-    else if (n.cancelada) pular.push({ chave: n.chave, motivo: 'cancelada na SEF' });
-    else importar.push(n.chave);
-  }
-  let r: (ResultadoLote & { canceladas: number }) | null = null;
-  if (importar.length) {
-    // Uma importação "automática da SEF" por dia, na lista de Importações da empresa.
-    const envio = `auto-${quando.slice(0, 10)}-${empresa.id.slice(0, 8)}`;
-    r = await importarDaCaixa(env, repo, empresa.id, importar, envio, 'sefaz-auto');
-    for (const a of r.arquivos) {
-      if (a.status === 'recusada' && a.chave) pular.push({ chave: a.chave, motivo: `recusada: ${a.motivo ?? 'sem motivo'}` });
+  const envio = `auto-${quando.slice(0, 10)}-${empresa.id.slice(0, 8)}`;
+  const soma = { importadas: 0, canceladas: 0, recusadas: 0, proprias: 0 };
+  for (let pacote = 0; pacote < AUTO_PACOTES; pacote++) {
+    const pendentes = await repo.pendentesDaBuscaAutomatica(empresa.id, alvo.auto_desde, AUTO_NOTAS);
+    if (!pendentes.length) break;
+    const pular: { chave: string; motivo: string }[] = [];
+    const importar: string[] = [];
+    for (const n of pendentes) {
+      if (so(n.emit_cnpj) && so(n.emit_cnpj) === so(empresa.cnpj)) pular.push({ chave: n.chave, motivo: 'emitida pela própria empresa' });
+      else if (n.cancelada) pular.push({ chave: n.chave, motivo: 'cancelada na SEF' });
+      else importar.push(n.chave);
     }
+    soma.proprias += pular.length;
+    if (importar.length) {
+      // Uma importação "automática da SEF" por dia, na lista de Importações da empresa.
+      const r = await importarDaCaixa(env, repo, empresa.id, importar, envio, 'sefaz-auto');
+      soma.importadas += r.importadas; soma.canceladas += r.canceladas; soma.recusadas += r.recusadas;
+      for (const a of r.arquivos) {
+        if (a.status === 'recusada' && a.chave) pular.push({ chave: a.chave, motivo: `recusada: ${a.motivo ?? 'sem motivo'}` });
+      }
+    }
+    // Pulada ou recusada não volta na próxima volta: cada pacote anda.
+    await repo.marcarPuladasNaBuscaAutomatica(empresa.id, pular);
+    if (pendentes.length < AUTO_NOTAS) break;
   }
-  await repo.marcarPuladasNaBuscaAutomatica(empresa.id, pular);
-  const partes = [];
-  if (r) partes.push(`Importou ${r.importadas} nota(s)` + (r.canceladas ? `, ${r.canceladas} cancelamento(s) aplicado(s)` : ''));
-  if (r?.recusadas) partes.push(`${r.recusadas} recusada(s) pelo importador (ficaram na caixa)`);
-  const proprias = pular.filter((p) => !p.motivo.startsWith('recusada')).length;
-  if (proprias) partes.push(`${proprias} ficaram na caixa (emitidas pela empresa ou canceladas)`);
+  const partes = baixou ? [baixou] : [];
+  if (soma.importadas || soma.recusadas) {
+    partes.push(`Importou ${soma.importadas} nota(s)` + (soma.canceladas ? `, ${soma.canceladas} cancelamento(s) aplicado(s)` : ''));
+  }
+  if (soma.recusadas) partes.push(`${soma.recusadas} recusada(s) pelo importador (ficaram na caixa)`);
+  if (soma.proprias) partes.push(`${soma.proprias} ficaram na caixa (emitidas pela empresa ou canceladas)`);
   return registrar((partes.join('; ') || 'Nada para importar') + '.', repo);
 }
 
-const dataBr = (iso: string | null | undefined) => (iso ? iso.slice(0, 10).split('-').reverse().join('/') : '');
 
 /**
  * Uma tentativa de conexão descrita em uma linha: status, servidor e começo da
