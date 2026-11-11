@@ -2579,6 +2579,11 @@ export class Repo {
   /**
    * Notas da caixa que a busca automática ainda tem de olhar: emitidas a partir de
    * `desde`, que não estão no sistema e que ela não pulou antes. Mais antigas primeiro.
+   *
+   * 11/11 (Taís: "Filomena parou de puxar em 13.10"): também as de um mês que já tem nota
+   * no sistema, mesmo antes de `desde`. Mês que começou a entrar tem de entrar inteiro;
+   * antes, quem ligava a busca em 01/11 deixava o fim de outubro para sempre na caixa.
+   * Mês sem nenhuma nota no sistema continua de fora (empresa nova "desde 01.11").
    */
   async pendentesDaBuscaAutomatica(empresaId: string, desde: string, limite: number): Promise<any[]> {
     this.exigirEmpresa(empresaId);
@@ -2589,7 +2594,11 @@ export class Repo {
                          AND e.tipo = 'evento' AND e.tp_evento IN ('110111','110112')) AS cancelada
            FROM captura_caixa c
           WHERE c.tenant_id = ? AND c.empresa_id = ? AND c.tipo = 'nota' AND c.chave IS NOT NULL
-            AND c.auto_recusada IS NULL AND substr(c.dh_emi, 1, 10) >= ?
+            AND c.auto_recusada IS NULL
+            AND (substr(c.dh_emi, 1, 10) >= ?
+                 OR substr(c.dh_emi, 1, 7) IN (SELECT m.competencia FROM notas m
+                      WHERE m.tenant_id = c.tenant_id AND m.empresa_id = c.empresa_id
+                        AND m.cancelada_em IS NULL AND m.competencia IS NOT NULL))
             AND NOT EXISTS (SELECT 1 FROM notas n WHERE n.tenant_id = c.tenant_id AND n.chave = c.chave)
           ORDER BY c.dh_emi, c.nsu LIMIT ?`,
       )

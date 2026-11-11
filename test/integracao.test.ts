@@ -5543,6 +5543,26 @@ describe('30/09: busca de notas na SEF/SC, manual e por período', async () => {
     expect(await rodar()).toBeNull();
   });
 
+  it('busca automática: completa o mês que já tem nota no sistema, mesmo antes da data de início (11/11, Filomena)', async () => {
+    // Julho já começou a entrar (busca à mão); a automática foi ligada desde 01/08.
+    const JULHO_NO_SISTEMA = CHAVE_ORIGINAL.slice(0, 40) + '0055';
+    db.consultar(`INSERT INTO notas (id, tenant_id, empresa_id, chave, emit_cnpj, dh_emi, competencia, criado_em)
+      SELECT 'nota-julho', tenant_id, id, '${JULHO_NO_SISTEMA}', '83646984003044', '2026-07-02T10:00:00-03:00', '2026-07', '2026-07-03'
+        FROM empresas WHERE id = '${empresaId}'`);
+    await automatica({ ligada: true, desde: '2026-08-01' });
+    respostas.push(() => new Response(retorno('118', 'ok', { ult: '2', qt: 2, lote: lote([
+      `<distNFeSC NSU="1" chAcesso="${CHAVE_ORIGINAL}">${NOTA}</distNFeSC>`,
+      `<distNFeSC NSU="2" chAcesso="${CHAVE_AGOSTO}">${NOTA_AGOSTO}</distNFeSC>`,
+    ]) })));
+    // A de julho entra junto com a de agosto: julho não fica pela metade.
+    expect((await rodar())?.resultado).toMatch(/A SEF mandou 2 documento\(s\); Importou 2 nota/);
+    expect(db.consultar<any>("SELECT chave FROM notas WHERE origem = 'sefaz-auto' ORDER BY chave").map((n) => n.chave))
+      .toEqual([CHAVE_ORIGINAL, CHAVE_AGOSTO].sort());
+    // Nada da caixa ficou de fora.
+    expect(db.consultar<any>(`SELECT COUNT(*) AS n FROM captura_caixa c WHERE c.tipo = 'nota'
+      AND NOT EXISTS (SELECT 1 FROM notas n WHERE n.chave = c.chave)`)[0].n).toBe(0);
+  });
+
   it('busca automática: numa rodada passa de 20 notas (10/11, as notas ficavam paradas na caixa)', async () => {
     await automatica({ ligada: true, desde: '2026-07-01' });
     // SEF fechada para esta empresa: a rodada só trabalha a caixa.
