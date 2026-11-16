@@ -786,11 +786,25 @@ describe('tela: complemento da natureza (16/11)', () => {
     const f = corpoDe('function celulaComplemento(', 2000);
     expect(f).toContain('o.cfop === cfop');
     expect(f).toContain('compl-padrao');
-    expect(f).toContain('data-compl=');
+    expect(f).toContain("atributo = 'data-compl'");
     expect(corpoDe('async function salvarComplemento(', 500)).toContain('/complemento`');
     // A célula entra entre o CFOP e o valor.
     const linha = corpoDe('function linhaItem(', 6000);
     expect(linha.indexOf('celulaComplemento(i)')).toBeGreaterThan(linha.indexOf('data-campo="cfop"'));
     expect(linha.indexOf('celulaComplemento(i)')).toBeLessThan(linha.indexOf('moeda(i.valor_total)'));
+  });
+});
+
+/** 16/11, Taís: "a gente não vai ficar abrindo uma por uma" — o complemento também nas que vieram prontas. */
+describe('tela: complemento na lista das que vieram prontas (16/11)', () => {
+  const corpoDe = (inicio: string, n = 2400) => {
+    const i = APP.indexOf(inicio);
+    expect(i, inicio).toBeGreaterThan(-1);
+    return APP.slice(i, i + n);
+  };
+  it('os itens abertos na lista mostram o complemento com o padrão e gravam ali mesmo', () => {
+    expect(corpoDe('function desenharItensDaNota(', 2400)).toContain("comComplemento(n) ? celulaComplemento(i, n, 'data-mini-compl')");
+    expect(APP).toContain("ev.target.closest?.('[data-mini-compl]')");
+    expect(corpoDe("ev.target.closest?.('[data-mini-compl]')", 600)).toContain('/complemento`');
   });
 });

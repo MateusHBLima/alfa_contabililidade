@@ -1319,6 +1319,7 @@ function desenharItensDaNota(sub, n) {
                value="${esc(i.cfop_novo ?? '')}" data-mini-cfop="${esc(i.id)}" data-mini-nota="${esc(n.nota.id)}"
                aria-label="CFOP de entrada do item ${esc(i.n_item)}" title="Corrija aqui: grava na hora, sem abrir a nota">`
           : `<b>${esc(i.cfop_novo ?? '—')}</b>`}</td>
+        ${comComplemento(n) ? celulaComplemento(i, n, 'data-mini-compl') : ''}
         <td>${selinhoProcedencia(i.procedencia)}${i.revisado ? ' <span class="tag ok">conferido</span>' : ''}</td>
         <td class="num">${moeda(i.valor_total)}</td>
       </tr>`).join('')}</tbody></table>${editar && n.itens.some((i) => !i.revisado)
@@ -1337,6 +1338,23 @@ function reabrirItensDasNotas(rolagem) {
     });
   return estado.reabrindo;
 }
+
+// 16/11 (Taís: "a gente não vai ficar abrindo uma por uma"): o complemento também aparece
+// na lista das que vieram prontas, já com o padrão da empresa, e se troca ali mesmo.
+document.addEventListener('change', (ev) => {
+  const el = ev.target.closest?.('[data-mini-compl]');
+  if (!el) return;
+  registrarSalvamento((async () => {
+    try {
+      await api(`/api/itens/${el.dataset.miniCompl}/complemento`, { method: 'PUT', body: JSON.stringify({ complemento: el.value }) });
+      el.classList.remove('compl-padrao');
+      el.title = 'Escolhido nesta linha';
+      avisarSalvo('Complemento salvo');
+    } catch (e) {
+      alerta(`Não salvei o complemento: ${e.message}`);
+    }
+  })());
+});
 
 // CFOP corrigido na lista das que vieram prontas: grava, avisa e redesenha só aquela nota.
 document.addEventListener('change', (ev) => {
@@ -2179,8 +2197,7 @@ function comComplemento(n) {
 
 const naturezaCompleta = (cfop, compl) => `${cfop.slice(0, 1)}.${cfop.slice(1)}.${compl}`;
 
-function celulaComplemento(i) {
-  const n = estado.notaAberta;
+function celulaComplemento(i, n = estado.notaAberta, atributo = 'data-compl') {
   const cfop = String(i.cfop_novo ?? '').trim();
   const ops = (n?.naturezas ?? []).filter((o) => o.cfop === cfop);
   if (!ops.length) {
@@ -2193,7 +2210,7 @@ function celulaComplemento(i) {
   const ehPadrao = !escolhido && !!padrao;
   const travada = !!n?.nota?.cancelada_em || Number(n?.nota?.estorno) === 1;
   return `<td class="celula-edit">
-    <select class="compl${ehPadrao ? ' compl-padrao' : ''}" data-compl="${esc(i.id)}"${travada ? ' disabled' : ''}
+    <select class="compl${ehPadrao ? ' compl-padrao' : ''}" ${atributo}="${esc(i.id)}"${travada ? ' disabled' : ''}
       title="${ehPadrao ? 'Padrão da empresa para o CFOP ' + esc(cfop) + '. Escolha outro se esta nota for diferente.' : 'Escolhido nesta linha'}">
       ${padrao ? '' : `<option value=""${valor ? '' : ' selected'}>— escolha —</option>`}
       ${ops.map((o) => `<option value="${esc(o.complemento)}"${o.complemento === valor ? ' selected' : ''}>${esc(naturezaCompleta(cfop, o.complemento))}${o.descricao ? ' · ' + esc(o.descricao) : ''}${o.padrao ? ' (padrão)' : ''}</option>`).join('')}
