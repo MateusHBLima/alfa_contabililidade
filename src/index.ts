@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { Repo, ForaDoEscopo, type ContextoRequisicao } from './db/repo';
+import { Repo, ForaDoEscopo, ComplementoInvalido, type ContextoRequisicao } from './db/repo';
 import { Auditoria } from './db/auditoria';
 import {
   SemPermissao, exigir, exigirAlguma, resolverPermissoes, permissoesQuePodeConceder, podeVerEmpresa,
@@ -270,6 +270,7 @@ app.onError((err, c) => {
   }
   if (err instanceof SemPermissao) return c.json({ erro: err.message }, 403);
   if (err instanceof ForaDoEscopo) return c.json({ erro: err.message }, 404);
+  if (err instanceof ComplementoInvalido) return c.json({ erro: err.message }, 400);
   if (err instanceof ErroParserNFe) return c.json({ erro: err.message }, 422);
   if (err instanceof z.ZodError) return c.json({ erro: 'dados inválidos', detalhe: err.issues }, 400);
   console.error('erro não tratado', err);
@@ -3173,7 +3174,44 @@ app.get('/api/notas/:id', async (c) => {
   // Nota cancelada vale zero: o rodape diz isso em vez de somar.
   if (r.nota.cancelada_em) Object.assign(totaisCfop, { cancelada: true });
 
-  return c.json({ nota: r.nota, itens, resumo, totaisCfop });
+  // 16/11: os complementos de natureza da empresa, só para quem cuida do contábil.
+  const naturezas = c.get('sessao').permissoes.has('notas.complemento') ? await repo.naturezasDaEmpresa(r.nota.empresa_id) : [];
+
+  return c.json({ nota: r.nota, itens, resumo, totaisCfop, naturezas });
+});
+
+/**
+ * Complemento da natureza (16/11, pedido do Mateus, para o contábil). No Questor a
+ * natureza é o CFOP mais 3 dígitos (1.556.008), e é ela que leva a nota para a conta
+ * contábil. A lista é de cada empresa; um complemento por CFOP pode ser o padrão.
+ * Ver, carregar a lista e escolher no item: permissão `notas.complemento`, dada por pessoa.
+ */
+app.get('/api/empresas/:id/naturezas', async (c) => {
+  exigir(c.get('sessao'), 'notas.complemento');
+  return c.json({ naturezas: await c.get('repo').naturezasDaEmpresa(c.req.param('id')) });
+});
+
+app.put('/api/empresas/:id/naturezas', async (c) => {
+  exigir(c.get('sessao'), 'notas.complemento');
+  const { naturezas } = z.object({
+    naturezas: z.array(z.object({
+      cfop: z.string().regex(/^[123]\d{3}$/),
+      complemento: z.string().regex(/^\d{3}$/),
+      descricao: z.string().max(120).nullish(),
+      padrao: z.boolean().default(false),
+    })).max(500),
+  }).parse(await c.req.json());
+  const repo = c.get('repo');
+  if (!(await repo.obterEmpresa(c.req.param('id')))) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const total = await repo.substituirNaturezas(c.req.param('id'), naturezas);
+  return c.json({ ok: true, total, naturezas: await repo.naturezasDaEmpresa(c.req.param('id')) });
+});
+
+app.put('/api/itens/:id/complemento', async (c) => {
+  exigir(c.get('sessao'), 'notas.complemento');
+  const { complemento } = z.object({ complemento: z.string().regex(/^(\d{3})?$/) }).parse(await c.req.json());
+  await c.get('repo').definirComplemento(c.req.param('id'), complemento);
+  return c.json({ ok: true });
 });
 
 /**
@@ -3611,6 +3649,7 @@ app.delete('/api/empresas/:id', async (c) => {
     // 04/11: captura_empresas aponta para a empresa (chave estrangeira). Sem esta linha,
     // apagar empresa com a busca no SAT ligada dava erro 500.
     c.env.DB.prepare('DELETE FROM captura_empresas WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
+    c.env.DB.prepare('DELETE FROM naturezas_empresa WHERE tenant_id = ? AND empresa_id = ?').bind(s.tenantId, id),
     c.env.DB.prepare('DELETE FROM empresas WHERE tenant_id = ? AND id = ?').bind(s.tenantId, id),
   ]);
 
