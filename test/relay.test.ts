@@ -33,6 +33,7 @@ function certificado(cn: string, emissor?: { cert: forge.pki.Certificate; chave:
 
 const TOKEN = 'token-de-teste-do-intermediario-1234567890';
 let iis: https.Server;
+let adn: https.Server;
 let relay: ChildProcess;
 let porta = 0;
 let dir = '';
@@ -61,11 +62,20 @@ beforeAll(async () => {
   });
   await new Promise<void>((ok) => iis.listen(0, ok));
   const portaIis = (iis.address() as AddressInfo).port;
+  // Como o ADN da NFS-e: pede o certificado logo no aperto de mão e devolve JSON.
+  adn = https.createServer({ key: srv.chavePem, cert: srv.pem, ca: ac.pem, requestCert: true, rejectUnauthorized: false }, (req, res) => {
+    const c = (req.socket as import('node:tls').TLSSocket).getPeerCertificate();
+    res.writeHead(c?.subject ? 200 : 403, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ cn: c?.subject?.CN ?? null, metodo: req.method, url: req.url }));
+  });
+  await new Promise<void>((ok) => adn.listen(0, ok));
+  const portaAdn = (adn.address() as AddressInfo).port;
   porta = 20000 + Math.floor(Math.random() * 20000);
   relay = spawn(process.execPath, ['relay/relay.mjs'], {
     env: {
       ...process.env, PORT: String(porta), RELAY_TOKEN: TOKEN, RELAY_CHAVE: 'ab'.repeat(32), RELAY_DIR: dir,
       RELAY_DESTINO: `https://localhost:${portaIis}/ws/distribuicao/nfedownloadV2.asmx`, NODE_EXTRA_CA_CERTS: join(dir, 'ca.pem'),
+      RELAY_DESTINO_ADN: `https://localhost:${portaAdn}`,
     },
     stdio: 'pipe',
   });
@@ -75,6 +85,7 @@ beforeAll(async () => {
 afterAll(() => {
   relay?.kill();
   iis?.close();
+  adn?.close();
 });
 
 const chamar = (caminho: string, init: RequestInit = {}, token = TOKEN) =>
@@ -111,6 +122,21 @@ describe('intermediário da busca na SEF', () => {
     expect(await r.text()).toContain('url="/ws/distribuicao/nfedownloadV2.asmx"');
     expect((await chamar('/qualquer/coisa')).status).toBe(404);
     expect((await chamar('/sef/nao-existe?WSDL')).status).toBe(404);
+  });
+
+  it('16/11: consulta o ADN da NFS-e com o mesmo certificado, só GET e só /contribuintes/', async () => {
+    const r = await chamar('/adn/isa/contribuintes/DFe/0?lote=true');
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ cn: 'ISA TESTE:12345678909', metodo: 'GET', url: '/contribuintes/DFe/0?lote=true' });
+    expect((await chamar('/adn/isa/contribuintes/DFe/0', { method: 'POST', body: '{}' })).status).toBe(405);
+    expect(((await (await chamar('/adn/isa/contribuinte/DFe/0')).json()) as any).url).toBe('/contribuinte/DFe/0');
+    expect((await chamar('/adn/isa/nfse')).status).toBe(404);
+    expect((await chamar('/adn/isa/contribuintes/../nfse')).status).toBe(404);
+    expect((await chamar('/adn/isa/contribuintes/DFe/0?url=https://outro.site/')).status).toBe(400);
+    expect((await chamar('/adn/isa/contribuintes/DFe/0', {}, 'errado')).status).toBe(401);
+    expect((await chamar('/adn/nao-existe/contribuintes/DFe/0')).status).toBe(404);
+    // A SEF continua igual depois de usar o ADN.
+    expect(await (await chamar('/sef/isa?WSDL')).text()).toContain('cn="ISA TESTE:12345678909" metodo="GET"');
   });
 
   it('apagar tira o arquivo', async () => {

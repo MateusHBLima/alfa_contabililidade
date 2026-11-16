@@ -9,10 +9,12 @@
 //   POST   /certificados/:id   guarda certificado + chave (PEM), cifrados em disco
 //   DELETE /certificados/:id   apaga
 //   ANY    /sef/:id            repassa o pedido para a URL FIXA da SEF com o certificado :id
+//   GET    /adn/:id/contribuintes/...  consulta na base nacional da NFS-e (ADN), só leitura (16/11)
 //   GET    /saude              responde ok (sem token)
 //
 // Segurança: toda rota (menos /saude) exige o token do Alfa Fiscal (RELAY_TOKEN).
-// Não é um proxy aberto: o destino é fixo e não vem do pedido. As chaves ficam
+// Não é um proxy aberto: os destinos são fixos e não vêm do pedido. No ADN, só GET
+// (consulta) e só caminhos de /contribuintes/: nada de emitir nem cancelar nota. As chaves ficam
 // cifradas com AES-256-GCM (RELAY_CHAVE) no volume; nada de corpo vai para o log.
 //
 // Sem dependências: roda direto na imagem oficial node:22-alpine.
@@ -36,6 +38,8 @@ const TOKEN = segredo('RELAY_TOKEN');
 const CHAVE_HEX = segredo('RELAY_CHAVE');
 const DIR = process.env.RELAY_DIR || '/dados';
 const DESTINO = new URL(process.env.RELAY_DESTINO || 'https://satnfe.sef.sc.gov.br/ws/distribuicao/nfedownloadV2.asmx');
+// 16/11 (Mateus): testar com o mesmo certificado se as NFS-e aparecem na base nacional (ADN).
+const DESTINO_ADN = new URL(process.env.RELAY_DESTINO_ADN || 'https://adn.nfse.gov.br');
 const LIMITE_CORPO = 2 * 1024 * 1024;
 const TEMPO_SEF_MS = 60_000;
 
@@ -70,11 +74,25 @@ function decifrar(buf) {
 const arquivo = (id) => path.join(DIR, `${id}.cert`);
 const agentes = new Map();
 
-async function agenteDo(id) {
-  if (agentes.has(id)) return agentes.get(id);
+function esquecerAgentes(id) {
+  for (const destino of ['sef', 'adn']) {
+    agentes.get(`${destino}:${id}`)?.destroy();
+    agentes.delete(`${destino}:${id}`);
+  }
+}
+
+async function agenteDo(id, destino = 'sef') {
+  const chaveAgente = `${destino}:${id}`;
+  if (agentes.has(chaveAgente)) return agentes.get(chaveAgente);
   let bruto;
   try { bruto = await fs.readFile(arquivo(id)); } catch { return null; }
   const { cert, key } = JSON.parse(decifrar(bruto));
+  if (destino === 'adn') {
+    // O ADN pede o certificado logo no aperto de mão, sem renegociação: agente comum.
+    const agenteAdn = new https.Agent({ cert, key, keepAlive: true, minVersion: 'TLSv1.2' });
+    agentes.set(chaveAgente, agenteAdn);
+    return agenteAdn;
+  }
   // keepAlive: a renegociação acontece uma vez por conexão; reaproveitar evita refazer.
   // Sem retomada de sessão: na renegociação o servidor precisa fazer o aperto de mão
   // completo e pedir o certificado. Se a sessão for retomada, o certificado não vai.
@@ -82,7 +100,7 @@ async function agenteDo(id) {
     cert, key, keepAlive: true, maxSockets: 1, maxCachedSessions: 0,
     secureOptions: crypto.constants.SSL_OP_NO_TICKET, minVersion: 'TLSv1.2', maxVersion: 'TLSv1.2',
   });
-  agentes.set(id, agente);
+  agentes.set(chaveAgente, agente);
   return agente;
 }
 
@@ -105,18 +123,18 @@ function responder(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
-function repassar(agente, metodo, consulta, headers, corpo) {
+function repassar(agente, metodo, consulta, headers, corpo, destino = DESTINO, caminho = DESTINO.pathname) {
   return new Promise((ok, falha) => {
     const req = https.request({
-      host: DESTINO.hostname, port: Number(DESTINO.port) || 443, path: DESTINO.pathname + consulta, method: metodo, agent: agente,
-      servername: DESTINO.hostname, headers, timeout: TEMPO_SEF_MS,
+      host: destino.hostname, port: Number(destino.port) || 443, path: caminho + consulta, method: metodo, agent: agente,
+      servername: destino.hostname, headers, timeout: TEMPO_SEF_MS,
     }, (r) => {
       const partes = [];
       r.on('data', (p) => partes.push(p));
       r.on('end', () => ok({ status: r.statusCode || 502, tipo: r.headers['content-type'], corpo: Buffer.concat(partes) }));
       r.on('error', falha);
     });
-    req.on('timeout', () => req.destroy(new Error('a SEF não respondeu em 60 s')));
+    req.on('timeout', () => req.destroy(new Error(`${destino.hostname} não respondeu em 60 s`)));
     req.on('error', falha);
     if (corpo?.length) req.write(corpo);
     req.end();
@@ -141,14 +159,12 @@ const servidor = http.createServer(async (req, res) => {
         tls.createSecureContext({ cert, key });
         await fs.mkdir(DIR, { recursive: true });
         await fs.writeFile(arquivo(id), cifrar(JSON.stringify({ cert, key })), { mode: 0o600 });
-        agentes.get(id)?.destroy();
-        agentes.delete(id);
+        esquecerAgentes(id);
         console.log(`certificado ${id} guardado`);
         return responder(res, 200, { ok: true });
       }
       if (req.method === 'DELETE') {
-        agentes.get(id)?.destroy();
-        agentes.delete(id);
+        esquecerAgentes(id);
         await fs.rm(arquivo(id), { force: true });
         console.log(`certificado ${id} apagado`);
         return responder(res, 200, { ok: true });
@@ -176,6 +192,24 @@ const servidor = http.createServer(async (req, res) => {
       return res.end(r.corpo);
     }
 
+    // Base nacional da NFS-e (ADN), 16/11: só consulta, só /contribuintes/ (ou /contribuinte/), host fixo.
+    if (partes[0] === 'adn' && idValido(partes[1])) {
+      if (req.method !== 'GET') return responder(res, 405, { erro: 'no ADN o intermediário só consulta (GET)' });
+      const caminho = url.pathname.slice(`/adn/${partes[1]}`.length);
+      if (!/^\/contribuintes?\/[A-Za-z0-9/_.-]+$/.test(caminho) || caminho.includes('..')) {
+        return responder(res, 404, { erro: 'no ADN só os caminhos de /contribuintes/ (ou /contribuinte/)' });
+      }
+      if (!/^(\?[A-Za-z0-9=&_.-]*)?$/.test(url.search)) return responder(res, 400, { erro: 'consulta inválida' });
+      const agente = await agenteDo(partes[1], 'adn');
+      if (!agente) return responder(res, 404, { erro: 'certificado não está no intermediário' });
+      const t0 = Date.now();
+      const base = DESTINO_ADN.pathname.replace(/\/+$/, '');
+      const r = await repassar(agente, 'GET', url.search, { accept: 'application/json' }, null, DESTINO_ADN, base + caminho);
+      console.log(`adn GET ${caminho} -> ${r.status} em ${Date.now() - t0} ms`);
+      res.writeHead(r.status, { 'content-type': r.tipo || 'application/json; charset=utf-8', 'x-relay-ms': String(Date.now() - t0) });
+      return res.end(r.corpo);
+    }
+
     return responder(res, 404, { erro: 'rota inexistente' });
   } catch (e) {
     console.error(`erro: ${e?.code || ''} ${e?.message || e}`);
@@ -183,4 +217,4 @@ const servidor = http.createServer(async (req, res) => {
   }
 });
 
-servidor.listen(PORTA, () => console.log(`intermediário SEF ouvindo na porta ${PORTA}`));
+servidor.listen(PORTA, () => console.log(`intermediário SEF/ADN ouvindo na porta ${PORTA}`));
