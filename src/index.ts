@@ -25,6 +25,7 @@ import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, res
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
+import { resumirRespostaAdn } from './captura/adn';
 import { baixarDaSef, executarBuscaAutomatica, mesesDaSef, coberturaDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
 import { ErroSef } from './captura/sefsc';
 import { montarRelatorioCfop, montarRelatorioProdutos, montarRelatorioFornecedores, csvFornecedores, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, grupoIcms, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
@@ -2533,6 +2534,26 @@ app.get('/api/captura', async (c) => {
     certificados: await certificadosDaBusca(repo, c.env as unknown as AmbienteCaptura),
     buscas: await repo.historicoSef(),
   });
+});
+
+/**
+ * 16/11 (Mateus): teste do certificado na base nacional da NFS-e (ADN), pelo intermediário,
+ * para ver se as notas aparecem lá. Só consulta, só para quem administra a captura. O token
+ * do intermediário fica no servidor; a resposta é só o resumo (nunca o XML).
+ */
+app.get('/api/captura/adn-teste/:certId', async (c) => {
+  exigir(c.get('sessao'), 'captura.gerenciar');
+  const p = ponteConfigurada(c.env as unknown as AmbienteCaptura);
+  if (!p) return c.json({ erro: 'o intermediário não está configurado' }, 400);
+  const certId = c.req.param('certId');
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(certId)) return c.json({ erro: 'certificado inválido' }, 400);
+  const chamar = async (caminho: string) => {
+    const r = await fetch(`${p.url}/adn/${certId}${caminho}`, { headers: { authorization: `Bearer ${p.token}` } });
+    return { caminho, status: r.status, texto: await r.text() };
+  };
+  let r = await chamar('/contribuintes/DFe/0');
+  if (r.status === 404) r = await chamar('/contribuinte/DFe/0');
+  return c.json(await resumirRespostaAdn(r.status, r.caminho, r.texto));
 });
 
 app.post('/api/captura/testar', async (c) => {

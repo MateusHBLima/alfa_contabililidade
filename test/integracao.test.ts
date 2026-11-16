@@ -6749,3 +6749,39 @@ describe('16/11: complemento da natureza (contábil), lista por empresa e permis
     expect(((await (await req2(`/api/notas/${nota}`)).json()) as any).naturezas).toHaveLength(1);
   });
 });
+
+describe('16/11: teste do certificado no ADN da NFS-e pelo intermediário', () => {
+  const ambiente = (extra: Record<string, unknown> = {}) => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao', ...extra,
+  }) as never;
+  const entrar = async () => ((await app.fetch(new Request('http://x/api/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: 'contadora@alfacontabil.net', senha: 'uma frase de senha longa' }),
+  }), ambiente())).headers.get('Set-Cookie') ?? '').split(';')[0]!;
+
+  it('chama o intermediário com o token do servidor, tenta o singular no 404 e devolve só o resumo', async () => {
+    const ck = await entrar();
+    const pedidos: { url: string; auth: string | null }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (u: string, init?: RequestInit) => {
+      pedidos.push({ url: String(u), auth: new Headers(init?.headers).get('authorization') });
+      if (String(u).includes('/contribuintes/')) return new Response('{"erro":"x"}', { status: 404 });
+      return new Response(JSON.stringify({ LoteDFe: [{ NSU: 5, ArquivoXml: Buffer.from('<emit><CNPJ>11222333000181</CNPJ></emit>').toString('base64') }] }), { status: 200 });
+    }));
+    try {
+      const r = await app.fetch(new Request('http://x/api/captura/adn-teste/cert-1', { headers: { Cookie: ck } }),
+        ambiente({ SEF_PONTE_URL: 'https://relay.teste/', SEF_PONTE_TOKEN: 'segredo-do-relay' }));
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({ status: 200, caminho: '/contribuinte/DFe/0', documentos: 1, maiorNsu: 5, prestadores: [{ nsu: '5', documento: '11222333000181' }] });
+      expect(pedidos.map((p) => p.url)).toEqual(['https://relay.teste/adn/cert-1/contribuintes/DFe/0', 'https://relay.teste/adn/cert-1/contribuinte/DFe/0']);
+      expect(pedidos.every((p) => p.auth === 'Bearer segredo-do-relay')).toBe(true);
+      // Sem intermediário configurado, ou certificado com caractere estranho: recusa.
+      expect((await app.fetch(new Request('http://x/api/captura/adn-teste/cert-1', { headers: { Cookie: ck } }), ambiente())).status).toBe(400);
+      expect((await app.fetch(new Request('http://x/api/captura/adn-teste/a%2F..', { headers: { Cookie: ck } }),
+        ambiente({ SEF_PONTE_URL: 'https://relay.teste', SEF_PONTE_TOKEN: 't' }))).status).toBe(400);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
