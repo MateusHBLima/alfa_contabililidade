@@ -3,8 +3,8 @@
 # Antes de subir, criar no Portainer (uma vez):
 #   Secrets › sef_relay_token  — o mesmo valor do SEF_PONTE_TOKEN da Cloudflare
 #   Secrets › sef_relay_chave  — 64 caracteres hexadecimais (cifra os certificados em disco)
-#   Configs › sef_relay_v1     — o conteúdo de relay/relay.mjs
-# Código novo = config nova (sef_relay_v2, ...) e trocar o nome aqui embaixo.
+#   Configs › sef_relay_v2     — o conteúdo de relay/relay.mjs (v2, 16/11: + consulta no ADN da NFS-e)
+# Código novo = config nova (sef_relay_v3, ...) e trocar o nome aqui embaixo.
 version: "3.8"
 
 services:
@@ -20,7 +20,7 @@ services:
       - sef_relay_token
       - sef_relay_chave
     configs:
-      - source: sef_relay_v1
+      - source: sef_relay_v2
         target: /app/relay.mjs
     volumes:
       - sef_relay_dados:/dados
@@ -63,5 +63,5 @@ secrets:
     external: true
 
 configs:
-  sef_relay_v1:
+  sef_relay_v2:
     external: true
