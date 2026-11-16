@@ -105,7 +105,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(37); // + links_acesso (0034) // + segmento_regras e aviso_item (0033) // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026), produto_atencao (0031), conversas do assistente (0032: conversa, mensagem, evento)
+    expect(tabelas.length).toBe(38); // + naturezas_empresa (0036) // + links_acesso (0034) // + segmento_regras e aviso_item (0033) // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026), produto_atencao (0031), conversas do assistente (0032: conversa, mensagem, evento)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(4); // + Somente leitura (0029)
   });
@@ -6655,5 +6655,97 @@ describe('23/10: link de acesso — a Taís gerencia as contas sozinha', () => {
     });
     expect(errado.status).toBe(400);
     expect((await errado.json() as any).erro).toContain('convite');
+  });
+});
+
+describe('16/11: complemento da natureza (contábil), lista por empresa e permissão por pessoa', () => {
+  const ambiente = () => ({
+    DB: db, XML_ORIGINAL: r2, XML_TRABALHO: r2,
+    ASSETS: { fetch: async () => new Response('', { status: 404 }) },
+    SESSION_SECRET: 's', AUDIT_SEED: SEED, AMBIENTE: 'producao',
+  }) as never;
+  const entrar = async (email: string) => ((await app.fetch(new Request('http://x/api/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, senha: 'uma frase de senha longa' }),
+  }), ambiente())).headers.get('Set-Cookie') ?? '').split(';')[0]!;
+  const como = (ck: string) => (c: string, o: RequestInit = {}) => app.fetch(new Request(`http://x${c}`, {
+    ...o, headers: { 'content-type': 'application/json', Cookie: ck, ...(o.headers ?? {}) },
+  }), ambiente());
+  const put = (corpo: unknown): RequestInit => ({ method: 'PUT', body: JSON.stringify(corpo) });
+
+  it('nasce só no papel Admin', () => {
+    const papeis = db.consultar<any>("SELECT papel_id FROM papel_permissoes WHERE permissao = 'notas.complemento'").map((r) => r.papel_id);
+    expect(papeis).toEqual(['papel-admin']);
+  });
+
+  it('carrega a lista da empresa, a nota traz a lista, o item escolhe sem virar conferência, e trocar o CFOP limpa', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'EMPRESA TESTE', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '71') }]);
+    const req = como(await entrar('contadora@alfacontabil.net'));
+
+    let r = await req(`/api/empresas/${empresaId}/naturezas`, put({ naturezas: [
+      { cfop: '1556', complemento: '008', descricao: 'DESP. ADM. a Prazo', padrao: true },
+      { cfop: '1556', complemento: '006', descricao: 'DESP. VENDA a Prazo' },
+      { cfop: '1556', complemento: '007', descricao: 'DESP. ADM. a vista', padrao: true }, // segundo padrão do 1556: fica sem
+      { cfop: '1102', complemento: '002', descricao: 'Compra para comerc - a prazo', padrao: true },
+      { cfop: '1102', complemento: '002', descricao: 'repetido' },
+    ] }));
+    expect(r.status).toBe(200);
+    const lista = (await r.json()) as any;
+    expect(lista.total).toBe(4);
+    expect(lista.naturezas.map((n: any) => `${n.cfop}.${n.complemento}${n.padrao ? '*' : ''}`)).toEqual(['1102.002*', '1556.006', '1556.007', '1556.008*']);
+    expect((await req(`/api/empresas/${empresaId}/naturezas`, put({ naturezas: [{ cfop: '5102', complemento: '1' }] }))).status).toBe(400);
+    expect(db.consultar<any>("SELECT valor_depois FROM auditoria WHERE entidade = 'empresa' AND campo = 'naturezas'"))
+      .toEqual([{ valor_depois: '1102.002* 1556.006 1556.007 1556.008*' }]);
+
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    const nt = (await (await req(`/api/notas/${nota}`)).json()) as any;
+    expect(nt.naturezas).toHaveLength(4);
+
+    const item = (db.consultar('SELECT id FROM itens WHERE nota_id = ? ORDER BY n_item', nota)[0] as any).id;
+    db.consultar("UPDATE itens SET cfop_novo = '1556', revisado = 0 WHERE id = ?", item);
+    r = await req(`/api/itens/${item}/complemento`, put({ complemento: '006' }));
+    expect(r.status).toBe(200);
+    expect(db.consultar<any>('SELECT complemento, complemento_origem, revisado FROM itens WHERE id = ?', item))
+      .toEqual([{ complemento: '006', complemento_origem: 'manual', revisado: 0 }]);
+    // Complemento que não é do CFOP da linha, nesta empresa: recusa.
+    r = await req(`/api/itens/${item}/complemento`, put({ complemento: '002' }));
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as any).erro).toMatch(/002 não está na lista desta empresa para o CFOP 1556/);
+    expect(db.consultar<any>("SELECT valor_antes, valor_depois FROM auditoria WHERE campo = 'complemento'"))
+      .toEqual([{ valor_antes: null, valor_depois: '006' }]);
+
+    // Trocar o CFOP: o complemento era do 1556 e sai; a linha volta ao padrão do CFOP novo.
+    r = await req(`/api/itens/${item}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: '1102' }] }) });
+    expect(r.status).toBe(200);
+    expect(db.consultar<any>('SELECT complemento FROM itens WHERE id = ?', item)).toEqual([{ complemento: null }]);
+    // Vazio = padrão da empresa.
+    await req(`/api/itens/${item}/complemento`, put({ complemento: '002' }));
+    await req(`/api/itens/${item}/complemento`, put({ complemento: '' }));
+    expect(db.consultar<any>('SELECT complemento, complemento_origem FROM itens WHERE id = ?', item)).toEqual([{ complemento: null, complemento_origem: null }]);
+
+    // Apagar a empresa leva a lista junto.
+    expect((await req(`/api/empresas/${empresaId}?confirmar=11222333000181`, { method: 'DELETE' })).status).toBe(200);
+    expect(db.consultar('SELECT 1 FROM naturezas_empresa')).toHaveLength(0);
+  });
+
+  it('quem não tem a permissão não vê a lista na nota nem escolhe', async () => {
+    const empresaId = await repo.criarEmpresa({ cnpj: '11222333000181', razaoSocial: 'EMPRESA TESTE', uf: 'SC', perfil: 'revenda' });
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: outraNota(XML, '72') }]);
+    await repo.substituirNaturezas(empresaId, [{ cfop: '1102', complemento: '002', padrao: true }]);
+    await db.prepare('INSERT INTO usuarios (id, tenant_id, email, nome, senha_hash, criado_em) VALUES (?,?,?,?,?,?)')
+      .bind('u-leitura', 'alfa', 'leitura@alfacontabil.net', 'Leitura', await gerarHashSenha('uma frase de senha longa'), new Date().toISOString()).run();
+    await db.prepare('INSERT INTO usuario_papeis (usuario_id, papel_id) VALUES (?,?)').bind('u-leitura', 'papel-leitura').run();
+    const req = como(await entrar('leitura@alfacontabil.net'));
+    const nota = (db.consultar('SELECT id FROM notas')[0] as any).id;
+    const item = (db.consultar('SELECT id FROM itens WHERE nota_id = ? ORDER BY n_item', nota)[0] as any).id;
+    expect(((await (await req(`/api/notas/${nota}`)).json()) as any).naturezas).toEqual([]);
+    expect((await req(`/api/empresas/${empresaId}/naturezas`)).status).toBe(403);
+    expect((await req(`/api/itens/${item}/complemento`, put({ complemento: '002' }))).status).toBe(403);
+
+    // Dada à pessoa por exceção, passa a ver.
+    db.consultar("INSERT INTO usuario_permissoes (usuario_id, permissao, concedida, definida_em) VALUES ('u-leitura', 'notas.complemento', 1, '2026-11-16')");
+    const req2 = como(await entrar('leitura@alfacontabil.net'));
+    expect(((await (await req2(`/api/notas/${nota}`)).json()) as any).naturezas).toHaveLength(1);
   });
 });

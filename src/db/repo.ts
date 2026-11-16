@@ -28,6 +28,14 @@ export class ForaDoEscopo extends Error {
   }
 }
 
+/** Complemento que não existe na lista da empresa para aquele CFOP (16/11). Vira 400. */
+export class ComplementoInvalido extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = 'ComplementoInvalido';
+  }
+}
+
 function id(): string {
   return crypto.randomUUID();
 }
@@ -830,6 +838,19 @@ export class Repo {
       );
     }
 
+    // 16/11: o complemento da natureza é do CFOP. Trocou o CFOP, o complemento escolhido
+    // não vale mais; a linha volta a mostrar o padrão da empresa para o CFOP novo.
+    const cfopTrocado = mudancas.find((m) => m.campo === 'cfop')?.valor;
+    if (cfopTrocado !== undefined && cfopTrocado.trim() !== String(atual.cfop_novo ?? '').trim() && atual.complemento) {
+      sets.push('complemento = NULL', 'complemento_origem = NULL');
+      eventos.push(
+        this.evento({
+          acao: 'alterar', entidade: 'item_nota', entidadeId: itemId,
+          campo: 'complemento', valorAntes: atual.complemento, valorDepois: null, origem: 'sistema',
+        }),
+      );
+    }
+
     // Concordar com a sugestao TAMBEM e trabalho - e e o caso mais comum, porque o
     // motor existe justamente para acertar sozinho. Antes, quando o valor digitado
     // era igual ao que ja estava, o metodo saia aqui sem gravar nada: a contadora
@@ -863,6 +884,104 @@ export class Repo {
       .run();
 
     await this.aud.registrarLote(eventos);
+  }
+
+  // ---------------------------------------------------------------- naturezas (contábil)
+
+  /**
+   * Os complementos de natureza da empresa (16/11). Cada empresa tem a sua lista, do
+   * Questor dela: 1556 pode ter 005, 006, 007 e 008 numa e só 001 em outra.
+   */
+  async naturezasDaEmpresa(empresaId: string): Promise<{ cfop: string; complemento: string; descricao: string | null; padrao: boolean }[]> {
+    this.exigirEmpresa(empresaId);
+    const { results } = await this.db
+      .prepare(
+        `SELECT cfop, complemento, descricao, padrao FROM naturezas_empresa
+          WHERE tenant_id = ? AND empresa_id = ? ORDER BY cfop, complemento`,
+      )
+      .bind(this.tenant, empresaId)
+      .all<any>();
+    return results.map((r) => ({ cfop: r.cfop, complemento: r.complemento, descricao: r.descricao ?? null, padrao: r.padrao === 1 }));
+  }
+
+  /**
+   * Troca a lista inteira de complementos da empresa (a carga do relatório do Questor).
+   * O que já foi escolhido nos itens fica; complemento que saiu da lista volta a valer
+   * o padrão na tela. Um padrão por CFOP, no máximo.
+   */
+  async substituirNaturezas(
+    empresaId: string,
+    lista: { cfop: string; complemento: string; descricao?: string | null; padrao?: boolean }[],
+  ): Promise<number> {
+    this.exigirEmpresa(empresaId);
+    const vistos = new Set<string>();
+    const comPadrao = new Set<string>();
+    const linhas = [];
+    for (const n of lista) {
+      const chave = `${n.cfop}.${n.complemento}`;
+      if (vistos.has(chave)) continue;
+      vistos.add(chave);
+      const padrao = !!n.padrao && !comPadrao.has(n.cfop);
+      if (padrao) comPadrao.add(n.cfop);
+      linhas.push({ ...n, padrao });
+    }
+    const antes = await this.naturezasDaEmpresa(empresaId);
+    const quando = agora();
+    await this.db.batch([
+      this.db.prepare('DELETE FROM naturezas_empresa WHERE tenant_id = ? AND empresa_id = ?').bind(this.tenant, empresaId),
+      ...linhas.map((n) => this.db
+        .prepare(
+          `INSERT INTO naturezas_empresa (id, tenant_id, empresa_id, cfop, complemento, descricao, padrao, criado_por, criado_em)
+           VALUES (?,?,?,?,?,?,?,?,?)`,
+        )
+        .bind(this.novoId(), this.tenant, empresaId, n.cfop, n.complemento, n.descricao?.trim() || null, n.padrao ? 1 : 0,
+          this.ctx.sessao.usuarioId, quando)),
+    ]);
+    const resumo = (l: { cfop: string; complemento: string; padrao?: boolean }[]) =>
+      l.map((n) => `${n.cfop}.${n.complemento}${n.padrao ? '*' : ''}`).sort().join(' ');
+    await this.aud.registrarLote([
+      this.evento({
+        acao: 'alterar', entidade: 'empresa', entidadeId: empresaId, campo: 'naturezas',
+        valorAntes: resumo(antes) || null, valorDepois: resumo(linhas) || null, origem: 'manual',
+      }),
+    ]);
+    return linhas.length;
+  }
+
+  /**
+   * O complemento de um item (16/11). Não é conferência fiscal: não marca a linha como
+   * conferida nem ensina regra de CFOP. Vazio volta para o padrão da empresa.
+   */
+  async definirComplemento(itemId: string, complemento: string): Promise<void> {
+    const atual = await this.db
+      .prepare(
+        `SELECT i.id, i.cfop_novo, i.complemento, n.empresa_id FROM itens i
+         JOIN notas n ON n.id = i.nota_id WHERE i.tenant_id = ? AND i.id = ?`,
+      )
+      .bind(this.tenant, itemId)
+      .first<any>();
+    if (!atual) throw new ForaDoEscopo('Item não encontrado');
+    this.exigirEmpresa(atual.empresa_id);
+    const valor = complemento.trim();
+    if (valor) {
+      const cfop = String(atual.cfop_novo ?? '').trim();
+      const existe = await this.db
+        .prepare('SELECT 1 FROM naturezas_empresa WHERE tenant_id = ? AND empresa_id = ? AND cfop = ? AND complemento = ?')
+        .bind(this.tenant, atual.empresa_id, cfop, valor)
+        .first();
+      if (!existe) throw new ComplementoInvalido(`O complemento ${valor} não está na lista desta empresa para o CFOP ${cfop || '(vazio)'}.`);
+    }
+    if (String(atual.complemento ?? '') === valor) return;
+    await this.db
+      .prepare('UPDATE itens SET complemento = ?, complemento_origem = ? WHERE tenant_id = ? AND id = ?')
+      .bind(valor || null, valor ? 'manual' : null, this.tenant, itemId)
+      .run();
+    await this.aud.registrarLote([
+      this.evento({
+        acao: 'alterar', entidade: 'item_nota', entidadeId: itemId,
+        campo: 'complemento', valorAntes: atual.complemento ?? null, valorDepois: valor || null, origem: 'manual',
+      }),
+    ]);
   }
 
   /**

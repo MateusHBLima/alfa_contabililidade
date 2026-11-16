@@ -36,6 +36,8 @@ export const PERMISSOES = {
     descricao: 'Alterar CST de entrada, conta contábil e créditos',
   },
   'notas.exportar': { grupo: 'Notas', descricao: 'Gerar e baixar o XML corrigido e a escrituração' },
+  // 16/11 (Mateus): o complemento da natureza é do contábil e cada pessoa recebe ou não.
+  'notas.complemento': { grupo: 'Notas', descricao: 'Ver e escolher o complemento da natureza (contábil)' },
   // Destruicao tem chave propria: quem trata nota o dia inteiro nao precisa poder
   // apagar. Serve para engano de importacao e dado de teste.
   'notas.apagar': { grupo: 'Notas', descricao: 'Apagar uma nota importada e tudo que veio com ela' },

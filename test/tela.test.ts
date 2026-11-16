@@ -352,12 +352,17 @@ describe('tela: colunas da tabela de itens', () => {
     expect(cabecalho).toMatch(/>Valor<\/th>\s*<th[^>]*>Valor contábil<\/th>/);
   });
 
+  // A coluna do complemento (16/11) só existe para quem tem a permissão e na empresa com a lista.
+  const nFixas = nTh - 1;
+
   it('cada linha tem uma célula por coluna do cabeçalho — senão os valores andam de coluna', () => {
-    expect((retorno.match(/<td\b/g) ?? []).length).toBe(nTh);
+    expect(cabecalho).toContain('id="th-compl" class="hidden"');
+    expect((retorno.match(/<td\b/g) ?? []).length).toBe(nFixas);
+    expect(retorno).toContain('${comComplemento(estado.notaAberta) ? celulaComplemento(i) : \'\'}');
   });
 
   it('a mensagem de "nenhum item" ocupa a largura toda', () => {
-    expect(APP).toContain(`colspan="${nTh}" class="vazio"`);
+    expect(APP).toContain(`colspan="\${comComplemento(n) ? ${nTh} : ${nFixas}}" class="vazio"`);
   });
 
   it('o rodapé com o total por CFOP da nota existe e vem do servidor', () => {
@@ -761,5 +766,31 @@ describe('tela: pedidos de 05/11', () => {
     const apagar = corpoDe('function apagarEmpresa(', 1400);
     expect(apagar).toContain('await carregarEmpresas()');
     expect(apagar).toContain('atualizarPendencias()');
+  });
+});
+
+/** 16/11, Mateus: coluna do complemento da natureza ao lado do CFOP, lista que abre, da empresa. */
+describe('tela: complemento da natureza (16/11)', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const corpoDe = (inicio: string, n = 2400) => {
+    const i = APP.indexOf(inicio);
+    expect(i, inicio).toBeGreaterThan(-1);
+    return APP.slice(i, i + n);
+  };
+  it('a coluna fica logo depois do CFOP de entrada e escondida até ter permissão e lista', () => {
+    expect(HTML).toMatch(/CFOP entrada<\/th>\s*<th id="th-compl" class="hidden"/);
+    expect(corpoDe('function comComplemento(', 200)).toContain("pode('notas.complemento')");
+    expect(corpoDe('function renderItens(', 6000)).toContain("$('#th-compl')?.classList.toggle('hidden', !comComplemento(n))");
+  });
+  it('a lista que abre tem só os complementos da empresa para o CFOP da linha, com o padrão em cinza', () => {
+    const f = corpoDe('function celulaComplemento(', 2000);
+    expect(f).toContain('o.cfop === cfop');
+    expect(f).toContain('compl-padrao');
+    expect(f).toContain('data-compl=');
+    expect(corpoDe('async function salvarComplemento(', 500)).toContain('/complemento`');
+    // A célula entra entre o CFOP e o valor.
+    const linha = corpoDe('function linhaItem(', 6000);
+    expect(linha.indexOf('celulaComplemento(i)')).toBeGreaterThan(linha.indexOf('data-campo="cfop"'));
+    expect(linha.indexOf('celulaComplemento(i)')).toBeLessThan(linha.indexOf('moeda(i.valor_total)'));
   });
 });

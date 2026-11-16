@@ -1983,6 +1983,7 @@ function renderItens() {
       : '') +
     barraConferirCertos(n, cancelada || Number(n.nota.estorno) === 1);
 
+  $('#th-compl')?.classList.toggle('hidden', !comComplemento(n));
   const lista = itensVisiveis();
 
   // Filtro que nao casa nada tem que DIZER isso. Sem esta linha a tabela some e
@@ -2000,7 +2001,7 @@ function renderItens() {
           conferido: 'Nenhum item conferido ainda.',
         }[estado.filtro] ?? 'Nenhum item nesta situação.';
     corpo.innerHTML =
-      `<tr><td colspan="10" class="vazio">${esc(porque)}
+      `<tr><td colspan="${comComplemento(n) ? 11 : 10}" class="vazio">${esc(porque)}
         <button class="btn sm" id="limpar-filtro-itens">Ver todos os ${n.itens.length} itens</button>
       </td></tr>`;
     $('#limpar-filtro-itens')?.addEventListener('click', () => {
@@ -2026,6 +2027,9 @@ function renderItens() {
       (nNovo ? `<span class="etiqueta etiqueta-novo">＋ produto novo · ${nNovo}</span>` : '');
   }
 
+  $$('#tbl-itens [data-compl]').forEach((el) => {
+    el.addEventListener('change', () => salvarComplemento(el.dataset.compl, el.value));
+  });
   $$('#tbl-itens [data-campo]').forEach((el) => {
     el.addEventListener('change', () => salvarCampo(el.dataset.item, el.dataset.campo, el.value));
   });
@@ -2164,6 +2168,51 @@ function composicaoContabil(i) {
   return partes.join(' ');
 }
 
+/**
+ * Complemento da natureza (16/11, pedido do Mateus, para o contábil). No Questor a
+ * natureza é o CFOP mais 3 dígitos (1.556.008), e a lista é de cada empresa. A coluna
+ * só aparece para quem tem a permissão e na empresa que já tem a lista carregada.
+ */
+function comComplemento(n) {
+  return pode('notas.complemento') && (n?.naturezas?.length ?? 0) > 0;
+}
+
+const naturezaCompleta = (cfop, compl) => `${cfop.slice(0, 1)}.${cfop.slice(1)}.${compl}`;
+
+function celulaComplemento(i) {
+  const n = estado.notaAberta;
+  const cfop = String(i.cfop_novo ?? '').trim();
+  const ops = (n?.naturezas ?? []).filter((o) => o.cfop === cfop);
+  if (!ops.length) {
+    return `<td class="tiny" title="${cfop ? `Esta empresa não tem complemento cadastrado para o CFOP ${esc(cfop)}` : 'Preencha o CFOP primeiro'}">—</td>`;
+  }
+  const padrao = ops.find((o) => o.padrao);
+  // Complemento de outro CFOP (o CFOP mudou depois) não vale: a linha mostra o padrão.
+  const escolhido = ops.some((o) => o.complemento === i.complemento) ? i.complemento : '';
+  const valor = escolhido || padrao?.complemento || '';
+  const ehPadrao = !escolhido && !!padrao;
+  const travada = !!n?.nota?.cancelada_em || Number(n?.nota?.estorno) === 1;
+  return `<td class="celula-edit">
+    <select class="compl${ehPadrao ? ' compl-padrao' : ''}" data-compl="${esc(i.id)}"${travada ? ' disabled' : ''}
+      title="${ehPadrao ? 'Padrão da empresa para o CFOP ' + esc(cfop) + '. Escolha outro se esta nota for diferente.' : 'Escolhido nesta linha'}">
+      ${padrao ? '' : `<option value=""${valor ? '' : ' selected'}>— escolha —</option>`}
+      ${ops.map((o) => `<option value="${esc(o.complemento)}"${o.complemento === valor ? ' selected' : ''}>${esc(naturezaCompleta(cfop, o.complemento))}${o.descricao ? ' · ' + esc(o.descricao) : ''}${o.padrao ? ' (padrão)' : ''}</option>`).join('')}
+    </select>
+  </td>`;
+}
+
+async function salvarComplemento(itemId, valor) {
+  return registrarSalvamento((async () => {
+    try {
+      await api(`/api/itens/${itemId}/complemento`, { method: 'PUT', body: JSON.stringify({ complemento: valor }) });
+      avisarSalvo();
+    } catch (e) {
+      alerta(`Não salvei o complemento: ${e.message}`);
+    }
+    await recarregarNota().catch(() => {});
+  })());
+}
+
 function linhaItem(i) {
   const est = i.estilo ?? { estado: 'pronto', icone: '✓', rotulo: 'Pronto' };
   // Linha conferida: o aviso continua escrito (registro do que ela viu), mas apagado -
@@ -2215,6 +2264,7 @@ function linhaItem(i) {
       ${pode('auditoria.visualizar') ? `<button class="btn sm sutil historico" data-trilha="${i.id}"
          title="O que já mudou neste item, quem mudou e quando">↩ como estava</button>` : ''}
     </td>
+    ${comComplemento(estado.notaAberta) ? celulaComplemento(i) : ''}
     <td class="num">${notaCancelada
       ? `<span title="Valor do XML: ${moeda(i.valor_total)} — nota cancelada, vale zero">0,00</span>`
       : moeda(i.valor_total)}</td>

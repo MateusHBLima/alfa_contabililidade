@@ -176,6 +176,9 @@ tr.estado-bloqueado td:first-child{box-shadow:inset 3px 0 0 var(--danger)}
 
 .celula-edit input,.celula-edit select{width:100%;font-size:12.5px;padding:4px 6px}
 .celula-edit input.cfop{width:74px;font-family:"Cascadia Mono",Consolas,monospace}
+/* 16/11: complemento da natureza (contábil). Cinza = padrão da empresa, ninguém escolheu. */
+.celula-edit select.compl{font-size:12px}
+.celula-edit select.compl-padrao{color:var(--muted);font-style:italic}
 
 .log{background:#0f1b2b;color:#c8d6e8;border-radius:6px;padding:11px 13px;font-size:11.5px;
   font-family:"Cascadia Mono",Consolas,monospace;max-height:220px;overflow:auto;white-space:pre-wrap}
