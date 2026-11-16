@@ -192,12 +192,12 @@ const servidor = http.createServer(async (req, res) => {
       return res.end(r.corpo);
     }
 
-    // Base nacional da NFS-e (ADN), 16/11: só consulta, só /contribuintes/, host fixo.
+    // Base nacional da NFS-e (ADN), 16/11: só consulta, só /contribuintes/ (ou /contribuinte/), host fixo.
     if (partes[0] === 'adn' && idValido(partes[1])) {
       if (req.method !== 'GET') return responder(res, 405, { erro: 'no ADN o intermediário só consulta (GET)' });
       const caminho = url.pathname.slice(`/adn/${partes[1]}`.length);
-      if (!/^\/contribuintes\/[A-Za-z0-9/_.-]+$/.test(caminho) || caminho.includes('..')) {
-        return responder(res, 404, { erro: 'no ADN só os caminhos de /contribuintes/' });
+      if (!/^\/contribuintes?\/[A-Za-z0-9/_.-]+$/.test(caminho) || caminho.includes('..')) {
+        return responder(res, 404, { erro: 'no ADN só os caminhos de /contribuintes/ (ou /contribuinte/)' });
       }
       if (!/^(\?[A-Za-z0-9=&_.-]*)?$/.test(url.search)) return responder(res, 400, { erro: 'consulta inválida' });
       const agente = await agenteDo(partes[1], 'adn');

@@ -129,6 +129,7 @@ describe('intermediário da busca na SEF', () => {
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({ cn: 'ISA TESTE:12345678909', metodo: 'GET', url: '/contribuintes/DFe/0?lote=true' });
     expect((await chamar('/adn/isa/contribuintes/DFe/0', { method: 'POST', body: '{}' })).status).toBe(405);
+    expect(((await (await chamar('/adn/isa/contribuinte/DFe/0')).json()) as any).url).toBe('/contribuinte/DFe/0');
     expect((await chamar('/adn/isa/nfse')).status).toBe(404);
     expect((await chamar('/adn/isa/contribuintes/../nfse')).status).toBe(404);
     expect((await chamar('/adn/isa/contribuintes/DFe/0?url=https://outro.site/')).status).toBe(400);
