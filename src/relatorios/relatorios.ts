@@ -133,6 +133,7 @@ const NATUREZA: Record<string, string> = {
   '116': 'Compra p/ industrialização — entrega futura',
   '117': 'Compra p/ comercialização — entrega futura',
   '124': 'Industrialização efetuada por outra empresa',
+  '128': 'Compra para utilização na prestação de serviço (ISS)',
   '201': 'Devolução de venda de produção',
   '202': 'Devolução de venda de mercadoria',
   '252': 'Compra de energia elétrica — industrial',

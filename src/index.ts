@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { Repo, ForaDoEscopo, ComplementoInvalido, type ContextoRequisicao } from './db/repo';
+import { Repo, ForaDoEscopo, ComplementoInvalido, type ContextoRequisicao, type ConflitoCfop } from './db/repo';
 import { Auditoria } from './db/auditoria';
 import {
   SemPermissao, exigir, exigirAlguma, resolverPermissoes, permissoesQuePodeConceder, podeVerEmpresa,
@@ -3243,6 +3243,73 @@ app.put('/api/itens/:id/complemento', async (c) => {
  *
  * `escopo: 'fornecedor'` = aplica o padrão a todo o fornecedor, não só a este produto.
  */
+/**
+ * Um produto, um CFOP (17/11, Mateus: "isso não pode acontecer de forma alguma").
+ *
+ * Toda rota que decide o CFOP de um item (digitar, aplicar na nota, conferir) passa por
+ * aqui ANTES de gravar. Se o mesmo produto - mesmo fornecedor, mesmo código, mesmo CFOP
+ * que veio - já está decidido com outro CFOP em outra nota, nada é gravado sem a escolha
+ * dela: `igualar` (as anteriores passam para o CFOP de agora) ou `manter` (as anteriores
+ * ficam como estão, de propósito). Sem a escolha, 409 com a lista das anteriores, e a
+ * tela pergunta. Assim, produto com dois CFOPs só existe se alguém decidiu, e fica na
+ * trilha quem e quando.
+ *
+ * Devolve a resposta quando é para parar; `undefined` quando a rota pode seguir.
+ */
+const ESCOLHA_ANTERIORES = z.enum(['igualar', 'manter']).optional();
+/**
+ * Taís, 17/11: "o certo é o último, mas só de 01.11 pra frente". Com `igualar`, `desde`
+ * (AAAA-MM) troca só as notas daquele mês para cá; as mais antigas ficam como estão, de
+ * propósito (mês já fechado). Sem `desde`, troca todas.
+ */
+const DESDE_ANTERIORES = z.string().regex(/^\d{4}-\d{2}$/).optional();
+type AlvoCfop = { id: string; nItem: number; produto: string; cProd: string | null; saida: string | null; cfop: string };
+const alvoDoItem = (i: any, cfop: string): AlvoCfop => ({
+  id: i.id, nItem: Number(i.n_item), produto: String(i.x_prod_novo || i.x_prod_original || ''),
+  cProd: i.c_prod ?? null, saida: i.cfop_original ?? null, cfop,
+});
+const cfopJaDecidido = (i: any) => Number(i.revisado) === 1 || String(i.cfop_origem ?? '').startsWith('manual');
+
+async function travaOutroCfop(
+  c: any, repo: Repo, nota: { id: string; competencia: string | null }, alvos: AlvoCfop[],
+  escolha: 'igualar' | 'manter' | undefined, desde?: string,
+): Promise<Response | undefined> {
+  const notaId = nota.id;
+  if (alvos.length === 0) return undefined;
+  // Duas linhas do mesmo produto, no mesmo pedido, com CFOPs diferentes: não há "de agora"
+  // para igualar. Ela acerta as linhas ou confere uma de cada vez (aí a segunda pergunta).
+  const vistos = new Map<string, { nItem: number; cfop: string }>();
+  for (const a of alvos) {
+    const cod = String(a.cProd ?? '').trim().toUpperCase();
+    const cfop = a.cfop.trim();
+    if (!cod || !cfop) continue;
+    const k = `${cod}|${String(a.saida ?? '').trim()}`;
+    const v = vistos.get(k);
+    if (!v) vistos.set(k, { nItem: a.nItem, cfop });
+    else if (v.cfop !== cfop) {
+      return c.json({
+        erro: `Nesta nota, os itens ${v.nItem} e ${a.nItem} são o mesmo produto e estão com CFOPs diferentes (${v.cfop} e ${cfop}). Deixe os dois iguais ou confira um de cada vez.`,
+      }, 409);
+    }
+  }
+  const conflitos: ConflitoCfop[] = await repo.outroCfopNasAnteriores(notaId, alvos);
+  if (conflitos.length === 0) return undefined;
+  if (!escolha) {
+    return c.json({
+      // A frase é para a tela antiga, aberta antes desta versão: a nova abre a pergunta.
+      erro: 'Este produto já está com outro CFOP em notas conferidas, e nada foi gravado. Atualize a página (Ctrl+F5) para escolher o que fazer com as anteriores.',
+      codigo: 'outro-cfop',
+      conflitos,
+      // O mês desta nota: a tela propõe trocar as anteriores dele para cá.
+      mes: nota.competencia ?? null,
+    }, 409);
+  }
+  // Mexer no CFOP de outra nota (ou marcá-la) é editar CFOP.
+  exigir(c.get('sessao'), 'notas.editar_cfop');
+  await repo.resolverOutroCfop(conflitos, escolha, desde);
+  return undefined;
+}
+
 app.patch('/api/itens/:id', async (c) => {
   const sessao = c.get('sessao');
   const repo = c.get('repo');
@@ -3253,12 +3320,15 @@ app.patch('/api/itens/:id', async (c) => {
       mudancas: z.array(z.object({ campo: z.string(), valor: z.string() })).default([]),
       fixar: z.boolean().default(false),
       escopo: z.enum(['item', 'fornecedor']).default('item'),
+      // 17/11: o que fazer com as notas anteriores do mesmo produto que estão com outro CFOP.
+      anteriores: ESCOLHA_ANTERIORES,
+      desde: DESDE_ANTERIORES,
     })
     .parse(await c.req.json());
 
   const linha = await c.env.DB
     .prepare(
-      `SELECT i.*, n.emit_cnpj, n.emit_uf, n.empresa_id FROM itens i
+      `SELECT i.*, n.emit_cnpj, n.emit_uf, n.empresa_id, n.competencia AS nota_competencia FROM itens i
        JOIN notas n ON n.id = i.nota_id WHERE i.tenant_id = ? AND i.id = ?`,
     )
     .bind(sessao.tenantId, c.req.param('id'))
@@ -3286,6 +3356,21 @@ app.patch('/api/itens/:id', async (c) => {
   if (corpo.fixar || corpo.escopo === 'fornecedor') exigir(sessao, 'regras.fixar');
   if (corpo.fixar && validadas.some((m) => m.campo === 'cfop' && m.valor.trim() === '')) {
     return c.json({ erro: 'Preencha o CFOP antes de salvar como padrão.' }, 400);
+  }
+
+  // 17/11: um produto, um CFOP. Vale quando o CFOP da linha muda, e também quando a linha
+  // passa a estar decidida com o CFOP que já tinha (qualquer alteração marca conferido).
+  {
+    const digitado = validadas.find((m) => m.campo === 'cfop')?.valor.trim();
+    const atual = String(linha.cfop_novo ?? '').trim();
+    const final = digitado ?? atual;
+    if (final !== '' && ((digitado !== undefined && digitado !== atual) || !cfopJaDecidido(linha))) {
+      const parar = await travaOutroCfop(
+        c, repo, { id: linha.nota_id, competencia: linha.nota_competencia ?? null }, [alvoDoItem(linha, final)],
+        corpo.anteriores, corpo.desde,
+      );
+      if (parar) return parar;
+    }
   }
 
   const item = {
@@ -3450,6 +3535,8 @@ app.post('/api/notas/:id/aplicar-cfop', async (c) => {
       // A tela manda em fatias de ate 200: nota de 990 itens nao cabe numa invocacao so.
       itens: z.array(z.string()).min(1).max(200),
       escopo: z.enum(['item', 'fornecedor']).default('item'),
+      anteriores: ESCOLHA_ANTERIORES,
+      desde: DESDE_ANTERIORES,
     })
     .parse(await c.req.json());
   if (corpo.escopo === 'fornecedor') exigir(sessao, 'regras.fixar');
@@ -3462,6 +3549,16 @@ app.post('/api/notas/:id/aplicar-cfop', async (c) => {
   if (!r) return c.json({ erro: 'nota não encontrada' }, 404);
   const alvo = new Set(corpo.itens);
   const linhas = (r.itens as any[]).filter((i) => alvo.has(i.id));
+
+  // 17/11: um produto, um CFOP - antes de aprender e de gravar.
+  {
+    const parar = await travaOutroCfop(
+      c, repo, { id: r.nota.id, competencia: r.nota.competencia ?? null },
+      linhas.filter((i) => String(i.cfop_novo ?? '').trim() !== cfop || !cfopJaDecidido(i)).map((i) => alvoDoItem(i, cfop)),
+      corpo.anteriores, corpo.desde,
+    );
+    if (parar) return parar;
+  }
 
   const fixar = corpo.escopo === 'fornecedor';
   const acoes: { acao: any; valor: string }[] = [];
@@ -3504,6 +3601,8 @@ app.post('/api/notas/:id/conferir', async (c) => {
       // 27/10 (auditoria): o CFOP que ela VIU em cada linha. Se a linha mudou no meio do
       // caminho (gravação atrasada, palpite atualizado ao abrir), aquela não é conferida.
       esperado: z.record(z.string(), z.string()).optional(),
+      anteriores: ESCOLHA_ANTERIORES,
+      desde: DESDE_ANTERIORES,
     })
     .parse(await c.req.json().catch(() => ({})));
 
@@ -3525,6 +3624,18 @@ app.post('/api/notas/:id/conferir', async (c) => {
       divergentes.push({ itemId: id, nItem: i.n_item, agora, esperado: viu.trim() });
       return false;
     });
+  }
+
+  // 17/11: um produto, um CFOP. Conferir é decidir o CFOP que está na linha.
+  {
+    const naNota = new Map((r.itens as any[]).map((i) => [i.id, i]));
+    const parar = await travaOutroCfop(
+      c, repo, { id: r.nota.id, competencia: r.nota.competencia ?? null },
+      ids.map((id) => naNota.get(id)).filter((i) => i && Number(i.revisado) !== 1 && String(i.cfop_novo ?? '').trim() !== '')
+        .map((i) => alvoDoItem(i, String(i.cfop_novo).trim())),
+      corpo.anteriores, corpo.desde,
+    );
+    if (parar) return parar;
   }
 
   // Conferir ensina (22/09): o CFOP que ela conferiu vira padrao aprendido, como se

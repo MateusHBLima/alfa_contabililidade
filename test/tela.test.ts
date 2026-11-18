@@ -473,11 +473,12 @@ describe('tela: produto que não fechou (28/09)', () => {
 
 describe('tela: regras de ICMS e os CFOPs da planilha (28/09)', () => {
   const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-  it('os 30 CFOPs da planilha estão na lista', () => {
+  it('os 30 CFOPs da planilha estão na lista, mais o 1128 e o 2128 (17/11, pedido da Taís)', () => {
     const lista = APP.slice(APP.indexOf('const CFOPS = ['), APP.indexOf('];', APP.indexOf('const CFOPS = [')));
     const cfops = [...lista.matchAll(/\['(\d{4})',/g)].map((m) => m[1]);
-    expect(cfops).toHaveLength(30);
-    for (const c of ['1411', '2411', '1652', '1653', '1910', '2910', '1117', '2117', '1922', '2922', '1916', '2916', '1912', '2912']) {
+    expect(cfops).toHaveLength(32);
+    expect(new Set(cfops).size).toBe(32);
+    for (const c of ['1411', '2411', '1652', '1653', '1910', '2910', '1117', '2117', '1922', '2922', '1916', '2916', '1912', '2912', '1128', '2128']) {
       expect(cfops).toContain(c);
     }
   });
@@ -806,5 +807,86 @@ describe('tela: complemento na lista das que vieram prontas (16/11)', () => {
     expect(corpoDe('function desenharItensDaNota(', 2400)).toContain("comComplemento(n) ? celulaComplemento(i, n, 'data-mini-compl')");
     expect(APP).toContain("ev.target.closest?.('[data-mini-compl]')");
     expect(corpoDe("ev.target.closest?.('[data-mini-compl]')", 600)).toContain('/complemento`');
+  });
+});
+
+/**
+ * 17/11: um produto, um CFOP (Mateus: "isso não pode acontecer de forma alguma").
+ *
+ * A trava mora nas rotas. Se alguém criar uma rota nova que grave ou confira CFOP sem
+ * chamar `travaOutroCfop`, o mesmo produto volta a poder ficar com dois CFOPs sem
+ * ninguém decidir - e nenhum outro teste perceberia. Este quebra.
+ */
+describe('17/11: toda escrita de CFOP passa pela trava', () => {
+  const INDEX = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const REPO = readFileSync(new URL('../src/db/repo.ts', import.meta.url), 'utf8');
+  const ESCRITORES = ['repo.alterarItem(', 'repo.aplicarCfopEmLote(', 'repo.conferirItens('];
+
+  it('cada chamada que decide CFOP vem depois de travaOutroCfop, na mesma rota', () => {
+    for (const chamada of ESCRITORES) {
+      let pos = INDEX.indexOf(chamada);
+      expect(pos, `${chamada} sumiu do index`).toBeGreaterThan(-1);
+      while (pos !== -1) {
+        const inicioDaRota = INDEX.lastIndexOf('\napp.', pos);
+        expect(INDEX.slice(inicioDaRota, pos), `${chamada} sem a trava antes`).toContain('await travaOutroCfop(');
+        pos = INDEX.indexOf(chamada, pos + 1);
+      }
+    }
+  });
+
+  it('fora do index ninguém chama os métodos que decidem CFOP', () => {
+    const outros = ['../src/nfe/importador.ts', '../src/captura/captura.ts', '../src/assistente/assistente.ts', '../src/rules/conferencia.ts']
+      .map((f) => readFileSync(new URL(f, import.meta.url), 'utf8')).join('\n');
+    for (const metodo of ['.alterarItem(', '.aplicarCfopEmLote(', '.conferirItens(', '.resolverOutroCfop(']) {
+      expect(outros, `${metodo} chamado fora do index`).not.toContain(metodo);
+    }
+  });
+
+  it('no repositório, só os métodos conhecidos gravam CFOP ou marcam conferido', () => {
+    const CONHECIDOS = new Set(['aplicarCfopEmLote', 'resolverOutroCfop', 'alterarItem', 'conferirItens', 'corrigirNomesDeOutroProduto']);
+    const achados = new Set<string>();
+    for (const m of REPO.matchAll(/UPDATE itens SET/g)) {
+      const comando = REPO.slice(m.index!, m.index! + 400).split('WHERE')[0]!;
+      if (!/cfop_novo|revisado = 1|\$\{sets/.test(comando)) continue;
+      const metodo = [...REPO.slice(0, m.index!).matchAll(/\n  async (\w+)\(/g)].at(-1)?.[1] ?? '?';
+      achados.add(metodo);
+    }
+    expect([...achados].filter((x) => !CONHECIDOS.has(x)), 'método novo gravando CFOP: passe pela trava e ponha aqui').toEqual([]);
+    for (const x of ['aplicarCfopEmLote', 'alterarItem', 'conferirItens']) expect(achados.has(x)).toBe(true);
+  });
+});
+
+describe('17/11: a pergunta do outro CFOP, o aviso em português simples e o filtro de segmento', () => {
+  const HTML = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const CSS_TELA = readFileSync(new URL('../public/estilo.css', import.meta.url), 'utf8');
+  it('a pergunta mora no api(), para valer em todo caminho que grava CFOP', () => {
+    const api = APP.slice(APP.indexOf('async function api('), APP.indexOf('function perguntarOutroCfop('));
+    expect(api).toContain("corpo?.codigo === 'outro-cfop'");
+    expect(api).toContain('await perguntarOutroCfop(');
+    expect(api).toContain('outroCfopSemDecisao: true');
+    // Reenvia o MESMO pedido com a escolha, e só então grava.
+    expect(api).toContain('...JSON.parse(opcoes.body), ...escolha');
+  });
+  it('as três escolhas da janela viram o que o servidor entende, e fechar não grava', () => {
+    expect(APP).toContain("{ anteriores: 'igualar', desde: mes }");
+    expect(APP).toContain("{ anteriores: 'igualar' }");
+    expect(APP).toContain("{ anteriores: 'manter' }");
+    expect(APP).toContain('Cancelar, não gravar');
+    // Abre por cima do modal comum e da janela de espera.
+    expect(CSS_TELA).toContain('.modal-fundo.outro-cfop{z-index:70}');
+  });
+  it('o aviso do produto novo não fala mais "NCM COM CFOPS DIFERENTES" e mostra os parecidos', () => {
+    expect(APP).not.toContain('? NCM COM ');
+    expect(APP).toContain('? PRODUTO NOVO · parecidos nesta empresa:');
+    expect(APP).toContain('data-parecidos=');
+    expect(APP).toMatch(/^async function verParecidos\(/m);
+  });
+  it('Empresas mostra o segmento e filtra as que estão sem', () => {
+    expect(HTML).toContain('id="emp-sem-segmento"');
+    expect(HTML).toContain('<th>Segmento</th>');
+    expect(APP).toContain('⚠ sem segmento');
+    const ths = HTML.slice(HTML.indexOf('<table id="tbl-empresas">'), HTML.indexOf('</thead>', HTML.indexOf('<table id="tbl-empresas">'))).split('<th>').length - 1;
+    expect(ths).toBe(8);
+    expect(APP).toContain('colspan="8" class="vazio">Nenhuma empresa cadastrada.');
   });
 });

@@ -1,0 +1,12 @@
+-- Um produto, um CFOP (17/11, Mateus: "isso não pode acontecer de forma alguma").
+--
+-- A Taís trocava o CFOP de um produto e as notas que ela já tinha conferido antes ficavam
+-- com o valor de antes, sem aviso: o mesmo produto, do mesmo fornecedor, com dois CFOPs
+-- (12 casos em 8 empresas, achados só na auditoria). Agora o servidor não grava um CFOP
+-- diferente do que o produto já tem em notas conferidas sem ela escolher: trocar as
+-- anteriores também, ou deixar as anteriores como estão.
+--
+-- "Deixar como estão" precisa ficar marcado, senão o sistema perguntaria de novo a cada
+-- nota. É esta coluna: 1 = o CFOP desta linha é diferente do que o produto tem hoje, de
+-- propósito. Quem e quando ficam na trilha. Trocar o CFOP da linha desmarca.
+ALTER TABLE itens ADD COLUMN cfop_excecao INTEGER NOT NULL DEFAULT 0;

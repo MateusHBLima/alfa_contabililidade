@@ -3661,8 +3661,12 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
   const itensDa = (sufixo: string) =>
     db.consultar(`SELECT i.* FROM itens i JOIN notas n ON n.id = i.nota_id WHERE n.chave LIKE '%${sufixo}' ORDER BY i.n_item`) as any[];
 
+  // 17/11: mudar o CFOP de um produto que já tem nota conferida com outro pede uma escolha.
+  // Estes cenários são de antes da trava e contam a história "ela mudou de ideia e a nota
+  // antiga ficou": por isso mandam sempre `manter` (as anteriores ficam como estão). Sem
+  // divergência, o servidor ignora o campo. A trava em si é testada mais abaixo.
   const corrigir = async (itemId: string, cfop: string) =>
-    req(`/api/itens/${itemId}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: cfop }] }) });
+    req(`/api/itens/${itemId}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: cfop }], anteriores: 'manter' }) });
 
   beforeEach(async () => {
     const l = await app.fetch(new Request('http://x/api/login', {
@@ -4023,7 +4027,8 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     const d1 = itensDa('55')[0];
     expect(d1.cfop_novo).toBe('1102');
     db.consultar(`UPDATE itens SET cfop_novo = '1101' WHERE id = '${d1.id}'`);
-    await req(`/api/notas/${d1.nota_id}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [d1.id] }) });
+    // 17/11: a nota 44 está conferida em 1102, então conferir 1101 aqui pede a escolha.
+    await req(`/api/notas/${d1.nota_id}/conferir`, { method: 'POST', body: JSON.stringify({ itens: [d1.id], anteriores: 'manter' }) });
     expect(regra1()).toEqual({ valor: '1101', usos: 0, acertos: 0, erros: 0, confianca: 0.5 });
   });
 
@@ -4111,7 +4116,10 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     const [a1, a2, a3] = itensDa('11');
     await corrigir(a1.id, '1101'); await corrigir(a2.id, '1102'); await corrigir(a3.id, '1102');
     const [b1, b2] = itensDa('33');
-    await corrigir(b1.id, '1102'); // o mesmo produto do a1, agora 1102: divergência
+    // O mesmo produto do a1, agora 1102: divergência. Desde 17/11 a trava não deixa isso
+    // nascer sem escolha; aqui é o dado antigo, de antes dela, posto direto no banco.
+    await corrigir(b1.id, '1101');
+    db.consultar(`UPDATE itens SET cfop_novo = '1102' WHERE id = '${b1.id}'`);
     await corrigir(b2.id, '1102'); // igual ao a2: não é divergência
     const base = `/api/empresas/${empresaId}`;
     // Por produto, só o 1101.
@@ -4127,6 +4135,205 @@ describe('o mesmo produto em 5102 e em nota de ajuste 5949 — cada um aprende o
     expect(d.grupos).toHaveLength(1);
     expect(d.grupos[0]).toMatchObject({ codigo: a1.c_prod, saida: '5102', cfops: { '1101': 1, '1102': 1 } });
     expect(d.grupos[0].itens.map((x: any) => x.itemId).sort()).toEqual([a1.id, b1.id].sort());
+  });
+
+  // ------------------------------------------------------------ 17/11: um produto, um CFOP
+  /* Mateus, 17/11: "isso não pode acontecer de forma alguma". A Taís mudava o CFOP de um
+     produto e as notas já conferidas ficavam com o de antes, sem aviso (12 produtos em 8
+     empresas). Taís: "o mesmo produto na mesma empresa teria que ser a mesma coisa" e "o
+     certo é o último, mas só de 01.11 pra frente". */
+  const noMes = (sufixo: string, mes: string) => comCfop(sufixo, '5102').replace('<dhEmi>2026-08-14', `<dhEmi>2026-${mes}-14`);
+  const digitar = (itemId: string, cfop: string, extra: Record<string, unknown> = {}) =>
+    req(`/api/itens/${itemId}`, { method: 'PATCH', body: JSON.stringify({ mudancas: [{ campo: 'cfop', valor: cfop }], ...extra }) });
+  const conferirItens = (notaId: string, itens: string[], extra: Record<string, unknown> = {}) =>
+    req(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens, ...extra }) });
+  const linha = (id: string) => db.consultar(`SELECT cfop_novo, cfop_origem, cfop_excecao, revisado FROM itens WHERE id = '${id}'`)[0] as any;
+  /** A regra que não pode ser quebrada: decidido, não marcado, nota valendo → um CFOP por produto. */
+  const produtosComDoisCfops = () => db.consultar(
+    `SELECT n.emit_cnpj || '|' || UPPER(TRIM(i.c_prod)) || '|' || TRIM(COALESCE(i.cfop_original, '')) AS k, COUNT(DISTINCT TRIM(i.cfop_novo)) AS q
+       FROM itens i JOIN notas n ON n.id = i.nota_id
+      WHERE n.cancelada_em IS NULL AND n.estorno = 0 AND i.cfop_excecao = 0 AND TRIM(COALESCE(i.cfop_novo, '')) <> ''
+        AND (i.revisado = 1 OR COALESCE(i.cfop_origem, '') LIKE 'manual%')
+      GROUP BY 1 HAVING q > 1`) as any[];
+
+  it('17/11 (um produto, um CFOP): digitar um CFOP diferente do que o produto já tem em nota conferida não grava sem escolha', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'jun.xml', conteudo: noMes('11', '06') }]);
+    const [a1] = itensDa('11');
+    expect((await digitar(a1.id, '1102')).status).toBe(200); // primeira decisão: nada a comparar
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ago1.xml', conteudo: noMes('33', '08') }]);
+    const [b1] = itensDa('33');
+    expect((await conferirItens(b1.nota_id, [b1.id])).status).toBe(200); // veio 1102 pela regra: igual, sem pergunta
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ago2.xml', conteudo: noMes('44', '08') }]);
+    const [c1, c2] = itensDa('44');
+
+    // Ela muda de ideia na terceira nota: 409, com as duas anteriores, e NADA gravado.
+    const r = await digitar(c1.id, '1101');
+    expect(r.status).toBe(409);
+    const corpo = await r.json() as any;
+    expect(corpo).toMatchObject({ codigo: 'outro-cfop', mes: '2026-08' });
+    expect(corpo.conflitos).toHaveLength(1);
+    expect(corpo.conflitos[0]).toMatchObject({ itemId: c1.id, nItem: 1, cfop: '1101' });
+    expect(corpo.conflitos[0].anteriores.map((x: any) => [x.itemId, x.cfop, x.competencia]).sort()).toEqual(
+      [[a1.id, '1102', '2026-06'], [b1.id, '1102', '2026-08']].sort());
+    expect(corpo.conflitos[0].anteriores[0]).toMatchObject({ quem: 'Contadora', numero: expect.any(String) });
+    expect(linha(c1.id)).toMatchObject({ cfop_novo: '1102', revisado: 0 });
+    expect(db.consultar(`SELECT valor FROM regras WHERE campo = 'cfop' AND nivel = 1 AND chave LIKE '%|7891#5102'`)).toEqual([{ valor: '1102' }]);
+    // Outro produto da mesma nota, sem história com outro CFOP: grava normal.
+    expect((await digitar(c2.id, '1556')).status).toBe(200);
+    // Escolha que não existe: 400.
+    expect((await digitar(c1.id, '1101', { anteriores: 'tanto faz' })).status).toBe(400);
+
+    // "O certo é o último, mas só de 01.11 pra frente": troca as do mês para cá, deixa as antigas.
+    expect((await digitar(c1.id, '1101', { anteriores: 'igualar', desde: '2026-08' })).status).toBe(200);
+    expect(linha(c1.id)).toMatchObject({ cfop_novo: '1101', revisado: 1 });
+    expect(linha(b1.id)).toMatchObject({ cfop_novo: '1101', cfop_origem: 'manual:igualado', cfop_excecao: 0, revisado: 1 });
+    expect(linha(a1.id)).toMatchObject({ cfop_novo: '1102', cfop_excecao: 1, revisado: 1 });
+    // Na trilha: a troca da nota de agosto e a marca da de junho, com quem fez.
+    expect(db.consultar(`SELECT valor_antes, valor_depois, origem, usuario_email FROM auditoria WHERE entidade_id = '${b1.id}' AND campo = 'cfop'`))
+      .toEqual([{ valor_antes: '1102', valor_depois: '1101', origem: 'manual:igualado', usuario_email: expect.stringContaining('@') }]);
+    expect(db.consultar(`SELECT valor_depois FROM auditoria WHERE entidade_id = '${a1.id}' AND campo = 'cfop_excecao'`))
+      .toEqual([{ valor_depois: 'fica 1102 de propósito; o produto passou a 1101' }]);
+    expect(produtosComDoisCfops()).toEqual([]);
+    // A auditoria não lista a que ela mandou deixar.
+    expect(((await (await req(`/api/empresas/${empresaId}/auditoria/divergencias`)).json()) as any).grupos).toEqual([]);
+
+    // Próxima nota: vem 1101 e confere sem pergunta (a de junho está marcada).
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'ago3.xml', conteudo: noMes('55', '08') }]);
+    const [d1] = itensDa('55');
+    expect(d1.cfop_novo).toBe('1101');
+    expect((await conferirItens(d1.nota_id, [d1.id])).status).toBe(200);
+    // Mexer na de junho é decisão nova: volta a ser comparada e perde a marca.
+    const volta = await digitar(a1.id, '1556');
+    expect(volta.status).toBe(409);
+    expect(((await volta.json()) as any).conflitos[0].anteriores).toHaveLength(3);
+    expect((await digitar(a1.id, '1101')).status).toBe(200);
+    expect(linha(a1.id)).toMatchObject({ cfop_novo: '1101', cfop_excecao: 0 });
+    expect(produtosComDoisCfops()).toEqual([]);
+  });
+
+  it('17/11 (um produto, um CFOP): conferir e aplicar na nota também param; trocar todas, deixar todas e o complemento', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: noMes('11', '07') }]);
+    const [a1, a2, a3] = itensDa('11');
+    for (const i of [a1, a2, a3]) expect((await digitar(i.id, '1102')).status).toBe(200);
+    // A nota antiga tem complemento escolhido (16/11): trocar o CFOP dela limpa.
+    db.consultar(`UPDATE itens SET complemento = '002', complemento_origem = 'manual' WHERE id = '${a1.id}'`);
+
+    // Conferir: a segunda nota chegou com outro CFOP na linha (palpite antigo, regra que mudou...).
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: noMes('33', '08') }]);
+    const [b1, b2] = itensDa('33');
+    db.consultar(`UPDATE itens SET cfop_novo = '1101', cfop_origem = 'perfil' WHERE id = '${b1.id}'`);
+    let r = await conferirItens(b1.nota_id, [b1.id, b2.id]);
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as any).conflitos.map((x: any) => x.itemId)).toEqual([b1.id]); // só o que diverge
+    expect(itensDa('33').map((i: any) => i.revisado)).toEqual([0, 0, 0]); // nem o b2 foi conferido
+    // Trocar todas (sem `desde`): a de julho passa a 1101, sem o complemento do CFOP antigo.
+    r = await conferirItens(b1.nota_id, [b1.id, b2.id], { anteriores: 'igualar' });
+    expect(await r.json()).toEqual({ ok: true, conferidos: 2, divergentes: [] });
+    expect(db.consultar(`SELECT cfop_novo, complemento, cfop_origem FROM itens WHERE id = '${a1.id}'`))
+      .toEqual([{ cfop_novo: '1101', complemento: null, cfop_origem: 'manual:igualado' }]);
+    expect(db.consultar(`SELECT valor_antes, valor_depois FROM auditoria WHERE entidade_id = '${a1.id}' AND campo = 'complemento'`))
+      .toEqual([{ valor_antes: '002', valor_depois: null }]);
+    expect(produtosComDoisCfops()).toEqual([]);
+
+    // Aplicar um CFOP na nota toda: os três produtos têm história com outro CFOP.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'c.xml', conteudo: noMes('44', '08') }]);
+    const c = itensDa('44');
+    const aplicar = (extra: Record<string, unknown> = {}) =>
+      req(`/api/notas/${c[0].nota_id}/aplicar-cfop`, { method: 'POST', body: JSON.stringify({ cfop: '1556', itens: c.map((i: any) => i.id), ...extra }) });
+    r = await aplicar();
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as any).conflitos).toHaveLength(3);
+    expect(itensDa('44').map((i: any) => i.cfop_novo)).not.toContain('1556');
+    // Deixar todas: nada muda nas anteriores, todas ficam marcadas, e a nota grava.
+    expect((await aplicar({ anteriores: 'manter' })).status).toBe(200);
+    expect(itensDa('44').map((i: any) => i.cfop_novo)).toEqual(['1556', '1556', '1556']);
+    expect(itensDa('11').map((i: any) => [i.cfop_novo, i.cfop_excecao])).toEqual([['1101', 1], ['1102', 1], ['1102', 1]]);
+    expect(produtosComDoisCfops()).toEqual([]);
+  });
+
+  it('17/11 (um produto, um CFOP): só a mesma empresa, nota valendo e o mesmo CFOP que veio; duas linhas iguais na mesma nota', async () => {
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'a.xml', conteudo: noMes('11', '07') }]);
+    const [a1] = itensDa('11');
+    await digitar(a1.id, '1102');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'b.xml', conteudo: noMes('33', '08') }]);
+    const [b1] = itensDa('33');
+    const nota1 = a1.nota_id;
+
+    // Outra empresa (Taís: "peça de carro é 1556 na Filomena e 1102 na mecânica"): não compara.
+    const outra = await repo.criarEmpresa({ cnpj: '11444777000161', razaoSocial: 'MECANICA TESTE', uf: 'SC', perfil: 'revenda' });
+    db.consultar(`UPDATE notas SET empresa_id = '${outra}' WHERE id = '${nota1}'`);
+    expect((await digitar(b1.id, '1556')).status).toBe(200);
+    db.consultar(`UPDATE notas SET empresa_id = '${empresaId}' WHERE id = '${nota1}'`);
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'perfil', revisado = 0 WHERE id = '${b1.id}'`);
+
+    // Nota cancelada não conta.
+    db.consultar(`UPDATE notas SET cancelada_em = '2026-08-20T00:00:00Z' WHERE id = '${nota1}'`);
+    expect((await digitar(b1.id, '1556')).status).toBe(200);
+    db.consultar(`UPDATE notas SET cancelada_em = NULL WHERE id = '${nota1}'`);
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'perfil', revisado = 0 WHERE id = '${b1.id}'`);
+
+    // O mesmo produto numa nota de ajuste (5949) é outro par produto + operação (22/09): não compara.
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'c.xml', conteudo: comCfop('44', '5949') }]);
+    const [c1] = itensDa('44');
+    expect((await digitar(c1.id, '1556')).status).toBe(200);
+
+    // Linha que ninguém decidiu (palpite) não segura ninguém: a nota 33 está só com o palpite.
+    expect(linha(b1.id)).toMatchObject({ revisado: 0, cfop_origem: 'perfil' });
+
+    // Duas linhas do mesmo produto na mesma nota, com CFOPs diferentes, conferidas juntas: recusa e explica.
+    const dupla = noMes('55', '08').replace('<cProd>7892</cProd>', '<cProd>7891</cProd>');
+    await importarArquivos(repo, r2 as any, empresaId, [{ nome: 'd.xml', conteudo: dupla }]);
+    const [d1, d2] = itensDa('55');
+    db.consultar(`UPDATE itens SET cfop_novo = '1102', cfop_origem = 'perfil', revisado = 0 WHERE id = '${d1.id}'`);
+    db.consultar(`UPDATE itens SET cfop_novo = '1101', cfop_origem = 'perfil', revisado = 0 WHERE id = '${d2.id}'`);
+    const r = await conferirItens(d1.nota_id, [d1.id, d2.id]);
+    expect(r.status).toBe(409);
+    const corpo = await r.json() as any;
+    expect(corpo.codigo).toBeUndefined();
+    expect(corpo.erro).toContain('os itens 1 e 2 são o mesmo produto');
+    expect(itensDa('55').map((i: any) => i.revisado)).toEqual([0, 0, 0]);
+  });
+
+  it('17/11 (um produto, um CFOP): em sequências sorteadas de digitar, conferir, aplicar e escolher, nunca sobra produto com dois CFOPs sem decisão', async () => {
+    const meses = ['06', '07', '08', '08', '09', '09'];
+    const sufixos = ['11', '22', '33', '44', '55', '66'];
+    await importarArquivos(repo, r2 as any, empresaId, sufixos.map((sfx, k) => ({ nome: `${sfx}.xml`, conteudo: noMes(sfx, meses[k]!) })));
+    const notas = sufixos.map((sfx) => itensDa(sfx));
+    expect(notas.every((n) => n.length === 3)).toBe(true);
+    // Sorteio com semente: se falhar, falha sempre igual.
+    let semente = 20261117;
+    const sorte = (n: number) => { // mulberry32
+      semente = (semente + 0x6d2b79f5) >>> 0;
+      let t = semente;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return (((t ^ (t >>> 14)) >>> 0) % n);
+    };
+    const CFOPS_TESTE = ['1101', '1102', '1556'];
+    const escolhas = [{ anteriores: 'igualar' }, { anteriores: 'manter' }, { anteriores: 'igualar', desde: '2026-08' }, null];
+    let perguntas = 0;
+    for (let passo = 0; passo < 400; passo++) {
+      const itens = notas[sorte(notas.length)]!;
+      const item = itens[sorte(3)]!;
+      const cfop = CFOPS_TESTE[sorte(3)]!;
+      const acao = sorte(4);
+      const fazer = (extra: Record<string, unknown> = {}) =>
+        acao === 0 ? conferirItens(item.nota_id, [item.id], extra)
+          : acao === 1 ? req(`/api/notas/${item.nota_id}/aplicar-cfop`, { method: 'POST', body: JSON.stringify({ cfop, itens: itens.map((i: any) => i.id), ...extra }) })
+            : acao === 2 ? req(`/api/itens/${item.id}/desconferir`, { method: 'POST' })
+              : digitar(item.id, cfop, extra);
+      let r = await fazer();
+      if (r.status === 409) {
+        expect(((await r.json()) as any).codigo, `passo ${passo}`).toBe('outro-cfop');
+        perguntas += 1;
+        const escolha = escolhas[sorte(escolhas.length)];
+        if (escolha) { r = await fazer(escolha); expect(r.status, `passo ${passo}`).toBe(200); }
+      } else {
+        expect(r.status, `passo ${passo}`).toBe(200);
+      }
+      expect(produtosComDoisCfops(), `depois do passo ${passo}`).toEqual([]);
+    }
+    expect(perguntas).toBeGreaterThan(15); // o sorteio de fato passou pela trava
   });
 
   it('15/10: "vieram prontas" conta só o que veio de regra do próprio produto (não a de NCM) e ainda vale', async () => {
