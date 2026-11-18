@@ -7036,4 +7036,48 @@ describe('16/11: teste do certificado no ADN da NFS-e pelo intermediário', () =
       vi.unstubAllGlobals();
     }
   });
+
+  it('18/11 (cartório no CPF do titular): o CPF vem no cabeçalho, vai ao ADN no parâmetro pedido e nunca aparece inteiro', async () => {
+    const ck = await entrar();
+    const amb = ambiente({ SEF_PONTE_URL: 'https://relay.teste', SEF_PONTE_TOKEN: 'segredo-do-relay' });
+    const pedidos: string[] = [];
+    const ADN = { StatusProcessamento: 'REJEICAO', TipoConsulta: 'InscricaoCertificado', LoteDFe: [] };
+    vi.stubGlobal('fetch', vi.fn(async (u: string) => {
+      pedidos.push(String(u));
+      return new Response(JSON.stringify(ADN), { status: 400 });
+    }));
+    const CPF = '529.982.247-25';
+    const pegar = (q: string, cpf?: string) => app.fetch(new Request(`http://x/api/captura/${q}`, {
+      headers: { Cookie: ck, ...(cpf ? { 'x-consulta-cpf': cpf } : {}) },
+    }), amb);
+    try {
+      // O padrão: cpfConsulta. O ADN recebe o CPF; quem pediu recebe o caminho mascarado.
+      let r = await pegar('adn/cert-1?nsu=0&lote=1', CPF);
+      expect(pedidos.at(-1)).toBe('https://relay.teste/adn/cert-1/contribuintes/DFe/0?lote=true&cpfConsulta=52998224725');
+      const corpo = await r.text();
+      expect(JSON.parse(corpo)).toEqual({ status: 400, caminho: '/contribuintes/DFe/0?lote=true&cpfConsulta=***.982.247-**', resposta: ADN });
+      expect(corpo).not.toContain('52998224725');
+      // O nome do parâmetro vem do pedido, para testar sem publicar de novo.
+      r = await pegar('adn-teste/cert-1?param=cnpjConsulta', CPF);
+      expect(pedidos.at(-1)).toBe('https://relay.teste/adn/cert-1/contribuintes/DFe/0?cnpjConsulta=52998224725');
+      expect(await r.text()).not.toContain('52998224725');
+      // CPF errado, CPF junto com CNPJ, nome de parâmetro estranho: nada chega ao intermediário.
+      const antes = pedidos.length;
+      expect((await pegar('adn/cert-1', '529.982.247-26')).status).toBe(400);
+      expect((await pegar('adn/cert-1', '111.111.111-11')).status).toBe(400);
+      expect((await pegar('adn/cert-1?cnpj=12.345.678/0001-95', CPF)).status).toBe(400);
+      expect((await pegar('adn/cert-1?param=a%26b', CPF)).status).toBe(400);
+      expect((await pegar('adn/cert-1?param=x', CPF)).status).toBe(400);
+      expect(pedidos.length).toBe(antes);
+      // Na trilha, o CPF só mascarado.
+      const trilha = db.consultar("SELECT valor_depois FROM auditoria WHERE entidade = 'certificado' ORDER BY rowid") as any[];
+      expect(trilha.slice(-2).map((t) => t.valor_depois)).toEqual([
+        'consulta ADN · NSU 0 · CPF ***.982.247-** (cpfConsulta) · lote · HTTP 400',
+        'consulta ADN · NSU 0 · CPF ***.982.247-** (cnpjConsulta) · HTTP 400',
+      ]);
+      expect(JSON.stringify(db.consultar('SELECT * FROM auditoria'))).not.toContain('52998224725');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
