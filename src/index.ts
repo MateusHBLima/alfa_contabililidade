@@ -2537,23 +2537,75 @@ app.get('/api/captura', async (c) => {
 });
 
 /**
- * 16/11 (Mateus): teste do certificado na base nacional da NFS-e (ADN), pelo intermediário,
- * para ver se as notas aparecem lá. Só consulta, só para quem administra a captura. O token
- * do intermediário fica no servidor; a resposta é só o resumo (nunca o XML).
+ * Base nacional da NFS-e (ADN) pelo intermediário, com o certificado guardado nele.
+ *
+ * 16/11 (Mateus): teste para ver se as notas aparecem lá. 18/11 (Mateus): "tem que liberar
+ * pra o chat do cartório conseguir usar o certificado também" - e "precisamos fazer isso
+ * logo". O caminho mais rápido é este: a consulta passa pelo site, por quem administra a
+ * captura, e o token do intermediário nunca sai do servidor. O primeiro teste (NSU 0, sem
+ * parâmetro) voltou REJEICAO sem dizer por quê; por isso o NSU, o CNPJ consultado e o lote
+ * agora vêm do pedido.
+ *
+ * Só consulta (GET em /contribuintes/DFe). Cada consulta fica na trilha.
  */
-app.get('/api/captura/adn-teste/:certId', async (c) => {
-  exigir(c.get('sessao'), 'captura.gerenciar');
-  const p = ponteConfigurada(c.env as unknown as AmbienteCaptura);
-  if (!p) return c.json({ erro: 'o intermediário não está configurado' }, 400);
+type PedidoAdn = { certId: string; nsu: string; cnpj?: string; lote: boolean };
+function lerPedidoAdn(c: any): PedidoAdn | { erro: string } {
   const certId = c.req.param('certId');
-  if (!/^[A-Za-z0-9_-]{1,80}$/.test(certId)) return c.json({ erro: 'certificado inválido' }, 400);
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(certId)) return { erro: 'certificado inválido' };
+  const nsu = (c.req.query('nsu') ?? '0').trim();
+  if (!/^\d{1,20}$/.test(nsu)) return { erro: 'NSU inválido (só números)' };
+  const cnpj = (c.req.query('cnpj') ?? '').replace(/\D/g, '');
+  if (cnpj && cnpj.length !== 14) return { erro: 'CNPJ inválido (14 números)' };
+  const lote = ['1', 'true', 'sim'].includes(String(c.req.query('lote') ?? '').toLowerCase());
+  return { certId, nsu: String(BigInt(nsu)), cnpj: cnpj || undefined, lote };
+}
+async function consultarAdn(c: any, pedido: PedidoAdn) {
+  const p = ponteConfigurada(c.env as unknown as AmbienteCaptura);
+  if (!p) return null;
+  const qs = new URLSearchParams();
+  if (pedido.lote) qs.set('lote', 'true');
+  if (pedido.cnpj) qs.set('cnpjConsulta', pedido.cnpj);
+  const sufixo = `/DFe/${pedido.nsu}${qs.size ? `?${qs}` : ''}`;
   const chamar = async (caminho: string) => {
-    const r = await fetch(`${p.url}/adn/${certId}${caminho}`, { headers: { authorization: `Bearer ${p.token}` } });
+    const r = await fetch(`${p.url}/adn/${pedido.certId}${caminho}`, { headers: { authorization: `Bearer ${p.token}` } });
     return { caminho, status: r.status, texto: await r.text() };
   };
-  let r = await chamar('/contribuintes/DFe/0');
-  if (r.status === 404) r = await chamar('/contribuinte/DFe/0');
+  let r = await chamar(`/contribuintes${sufixo}`);
+  if (r.status === 404) r = await chamar(`/contribuinte${sufixo}`);
+  const repo = c.get('repo');
+  await repo.auditoria().registrar({
+    tenantId: repo.contexto.sessao.tenantId, usuarioId: repo.contexto.sessao.usuarioId, usuarioEmail: repo.contexto.sessao.email,
+    acao: 'exportar', entidade: 'certificado', entidadeId: pedido.certId,
+    valorDepois: `consulta ADN · NSU ${pedido.nsu}${pedido.cnpj ? ` · CNPJ ${pedido.cnpj}` : ''}${pedido.lote ? ' · lote' : ''} · HTTP ${r.status}`,
+    origem: 'manual', ip: repo.contexto.ip, requestId: repo.contexto.requestId,
+  });
+  return r;
+}
+
+/** O resumo: código HTTP, quantos documentos, o prestador das primeiras notas e o maior NSU. */
+app.get('/api/captura/adn-teste/:certId', async (c) => {
+  exigir(c.get('sessao'), 'captura.gerenciar');
+  const pedido = lerPedidoAdn(c);
+  if ('erro' in pedido) return c.json(pedido, 400);
+  const r = await consultarAdn(c, pedido);
+  if (!r) return c.json({ erro: 'o intermediário não está configurado' }, 400);
   return c.json(await resumirRespostaAdn(r.status, r.caminho, r.texto));
+});
+
+/**
+ * A resposta inteira do ADN (18/11, para o chat do cartório usar o certificado): o JSON
+ * como veio, com os documentos (o XML de cada nota vem em base64 compactado, como o ADN
+ * manda). Mesmos parâmetros do teste: ?nsu=&cnpj=&lote=1.
+ */
+app.get('/api/captura/adn/:certId', async (c) => {
+  exigir(c.get('sessao'), 'captura.gerenciar');
+  const pedido = lerPedidoAdn(c);
+  if ('erro' in pedido) return c.json(pedido, 400);
+  const r = await consultarAdn(c, pedido);
+  if (!r) return c.json({ erro: 'o intermediário não está configurado' }, 400);
+  let resposta: unknown = r.texto;
+  try { resposta = JSON.parse(r.texto); } catch { /* não é JSON: vai como texto */ }
+  return c.json({ status: r.status, caminho: r.caminho, resposta });
 });
 
 app.post('/api/captura/testar', async (c) => {

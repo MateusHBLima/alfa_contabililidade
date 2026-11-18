@@ -6991,4 +6991,49 @@ describe('16/11: teste do certificado no ADN da NFS-e pelo intermediário', () =
       vi.unstubAllGlobals();
     }
   });
+
+  it('18/11 (cartório): NSU, CNPJ e lote vêm do pedido; a resposta inteira sai em /adn; cada consulta fica na trilha', async () => {
+    const ck = await entrar();
+    const amb = ambiente({ SEF_PONTE_URL: 'https://relay.teste', SEF_PONTE_TOKEN: 'segredo-do-relay' });
+    const pedidos: string[] = [];
+    const ADN = { StatusProcessamento: 'DOCUMENTOS_LOCALIZADOS', LoteDFe: [{ NSU: 7, ArquivoXml: Buffer.from('<prest><CNPJ>99888777000166</CNPJ></prest>').toString('base64') }] };
+    vi.stubGlobal('fetch', vi.fn(async (u: string, init?: RequestInit) => {
+      pedidos.push(String(u));
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer segredo-do-relay');
+      return new Response(JSON.stringify(ADN), { status: 200 });
+    }));
+    const pegar = (q: string) => app.fetch(new Request(`http://x/api/captura/${q}`, { headers: { Cookie: ck } }), amb);
+    try {
+      // O resumo, com os parâmetros.
+      let r = await pegar('adn-teste/cert-1?nsu=0001&cnpj=12.345.678/0001-95&lote=1');
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({ status: 200, caminho: '/contribuintes/DFe/1?lote=true&cnpjConsulta=12345678000195', documentos: 1, maiorNsu: 7, prestadores: [{ nsu: '7', documento: '99888777000166' }] });
+      expect(pedidos.at(-1)).toBe('https://relay.teste/adn/cert-1/contribuintes/DFe/1?lote=true&cnpjConsulta=12345678000195');
+      // A resposta inteira, como o ADN mandou.
+      r = await pegar('adn/cert-1?nsu=7');
+      expect(await r.json()).toEqual({ status: 200, caminho: '/contribuintes/DFe/7', resposta: ADN });
+      // Sem parâmetro: como antes (NSU 0).
+      await pegar('adn/cert-1');
+      expect(pedidos.at(-1)).toBe('https://relay.teste/adn/cert-1/contribuintes/DFe/0');
+      // Parâmetro estranho não chega no intermediário.
+      const antes = pedidos.length;
+      for (const q of ['adn/cert-1?nsu=1%2F..', 'adn/cert-1?nsu=-1', 'adn/cert-1?cnpj=123', 'adn-teste/cert-1?nsu=abc', 'adn/a%2F..']) {
+        expect((await pegar(q)).status, q).toBe(400);
+      }
+      expect(pedidos.length).toBe(antes);
+      // Na trilha, quem consultou e o quê (sem o conteúdo).
+      const trilha = db.consultar("SELECT acao, entidade, entidade_id, valor_depois FROM auditoria WHERE entidade = 'certificado' ORDER BY rowid") as any[];
+      expect(trilha.map((t) => t.valor_depois)).toEqual([
+        'consulta ADN · NSU 1 · CNPJ 12345678000195 · lote · HTTP 200',
+        'consulta ADN · NSU 7 · HTTP 200',
+        'consulta ADN · NSU 0 · HTTP 200',
+      ]);
+      expect(trilha.every((t) => t.acao === 'exportar' && t.entidade_id === 'cert-1')).toBe(true);
+      // Só quem administra a captura.
+      db.consultar("DELETE FROM papel_permissoes WHERE permissao = 'captura.gerenciar'");
+      expect((await pegar('adn/cert-1?nsu=1')).status).toBe(403);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
