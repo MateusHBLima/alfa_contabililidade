@@ -25,7 +25,7 @@ import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, res
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
-import { resumirRespostaAdn } from './captura/adn';
+import { resumirRespostaAdn, cpfValido, mascararCpf } from './captura/adn';
 import { baixarDaSef, executarBuscaAutomatica, mesesDaSef, coberturaDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
 import { ErroSef } from './captura/sefsc';
 import { montarRelatorioCfop, montarRelatorioProdutos, montarRelatorioFornecedores, csvFornecedores, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, grupoIcms, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
@@ -2546,9 +2546,18 @@ app.get('/api/captura', async (c) => {
  * parâmetro) voltou REJEICAO sem dizer por quê; por isso o NSU, o CNPJ consultado e o lote
  * agora vêm do pedido.
  *
+ * 18/11, à tarde (Mateus, pelo chat do cartório): a serventia está no CPF do titular, não
+ * num CNPJ, e desde 01/11/2026 a NFS-e aceita consulta em nome de quem deu procuração. Para
+ * testar isso a consulta passa a aceitar um CPF. Duas escolhas de propósito:
+ *   - o CPF vem no cabeçalho `x-consulta-cpf`, nunca no endereço: é dado pessoal, e endereço
+ *     fica em histórico e em log. Na trilha e nas respostas ele sai mascarado;
+ *   - o manual do ADN só documenta `cnpjConsulta` e não diz como se indica um CPF. Por isso
+ *     o NOME do parâmetro vem do pedido (`?param=`, só letras; padrão `cpfConsulta`), para
+ *     dar para testar sem publicar de novo a cada tentativa.
+ *
  * Só consulta (GET em /contribuintes/DFe). Cada consulta fica na trilha.
  */
-type PedidoAdn = { certId: string; nsu: string; cnpj?: string; lote: boolean };
+type PedidoAdn = { certId: string; nsu: string; cnpj?: string; cpf?: string; parametroCpf?: string; lote: boolean };
 function lerPedidoAdn(c: any): PedidoAdn | { erro: string } {
   const certId = c.req.param('certId');
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(certId)) return { erro: 'certificado inválido' };
@@ -2557,7 +2566,13 @@ function lerPedidoAdn(c: any): PedidoAdn | { erro: string } {
   const cnpj = (c.req.query('cnpj') ?? '').replace(/\D/g, '');
   if (cnpj && cnpj.length !== 14) return { erro: 'CNPJ inválido (14 números)' };
   const lote = ['1', 'true', 'sim'].includes(String(c.req.query('lote') ?? '').toLowerCase());
-  return { certId, nsu: String(BigInt(nsu)), cnpj: cnpj || undefined, lote };
+  const cpf = (c.req.header('x-consulta-cpf') ?? '').replace(/\D/g, '');
+  if (!cpf) return { certId, nsu: String(BigInt(nsu)), cnpj: cnpj || undefined, lote };
+  if (!cpfValido(cpf)) return { erro: 'CPF inválido' };
+  if (cnpj) return { erro: 'informe o CNPJ ou o CPF, não os dois' };
+  const parametroCpf = (c.req.query('param') ?? 'cpfConsulta').trim();
+  if (!/^[A-Za-z]{3,40}$/.test(parametroCpf)) return { erro: 'nome de parâmetro inválido (só letras)' };
+  return { certId, nsu: String(BigInt(nsu)), cpf, parametroCpf, lote };
 }
 async function consultarAdn(c: any, pedido: PedidoAdn) {
   const p = ponteConfigurada(c.env as unknown as AmbienteCaptura);
@@ -2565,10 +2580,12 @@ async function consultarAdn(c: any, pedido: PedidoAdn) {
   const qs = new URLSearchParams();
   if (pedido.lote) qs.set('lote', 'true');
   if (pedido.cnpj) qs.set('cnpjConsulta', pedido.cnpj);
+  if (pedido.cpf) qs.set(pedido.parametroCpf!, pedido.cpf);
   const sufixo = `/DFe/${pedido.nsu}${qs.size ? `?${qs}` : ''}`;
   const chamar = async (caminho: string) => {
     const r = await fetch(`${p.url}/adn/${pedido.certId}${caminho}`, { headers: { authorization: `Bearer ${p.token}` } });
-    return { caminho, status: r.status, texto: await r.text() };
+    // O caminho volta na resposta: com o CPF mascarado.
+    return { caminho: pedido.cpf ? caminho.replace(pedido.cpf, mascararCpf(pedido.cpf)) : caminho, status: r.status, texto: await r.text() };
   };
   let r = await chamar(`/contribuintes${sufixo}`);
   if (r.status === 404) r = await chamar(`/contribuinte${sufixo}`);
@@ -2576,7 +2593,8 @@ async function consultarAdn(c: any, pedido: PedidoAdn) {
   await repo.auditoria().registrar({
     tenantId: repo.contexto.sessao.tenantId, usuarioId: repo.contexto.sessao.usuarioId, usuarioEmail: repo.contexto.sessao.email,
     acao: 'exportar', entidade: 'certificado', entidadeId: pedido.certId,
-    valorDepois: `consulta ADN · NSU ${pedido.nsu}${pedido.cnpj ? ` · CNPJ ${pedido.cnpj}` : ''}${pedido.lote ? ' · lote' : ''} · HTTP ${r.status}`,
+    valorDepois: `consulta ADN · NSU ${pedido.nsu}${pedido.cnpj ? ` · CNPJ ${pedido.cnpj}` : ''}`
+      + `${pedido.cpf ? ` · CPF ${mascararCpf(pedido.cpf)} (${pedido.parametroCpf})` : ''}${pedido.lote ? ' · lote' : ''} · HTTP ${r.status}`,
     origem: 'manual', ip: repo.contexto.ip, requestId: repo.contexto.requestId,
   });
   return r;
@@ -2595,7 +2613,8 @@ app.get('/api/captura/adn-teste/:certId', async (c) => {
 /**
  * A resposta inteira do ADN (18/11, para o chat do cartório usar o certificado): o JSON
  * como veio, com os documentos (o XML de cada nota vem em base64 compactado, como o ADN
- * manda). Mesmos parâmetros do teste: ?nsu=&cnpj=&lote=1.
+ * manda). Mesmos parâmetros do teste: ?nsu=&cnpj=&lote=1, ou o CPF no cabeçalho
+ * `x-consulta-cpf` (com `?param=` para o nome do parâmetro, se não for `cpfConsulta`).
  */
 app.get('/api/captura/adn/:certId', async (c) => {
   exigir(c.get('sessao'), 'captura.gerenciar');

@@ -47,6 +47,20 @@ async function xmlDoDocumento(d: Record<string, unknown>): Promise<string> {
   }
 }
 
+/** CPF com 11 números e os dois dígitos verificadores certos. */
+export function cpfValido(cpf: string): boolean {
+  if (!/^\d{11}$/.test(cpf) || /^(\d)\1{10}$/.test(cpf)) return false;
+  const dv = (ate: number) => {
+    let soma = 0;
+    for (let i = 0; i < ate; i++) soma += Number(cpf[i]) * (ate + 1 - i);
+    return ((soma * 10) % 11) % 10;
+  };
+  return dv(9) === Number(cpf[9]) && dv(10) === Number(cpf[10]);
+}
+
+/** Como o CPF aparece na trilha e nas respostas: só o miolo, como nos documentos públicos. */
+export const mascararCpf = (cpf: string) => `***.${cpf.slice(3, 6)}.${cpf.slice(6, 9)}-**`;
+
 /** CPF ou CNPJ do prestador: dentro de <prest> (DPS) ou <emit> (NFS-e). */
 export function prestadorDoXml(xml: string): string {
   const bloco = xml.match(/<(prest|emit)\b[\s\S]*?<\/\1>/)?.[0] ?? '';
