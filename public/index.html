@@ -524,11 +524,13 @@
         <p class="page-desc">O perfil fiscal define o CFOP sugerido quando o produto ainda não tem padrão próprio.</p>
         <div class="card">
           <header><h2>Cadastradas</h2>
+            <label id="emp-filtro-segmento" class="tiny hidden" style="margin-left:14px;display:inline-flex;gap:6px;align-items:center;cursor:pointer">
+              <input type="checkbox" id="emp-sem-segmento"> só as sem segmento (<span id="emp-sem-segmento-n">0</span>)</label>
             <div style="margin-left:auto"><button class="btn sm primary" id="btn-nova-empresa">+ Nova empresa</button></div>
           </header>
           <div class="body tight">
             <div class="scroll"><table id="tbl-empresas">
-              <thead><tr><th>CNPJ</th><th>Razão social</th><th>UF</th><th>Perfil</th><th>Regime</th><th>CNAE</th><th></th></tr></thead>
+              <thead><tr><th>CNPJ</th><th>Razão social</th><th>UF</th><th>Perfil</th><th>Segmento</th><th>Regime</th><th>CNAE</th><th></th></tr></thead>
               <tbody></tbody>
             </table></div>
           </div>

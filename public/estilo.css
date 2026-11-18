@@ -684,6 +684,11 @@ tr.nota-estorno td{background:#faf5ff}
 .proc[data-de-onde]{cursor:pointer}
 .proc[data-de-onde]:hover{filter:brightness(1.08);text-decoration:underline}
 .modal.largo{max-width:960px}
+/* 17/11: a pergunta do "outro CFOP" abre por cima do modal (50) e da espera (60). */
+.modal-fundo.outro-cfop{z-index:70}
+.outro-cfop .modal>footer{flex-wrap:wrap}
+.outro-cfop-tabela{max-height:210px;margin:0 0 10px}
+.proc-dividido[role=button]{cursor:pointer}
 .de-onde-tabela{max-height:46vh;overflow:auto;border:1px solid var(--line-2);border-radius:6px;margin:8px 0}
 .de-onde-tabela table{font-size:12.5px}
 .de-onde-tabela tr.de-onde-igual td{background:var(--warn-soft)}

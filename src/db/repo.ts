@@ -36,6 +36,14 @@ export class ComplementoInvalido extends Error {
   }
 }
 
+/** Linha em que o mesmo produto já está decidido com outro CFOP (17/11). */
+export type AnteriorCfop = {
+  itemId: string; notaId: string; numero: string | null; emissao: string | null; competencia: string | null;
+  nItem: number; cfop: string; quem: string | null; quando: string | null; complemento?: string | null;
+};
+/** Item que está para ser decidido com um CFOP diferente do que o produto já tem (17/11). */
+export type ConflitoCfop = { itemId: string; nItem: number; produto: string; cfop: string; anteriores: AnteriorCfop[] };
+
 function id(): string {
   return crypto.randomUUID();
 }
@@ -565,7 +573,7 @@ export class Repo {
       comandos.push(
         this.db
           .prepare(
-            `UPDATE itens SET cfop_novo = ?, cfop_origem = ?, revisado = 1, revisado_por = ?, revisado_em = ?
+            `UPDATE itens SET cfop_novo = ?, cfop_origem = ?, cfop_excecao = 0, revisado = 1, revisado_por = ?, revisado_em = ?
               WHERE tenant_id = ? AND nota_id = ? AND id IN (${fatia.map(() => '?').join(',')})`,
           )
           .bind(cfop, origem, quem, quando, this.tenant, notaId, ...fatia),
@@ -790,6 +798,135 @@ export class Repo {
   // ---------------------------------------------------------------- itens
 
   /**
+   * Um produto, um CFOP (17/11, Mateus: "isso não pode acontecer de forma alguma").
+   *
+   * A Taís trocava o CFOP de um produto e as notas já conferidas ficavam com o de antes,
+   * sem aviso: 12 produtos em 8 empresas com dois CFOPs, achados só na auditoria. Antes de
+   * decidir o CFOP de um item (digitar, aplicar ou conferir), a rota pergunta aqui se o
+   * MESMO produto - mesmo fornecedor, mesmo código, mesmo CFOP que veio - já está decidido
+   * com outro CFOP em outra linha desta empresa. É a mesma chave da auditoria
+   * (`divergencias`).
+   *
+   * "Decidido" = conferido ou digitado. Ficam de fora: nota cancelada, estorno, linha
+   * marcada "fica diferente de propósito" (`cfop_excecao`), produto sem código (a chave
+   * juntaria produtos diferentes) e as próprias linhas do pedido.
+   */
+  async outroCfopNasAnteriores(
+    notaId: string,
+    alvos: { id: string; nItem: number; produto: string; cProd: string | null; saida: string | null; cfop: string }[],
+  ): Promise<ConflitoCfop[]> {
+    const nota = await this.db
+      .prepare('SELECT empresa_id, emit_cnpj FROM notas WHERE tenant_id = ? AND id = ?')
+      .bind(this.tenant, notaId)
+      .first<any>();
+    if (!nota) throw new ForaDoEscopo('Nota não encontrada');
+    this.exigirEmpresa(nota.empresa_id);
+
+    // Igual ao UPPER do SQLite, que só sobe as letras sem acento.
+    const cod = (v: unknown) => String(v ?? '').trim().replace(/[a-z]/g, (c) => c.toUpperCase());
+    const validos = alvos.filter((a) => cod(a.cProd) !== '' && a.cfop.trim() !== '');
+    if (!nota.emit_cnpj || validos.length === 0) return [];
+
+    const doPedido = new Set(alvos.map((a) => a.id));
+    const codigos = [...new Set(validos.map((a) => cod(a.cProd)))];
+    const porChave = new Map<string, AnteriorCfop[]>();
+    for (let i = 0; i < codigos.length; i += 80) {
+      const fatia = codigos.slice(i, i + 80);
+      const { results } = await this.db
+        .prepare(
+          `SELECT i.id AS item_id, i.n_item, UPPER(TRIM(i.c_prod)) AS cod, TRIM(COALESCE(i.cfop_original, '')) AS saida,
+                  TRIM(i.cfop_novo) AS cfop, i.complemento, i.revisado_em, u.nome AS quem,
+                  n.id AS nota_id, n.numero, n.dh_emi, n.competencia
+             FROM notas n JOIN itens i ON i.nota_id = n.id LEFT JOIN usuarios u ON u.id = i.revisado_por
+            WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.emit_cnpj = ? AND n.cancelada_em IS NULL AND n.estorno = 0
+              AND (i.revisado = 1 OR COALESCE(i.cfop_origem, '') LIKE 'manual%')
+              AND i.cfop_excecao = 0 AND TRIM(COALESCE(i.cfop_novo, '')) <> ''
+              AND UPPER(TRIM(COALESCE(i.c_prod, ''))) IN (${fatia.map(() => '?').join(',')})
+            ORDER BY n.dh_emi DESC, n.numero, i.n_item`,
+        )
+        .bind(this.tenant, nota.empresa_id, nota.emit_cnpj, ...fatia)
+        .all<any>();
+      for (const l of results) {
+        if (doPedido.has(l.item_id)) continue;
+        const k = `${l.cod}|${l.saida}`;
+        const lista = porChave.get(k) ?? [];
+        lista.push({
+          itemId: l.item_id, notaId: l.nota_id, numero: l.numero ?? null, emissao: l.dh_emi ?? null,
+          competencia: l.competencia ?? null, nItem: Number(l.n_item), cfop: String(l.cfop),
+          quem: l.quem ?? null, quando: l.revisado_em ?? null, complemento: l.complemento ?? null,
+        });
+        porChave.set(k, lista);
+      }
+    }
+
+    const conflitos: ConflitoCfop[] = [];
+    for (const a of validos) {
+      const cfop = a.cfop.trim();
+      const anteriores = (porChave.get(`${cod(a.cProd)}|${String(a.saida ?? '').trim()}`) ?? []).filter((x) => x.cfop !== cfop);
+      if (anteriores.length) conflitos.push({ itemId: a.id, nItem: a.nItem, produto: a.produto, cfop, anteriores });
+    }
+    return conflitos;
+  }
+
+  /**
+   * A escolha dela para as notas anteriores (17/11):
+   *  - `igualar`: as anteriores passam para o CFOP de agora (estavam erradas);
+   *  - `manter`: ficam como estão, de propósito, e o sistema não pergunta mais sobre elas;
+   *  - `igualar` com `desde`: troca as do mês `desde` para cá e mantém as mais antigas.
+   * As duas ficam na trilha de cada linha, com quem e quando. `conflitos` vem sempre de
+   * `outroCfopNasAnteriores`, nunca do navegador.
+   */
+  async resolverOutroCfop(conflitos: ConflitoCfop[], escolha: 'igualar' | 'manter', desde?: string): Promise<number> {
+    const porItem = new Map<string, { a: AnteriorCfop; cfop: string }>();
+    for (const c of conflitos) for (const a of c.anteriores) if (!porItem.has(a.itemId)) porItem.set(a.itemId, { a, cfop: c.cfop });
+    const lista = [...porItem.values()];
+    if (lista.length === 0) return 0;
+
+    // Taís, 17/11: "o certo é o último, mas só de 01.11 pra frente". Com `desde` (AAAA-MM),
+    // só as notas daquele mês para cá trocam; as mais antigas ficam, marcadas.
+    const mesDe = (a: AnteriorCfop) => String(a.competencia ?? a.emissao ?? '').slice(0, 7);
+    const troca = (a: AnteriorCfop) => escolha === 'igualar' && (!desde || mesDe(a) >= desde);
+
+    const comandos: D1PreparedStatement[] = [];
+    const eventos: EventoAuditoria[] = [];
+    for (const { a, cfop } of lista) {
+      if (troca(a)) {
+        comandos.push(
+          this.db
+            .prepare(
+              // O complemento é do CFOP (16/11): trocou o CFOP, volta ao padrão do novo.
+              `UPDATE itens SET cfop_novo = ?, cfop_origem = 'manual:igualado', cfop_excecao = 0,
+                      complemento = NULL, complemento_origem = NULL
+                WHERE tenant_id = ? AND id = ?`,
+            )
+            .bind(cfop, this.tenant, a.itemId),
+        );
+        eventos.push(this.evento({
+          acao: 'alterar', entidade: 'item_nota', entidadeId: a.itemId,
+          campo: 'cfop', valorAntes: a.cfop, valorDepois: cfop, origem: 'manual:igualado',
+        }));
+        if (a.complemento) {
+          eventos.push(this.evento({
+            acao: 'alterar', entidade: 'item_nota', entidadeId: a.itemId,
+            campo: 'complemento', valorAntes: a.complemento, valorDepois: null, origem: 'sistema',
+          }));
+        }
+      } else {
+        comandos.push(
+          this.db.prepare('UPDATE itens SET cfop_excecao = 1 WHERE tenant_id = ? AND id = ?').bind(this.tenant, a.itemId),
+        );
+        eventos.push(this.evento({
+          acao: 'alterar', entidade: 'item_nota', entidadeId: a.itemId,
+          campo: 'cfop_excecao', valorAntes: null, valorDepois: `fica ${a.cfop} de propósito; o produto passou a ${cfop}`, origem: 'manual',
+        }));
+      }
+    }
+    for (let i = 0; i < comandos.length; i += 100) await this.db.batch(comandos.slice(i, i + 100));
+    await this.aud.registrarLote(eventos);
+    return lista.length;
+  }
+
+  /**
    * Altera campos do template num item. Grava a trilha com a `origem` correta -
    * que e o que distingue "o humano digitou" de "a regra preencheu e o humano confirmou".
    */
@@ -830,6 +967,8 @@ export class Repo {
 
       sets.push(`${col.valor} = ?`, `${col.origem} = ?`);
       valores.push(m.valor, m.origem);
+      // 17/11: CFOP novo é decisão nova; a marca "fica diferente de propósito" era do antigo.
+      if (m.campo === 'cfop') sets.push('cfop_excecao = 0');
       eventos.push(
         this.evento({
           acao: 'alterar', entidade: 'item_nota', entidadeId: itemId,
@@ -2995,6 +3134,7 @@ export class Repo {
    */
   async divergencias(empresaId: string, competencia?: string): Promise<any[]> {
     this.exigirEmpresa(empresaId);
+    // 17/11: linha que ela mandou deixar como está, de propósito (`cfop_excecao`), não conta.
     const r = this.recorteCompetencia(competencia);
     const chave = "n.emit_cnpj || '|' || UPPER(TRIM(COALESCE(i.c_prod, ''))) || '|' || TRIM(COALESCE(i.cfop_original, ''))";
     const { results } = await this.db
@@ -3007,6 +3147,7 @@ export class Repo {
             WHERE n.tenant_id = ? AND n.empresa_id = ? AND n.cancelada_em IS NULL AND n.estorno = 0
               AND (i.revisado = 1 OR COALESCE(i.cfop_origem, '') LIKE 'manual%')
               AND TRIM(COALESCE(i.cfop_novo, '')) <> ''
+              AND i.cfop_excecao = 0
          ),
          divergentes AS (
            SELECT k FROM decididos GROUP BY k HAVING COUNT(DISTINCT cfop) > 1

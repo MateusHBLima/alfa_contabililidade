@@ -86,8 +86,120 @@ async function api(caminho, opcoes = {}) {
     if (!$('#modal-fundo').classList.contains('hidden')) { /* já está aberto */ }
     else abrirTrocaDeSenha(true);
   }
+  // 17/11: um produto, um CFOP. O servidor não gravou porque o mesmo produto já está com
+  // outro CFOP em nota conferida. A pergunta mora aqui, e não em cada botão, para valer em
+  // todo caminho que grava CFOP - inclusive os que ainda vão ser escritos.
+  if (r.status === 409 && corpo?.codigo === 'outro-cfop' && typeof opcoes.body === 'string') {
+    const escolha = await perguntarOutroCfop(corpo.conflitos ?? [], corpo.mes ?? null);
+    if (!escolha) {
+      throw Object.assign(
+        new Error('você fechou a pergunta sem escolher. O produto já tem outro CFOP em notas conferidas, e nada foi gravado.'),
+        { outroCfopSemDecisao: true, status: 409 },
+      );
+    }
+    return api(caminho, { ...opcoes, body: JSON.stringify({ ...JSON.parse(opcoes.body), ...escolha }) });
+  }
   if (!r.ok) throw Object.assign(new Error(corpo?.erro ?? 'erro'), { dados: corpo, status: r.status });
   return corpo;
+}
+
+/**
+ * Um produto, um CFOP (17/11, Mateus: "isso não pode acontecer de forma alguma").
+ *
+ * A Taís mudava o CFOP de um produto e as notas já conferidas ficavam com o de antes,
+ * sem aviso. Agora o servidor recusa gravar e esta janela mostra as notas anteriores.
+ * As escolhas seguem a regra dela ("o certo é o último, mas só de 01.11 pra frente"):
+ * trocar as do mês desta nota para cá e deixar as mais antigas, trocar todas, ou deixar
+ * todas. Fechar sem escolher não grava nada.
+ *
+ * Tem janela própria (não usa o modal da tela) porque pode abrir por cima de outra
+ * janela ou da "Conferindo…", e em fila: conferir vários itens seguidos faz uma pergunta
+ * de cada vez.
+ */
+let filaOutroCfop = Promise.resolve();
+function perguntarOutroCfop(conflitos, mes) {
+  const vez = filaOutroCfop.then(() => abrirPerguntaOutroCfop(conflitos, mes));
+  filaOutroCfop = vez.catch(() => {});
+  return vez;
+}
+function abrirPerguntaOutroCfop(conflitos, mes) {
+  return new Promise((resolve) => {
+    const porItem = new Map();
+    for (const c of conflitos) for (const a of c.anteriores ?? []) porItem.set(a.itemId, a);
+    const todas = [...porItem.values()];
+    const mesDe = (a) => String(a.competencia ?? a.emissao ?? '').slice(0, 7);
+    const doMes = mes ? todas.filter((a) => mesDe(a) >= mes) : todas;
+    const antigas = todas.length - doMes.length;
+    const cfops = [...new Set(conflitos.map((c) => c.cfop))];
+    const para = cfops.length === 1 ? ` para ${cfops[0]}` : '';
+    const mesBr = mes ? `01/${mes.slice(5, 7)}/${mes.slice(0, 4)}` : '';
+    const notas = (q) => `${q} ${q === 1 ? 'nota' : 'notas'}`;
+    const MOSTRA = 12;
+    const blocos = conflitos.map((c) => {
+      const linhas = (c.anteriores ?? []).slice(0, MOSTRA).map((a) => `<tr>
+          <td>${esc(dataCurta(a.emissao))}</td>
+          <td class="mono">${esc(a.numero ?? '')}</td>
+          <td class="mono"><b>${esc(a.cfop)}</b></td>
+          <td class="tiny">${esc(a.quem ?? '—')}${a.quando ? ` · ${esc(dataCurta(a.quando))}` : ''}</td>
+          <td class="tiny">${mes && mesDe(a) < mes ? 'mês anterior' : ''}</td>
+        </tr>`).join('');
+      const resto = (c.anteriores ?? []).length - MOSTRA;
+      return `<p class="dialogo-destaque">${esc(c.produto || `item ${c.nItem}`)} <span class="tiny">· nesta nota: <b>${esc(c.cfop)}</b></span></p>
+        <div class="scroll outro-cfop-tabela"><table>
+          <thead><tr><th>Emissão</th><th>Nota</th><th>CFOP</th><th>Conferido por</th><th></th></tr></thead>
+          <tbody>${linhas}</tbody></table></div>
+        ${resto > 0 ? `<p class="dialogo-texto sutil">e mais ${notas(resto)}.</p>` : ''}`;
+    }).join('');
+
+    // Os botões, do mais provável para o menos (regra da Taís: troca do mês para cá).
+    const botoes = [];
+    if (doMes.length && antigas) {
+      botoes.push(['mes', `Trocar as de ${mesBr} para cá (${doMes.length}) e deixar as mais antigas`, true]);
+      botoes.push(['todas', `Trocar todas (${todas.length})`, false]);
+      botoes.push(['manter', 'Deixar todas como estão', false]);
+    } else if (doMes.length) {
+      botoes.push(['todas', `Trocar ${todas.length === 1 ? 'a nota anterior' : `as ${todas.length} anteriores`}${para}`, true]);
+      botoes.push(['manter', 'Deixar como estão', false]);
+    } else {
+      botoes.push(['manter', 'Deixar as anteriores como estão (são de meses anteriores)', true]);
+      botoes.push(['todas', `Trocar todas mesmo assim (${todas.length})`, false]);
+    }
+
+    const fundo = document.createElement('div');
+    fundo.className = 'modal-fundo outro-cfop';
+    fundo.innerHTML = `<div class="modal largo" role="dialog" aria-modal="true" aria-labelledby="outro-cfop-titulo">
+      <header id="outro-cfop-titulo">${conflitos.length === 1 ? 'Este produto já está com outro CFOP' : `${conflitos.length} produtos já estão com outro CFOP`}</header>
+      <div class="body">
+        <p class="dialogo-texto">O mesmo produto, deste fornecedor, já foi conferido <b>nesta empresa</b> com outro CFOP. Um produto não fica com dois CFOPs: escolha o que fazer com as notas anteriores. Nada foi gravado ainda.</p>
+        ${blocos}
+        <ul class="dialogo-lista">
+          <li><b>Trocar</b>: as notas anteriores passam${para || ' para o CFOP desta nota'}. Se alguma já foi para o Questor, corrija lá também.</li>
+          <li><b>Deixar como estão</b>: ficam com o CFOP delas, de propósito, e o sistema não pergunta mais sobre elas.</li>
+        </ul>
+      </div>
+      <footer>
+        <button class="btn" type="button" data-outro-cfop="">Cancelar, não gravar</button>
+        ${botoes.map(([v, rotulo, principal]) => `<button class="btn${principal ? ' primary' : ''}" type="button" data-outro-cfop="${v}">${esc(rotulo)}</button>`).join('')}
+      </footer></div>`;
+
+    const fechar = (resposta) => {
+      document.removeEventListener('keydown', tecla, true);
+      fundo.remove();
+      resolve(resposta);
+    };
+    // Esc fecha só esta janela (e não a que estiver por baixo).
+    const tecla = (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); fechar(null); } };
+    document.addEventListener('keydown', tecla, true);
+    fundo.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-outro-cfop]');
+      if (!b) return;
+      const v = b.dataset.outroCfop;
+      fechar(v === 'mes' ? { anteriores: 'igualar', desde: mes }
+        : v === 'todas' ? { anteriores: 'igualar' }
+          : v === 'manter' ? { anteriores: 'manter' } : null);
+    });
+    document.body.appendChild(fundo);
+  });
 }
 
 const esc = (s) =>
@@ -1255,7 +1367,17 @@ async function conferirNotaPronta(notaId, emLote = false) {
     // Com os itens abertos na lista, confere o que ela VIU; se algum mudou por trás, fica de fora.
     const viu = estado.miniVistos.get(notaId);
     const esperado = viu ? Object.fromEntries(conferir.filter((i) => i.id in viu).map((i) => [i.id, viu[i.id]])) : undefined;
-    const r = await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: conferir.map((i) => i.id), esperado }) });
+    let r;
+    try {
+      r = await api(`/api/notas/${notaId}/conferir`, { method: 'POST', body: JSON.stringify({ itens: conferir.map((i) => i.id), esperado }) });
+    } catch (e) {
+      if (!e.outroCfopSemDecisao) throw e;
+      // 17/11: ela fechou a pergunta do "outro CFOP" sem escolher. Nada foi conferido nesta
+      // nota; ela sai das prontas e fica para olhar. O lote segue para as outras.
+      estado.notasComAviso.add(notaId);
+      if (!emLote) await carregarNotas();
+      return { ok: false, numero: n.nota.numero, itens: 0, ficaram: [{ nItem: '—', motivo: 'o produto já tem outro CFOP em notas anteriores e ficou sem decisão' }] };
+    }
     conferidos = r.conferidos ?? 0;
     divergentes = r.divergentes ?? [];
   }
@@ -1377,7 +1499,8 @@ document.addEventListener('change', (ev) => {
     } catch (e) {
       naoSalvos.set(el.dataset.miniCfop, Date.now());
       el.value = el.defaultValue;
-      alerta(`Não consegui salvar o CFOP: ${e.message}`);
+      if (e.outroCfopSemDecisao) avisarSalvo('Nada foi gravado');
+      else alerta(`Não consegui salvar o CFOP: ${e.message}`);
     }
   })());
 });
@@ -1904,6 +2027,9 @@ const CFOPS = [
   ['2916', 'Retorno de conserto ou reparo — outro estado'],
   ['1912', 'Entrada para demonstração ou mostruário'],
   ['2912', 'Entrada para demonstração ou mostruário — outro estado'],
+  // 17/11, pedido da Taís: ela já digitava os dois (prestadoras de serviço) e não achava na lista.
+  ['1128', 'Compra para usar na prestação de serviço (ISS)'],
+  ['2128', 'Compra para usar na prestação de serviço (ISS) — outro estado'],
 ];
 
 function montarSeletorCfop() {
@@ -2364,9 +2490,13 @@ function selinhoProcedencia(p, itemId = null) {
   }
   if (fonte === 'dividido') {
     // 27/10: produto novo e NCM já conferido com CFOPs diferentes - o sistema não escolhe.
+    // 17/11: a Taís leu "NCM COM CFOPS DIFERENTES: 1101 ou 1556" como "você pôs os dois
+    // neste produto" e achou que vinha de outra empresa. Agora diz o que é, sem a palavra
+    // NCM, e o clique mostra quais são os parecidos.
     const ops = (p?.opcoes ?? []).map(esc);
     const lista = ops.length > 1 ? `${ops.slice(0, -1).join(', ')} ou ${ops[ops.length - 1]}` : ops.join('');
-    return `<span class="proc proc-dividido" title="Ninguém tratou ESTE produto ainda, e outros produtos com o mesmo NCM já entraram com CFOPs diferentes (${lista}). O sistema não escolhe: escolha o deste.">? NCM COM ${ops.length > 1 ? 'CFOPS DIFERENTES' : 'CFOP'}: ${lista}</span>`;
+    const ver = itemId ? ` data-parecidos="${esc(itemId)}" role="button" tabindex="0"` : '';
+    return `<span class="proc proc-dividido"${ver} title="Este produto nunca entrou nesta empresa. Outros produtos parecidos (mesma classificação fiscal, o NCM), desta mesma empresa, já entraram em ${lista}. Nenhum deles é este produto: escolha o CFOP deste.${itemId ? ' Clique para ver quais são.' : ''}">? PRODUTO NOVO · parecidos nesta empresa: ${lista}</span>`;
   }
   if (fonte === 'manual') {
     return `<span class="proc proc-manual" title="Alguém digitou este valor nesta nota">✎ preenchido por vocês</span>`;
@@ -2403,7 +2533,8 @@ async function salvarCampo(itemId, campo, valor) {
       // Não salvou: a linha volta a mostrar o que está gravado, e nenhuma ação usa esse item
       // até ela corrigir (27/10, auditoria - antes o "é sempre assim" caía no valor antigo).
       naoSalvos.set(itemId, Date.now());
-      alerta(`Não salvei: ${e.message}`);
+      if (e.outroCfopSemDecisao) avisarSalvo('Nada foi gravado');
+      else alerta(`Não salvei: ${e.message}`);
       await recarregarNota().catch(() => {});
     }
   })());
@@ -2526,7 +2657,8 @@ async function conferirItens(ids) {
     await carregarNotas();
     avisarDivergentes(r.divergentes);
   } catch (e) {
-    alerta(e.message);
+    if (e.outroCfopSemDecisao) avisarSalvo('Nada foi conferido');
+    else alerta(e.message);
   } finally {
     esconderEspera();
   }
@@ -2567,7 +2699,8 @@ async function conferirUm(itemId, botao) {
   } finally {
     conferindo.delete(itemId);
   }
-  if (erro) alerta(`Não consegui conferir o item: ${erro.message}`);
+  if (erro?.outroCfopSemDecisao) avisarSalvo('Nada foi conferido');
+  else if (erro) alerta(`Não consegui conferir o item: ${erro.message}`);
   else avisarDivergentes(divergentes);
   if (conferindo.size > 0 || estado.notaAberta?.nota?.id !== notaId) return;
   await recarregarNota();
@@ -2613,6 +2746,7 @@ const ROTULO_CAMPO = {
   cst_entrada: 'CST de entrada', conta_contabil: 'Conta contábil',
   credito_icms: 'Crédito de ICMS', credito_pis: 'Crédito de PIS',
   credito_cofins: 'Crédito de COFINS', conferido: 'Conferência',
+  cfop_excecao: 'CFOP diferente de propósito',
 };
 
 /* "De onde veio isto" (13/10, pedido da Taís): "ele aprendeu errado (...) tem alguma forma
@@ -2689,7 +2823,51 @@ async function verDeOndeVeio(itemId) {
   $('#modal-ok').textContent = 'Fechar';
 }
 
+/**
+ * "Parecidos nesta empresa" (17/11): os produtos do mesmo NCM que já foram conferidos
+ * aqui, com o CFOP de cada um. Responde à dúvida da Taís ("de onde ele tirou o 1556?")
+ * sem ela ter que saber o que é NCM nem ir procurar.
+ */
+async function verParecidos(itemId) {
+  const i = (estado.notaAberta?.itens ?? []).find((x) => x.id === itemId);
+  const ncm = String(i?.ncm ?? '').trim();
+  if (!i || !ncm) return;
+  let r;
+  try {
+    r = await api(`/api/empresas/${estado.empresaId}/busca-itens?q=${encodeURIComponent(ncm)}`);
+  } catch (e) {
+    return avisar('Não consegui buscar os produtos parecidos: ' + e.message);
+  }
+  const saida = String(i.cfop_original ?? '').trim();
+  const grupos = new Map();
+  for (const x of r.itens ?? []) {
+    if (String(x.ncm ?? '').trim() !== ncm || !x.revisado || x.cancelada_em || x.item_id === itemId) continue;
+    if (String(x.cfop_original ?? '').trim() !== saida || !String(x.cfop_novo ?? '').trim()) continue;
+    const nome = x.x_prod_novo || x.x_prod_original || '';
+    const k = `${nome}|${x.emit_cnpj}|${x.cfop_novo}`;
+    const g = grupos.get(k) ?? { nome, fornecedor: x.emit_nome ?? '', cfop: String(x.cfop_novo).trim(), notas: 0, ultima: x.dh_emi };
+    g.notas += 1;
+    grupos.set(k, g);
+  }
+  const linhas = [...grupos.values()]
+    .sort((a, b) => a.cfop.localeCompare(b.cfop) || a.nome.localeCompare(b.nome, 'pt-BR'))
+    .map((g) => `<tr><td>${esc(g.nome)}</td><td class="tiny">${esc(g.fornecedor)}</td>
+      <td class="mono"><b>${esc(g.cfop)}</b></td><td class="tiny">${g.notas} ${g.notas === 1 ? 'vez' : 'vezes'} · última em ${esc(dataCurta(g.ultima))}</td></tr>`).join('');
+  abrirModal('Produtos parecidos nesta empresa', `
+    <p class="dialogo-destaque">${esc(i.x_prod_novo || i.x_prod_original || 'este item')}</p>
+    <p class="dialogo-texto">Este produto nunca entrou nesta empresa, então o sistema não tem o CFOP dele. Abaixo estão os produtos parecidos (mesma classificação fiscal, NCM ${esc(ncm)}) que vocês já conferiram <b>nesta empresa</b>, e o CFOP de cada um. Nenhum deles é este produto.</p>
+    ${linhas
+      ? `<div class="scroll de-onde-tabela"><table><thead><tr><th>Produto</th><th>Fornecedor</th><th>CFOP</th><th></th></tr></thead><tbody>${linhas}</tbody></table></div>`
+      : '<p class="dialogo-texto sutil">Não achei os parecidos nas 200 linhas mais recentes desta classificação. Procure por ela em “Procurar produto em todas as notas”.</p>'}
+    <p class="dialogo-texto sutil">Escolha na linha o CFOP deste produto. Daí para frente ele já vem certo.</p>`, null);
+  $('.modal')?.classList.add('largo');
+  $('#modal-cancelar').classList.add('hidden');
+  $('#modal-ok').textContent = 'Fechar';
+}
+
 document.addEventListener('click', (ev) => {
+  const par = ev.target.closest('[data-parecidos]');
+  if (par) return verParecidos(par.dataset.parecidos);
   const sel = ev.target.closest('[data-de-onde]');
   if (sel) return verDeOndeVeio(sel.dataset.deOnde);
   const ab = ev.target.closest('[data-de-onde-abrir]');
@@ -3306,12 +3484,24 @@ async function baixar(url) {
 
 // ------------------------------------------------------------------ empresas
 
+$('#emp-sem-segmento')?.addEventListener('change', () => renderEmpresas());
+
 function renderEmpresas() {
-  $('#tbl-empresas tbody').innerHTML = estado.empresas.map((e) => `<tr>
+  // 17/11, Taís: "tem algum jeito de aparecer para mim qual que falta preencher o segmento?"
+  const semSegmento = estado.empresas.filter((e) => !String(e.segmento ?? '').trim());
+  const soSem = $('#emp-sem-segmento')?.checked && semSegmento.length > 0;
+  const filtro = $('#emp-filtro-segmento');
+  if (filtro) {
+    filtro.classList.toggle('hidden', semSegmento.length === 0);
+    $('#emp-sem-segmento-n').textContent = semSegmento.length;
+    if (semSegmento.length === 0) $('#emp-sem-segmento').checked = false;
+  }
+  $('#tbl-empresas tbody').innerHTML = (soSem ? semSegmento : estado.empresas).map((e) => `<tr>
     <td class="mono">${esc(e.cnpj)}</td>
     <td><button class="link-tabela" data-abrir-empresa="${esc(e.id)}">${esc(e.razao_social)}</button></td>
     <td>${esc(e.uf ?? '—')}</td>
     <td><span class="tag info">${esc(e.perfil)}</span></td>
+    <td class="tiny">${String(e.segmento ?? '').trim() ? esc(e.segmento) : '<span class="tag-aviso-regime">⚠ sem segmento</span>'}</td>
     <td class="tiny">${e.regime ? esc(nomeRegime(e.regime)) : '<span class="tag-aviso-regime">⚠ não informado</span>'}</td>
     <td class="mono tiny">${esc(e.cnae_principal ?? '—')}</td>
     <td class="acoes">
@@ -3320,7 +3510,7 @@ function renderEmpresas() {
       ${pode('empresas.apagar')
         ? `<button class="btn sm perigo" data-apagar-empresa="${esc(e.id)}">Apagar</button>` : ''}
     </td>
-  </tr>`).join('') || '<tr><td colspan="7" class="vazio">Nenhuma empresa cadastrada.</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="8" class="vazio">Nenhuma empresa cadastrada.</td></tr>';
 
   $$('#tbl-empresas button[data-apagar-empresa]').forEach((b) =>
     b.addEventListener('click', () => apagarEmpresa(b.dataset.apagarEmpresa)));
