@@ -25,7 +25,7 @@ import { detectarAlertas, estiloDaLinha, historicoDaOperacao, marcasDaLinha, res
 import type { Procedencia } from './rules/alertas';
 import { aprendizadoDaConferencia } from './rules/conferencia';
 import { lerPfx, enviarParaCloudflare, removerDaCloudflare, ErroCertificado } from './captura/certificado';
-import { resumirRespostaAdn, cpfValido, mascararCpf } from './captura/adn';
+import { resumirRespostaAdn, cpfValido, mascararCpf, chamarAdn, type PedidoAdn } from './captura/adn';
 import { baixarDaSef, executarBuscaAutomatica, mesesDaSef, coberturaDaSef, importarDaCaixa, aplicarEventosDaCaixa, testarConexao, buscaComCertificado, ponteConfigurada, enviarParaPonte, removerDaPonte, type AmbienteCaptura } from './captura/captura';
 import { ErroSef } from './captura/sefsc';
 import { montarRelatorioCfop, montarRelatorioProdutos, montarRelatorioFornecedores, csvFornecedores, chaveProduto, aplicarRegrasIcms, aplicarRegraNasNotas, grupoIcms, csvCfop, csvProdutos, csvAnalitico, notasDoAnalitico, totaisPorCfopDaNota } from './relatorios/relatorios';
@@ -66,6 +66,12 @@ type Env = {
    */
   SEF_PONTE_URL?: string;
   SEF_PONTE_TOKEN?: string;
+  /**
+   * O certificado (id em `certificados`) que a plataforma do cartório pode usar para
+   * consultar a base nacional da NFS-e. Variável (wrangler.jsonc), não é segredo. Sem
+   * ela a consulta interna responde que não está ligada. Ver src/interno.ts.
+   */
+  CARTORIO_CERT_ID?: string;
   /**
    * Assistente da contadora (16/10): chave da API da OpenAI, segredo no painel
    * (wrangler secret put OPENAI_API_KEY). Sem ela, a tela diz que o assistente não
@@ -2557,7 +2563,6 @@ app.get('/api/captura', async (c) => {
  *
  * Só consulta (GET em /contribuintes/DFe). Cada consulta fica na trilha.
  */
-type PedidoAdn = { certId: string; nsu: string; cnpj?: string; cpf?: string; parametroCpf?: string; lote: boolean };
 function lerPedidoAdn(c: any): PedidoAdn | { erro: string } {
   const certId = c.req.param('certId');
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(certId)) return { erro: 'certificado inválido' };
@@ -2577,18 +2582,8 @@ function lerPedidoAdn(c: any): PedidoAdn | { erro: string } {
 async function consultarAdn(c: any, pedido: PedidoAdn) {
   const p = ponteConfigurada(c.env as unknown as AmbienteCaptura);
   if (!p) return null;
-  const qs = new URLSearchParams();
-  if (pedido.lote) qs.set('lote', 'true');
-  if (pedido.cnpj) qs.set('cnpjConsulta', pedido.cnpj);
-  if (pedido.cpf) qs.set(pedido.parametroCpf!, pedido.cpf);
-  const sufixo = `/DFe/${pedido.nsu}${qs.size ? `?${qs}` : ''}`;
-  const chamar = async (caminho: string) => {
-    const r = await fetch(`${p.url}/adn/${pedido.certId}${caminho}`, { headers: { authorization: `Bearer ${p.token}` } });
-    // O caminho volta na resposta: com o CPF mascarado.
-    return { caminho: pedido.cpf ? caminho.replace(pedido.cpf, mascararCpf(pedido.cpf)) : caminho, status: r.status, texto: await r.text() };
-  };
-  let r = await chamar(`/contribuintes${sufixo}`);
-  if (r.status === 404) r = await chamar(`/contribuinte${sufixo}`);
+  // A chamada em si mora em src/captura/adn.ts; o caminho volta com o CPF mascarado.
+  const r = await chamarAdn(p, pedido);
   const repo = c.get('repo');
   await repo.auditoria().registrar({
     tenantId: repo.contexto.sessao.tenantId, usuarioId: repo.contexto.sessao.usuarioId, usuarioEmail: repo.contexto.sessao.email,
@@ -4177,6 +4172,13 @@ app.all('*', async (c) => {
   url.pathname = '/index.html';
   return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw));
 });
+
+/**
+ * Ponto de entrada interno, só para a plataforma do cartório (outro Worker da mesma
+ * conta, ligado por service binding). Não é rota: de fora não se chega aqui. Ver
+ * src/interno.ts.
+ */
+export { ConsultaAdnCartorio } from './interno';
 
 /**
  * Cron (wrangler.jsonc, a cada 15 minutos): a busca automática na SEF. Cada rodada
