@@ -49,7 +49,11 @@
     // Intermediário da busca na SEF (01/10), na VPS da Planee. A SEF pede o certificado
     // por renegociação TLS, que o fetch da Cloudflare não faz. O token é segredo:
     // SEF_PONTE_TOKEN, cadastrado no painel. Código em relay/relay.mjs.
-    "SEF_PONTE_URL": "https://sef-alfa.planeelabia.com"
+    "SEF_PONTE_URL": "https://sef-alfa.planeelabia.com",
+    // Plataforma do cartório (24/11, Mateus): o ÚNICO certificado que ela pode usar para
+    // buscar as notas do cartório na base nacional da NFS-e. É o e-CPF da contadora, que
+    // tem a procuração do titular. O id não é segredo. Ver src/interno.ts.
+    "CARTORIO_CERT_ID": "04216890-9852-47a5-9b2b-58cc12480b5f"
   },
 
   // Busca automática na SEF (01/10): a cada 15 minutos, uma empresa por vez.

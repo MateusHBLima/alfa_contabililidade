@@ -81,3 +81,28 @@ export async function resumirRespostaAdn(status: number, caminho: string, texto:
   }
   return { status, caminho, documentos: docs.length, prestadores, maiorNsu: nsus.length ? Math.max(...nsus) : null };
 }
+
+/** O que se pede ao ADN: um certificado, a partir de que NSU e, opcionalmente, em nome de quem. */
+export type PedidoAdn = { certId: string; nsu: string; cnpj?: string; cpf?: string; parametroCpf?: string; lote: boolean };
+
+/**
+ * A consulta ao ADN pelo intermediário (GET em /contribuintes/DFe/{NSU}; no 404, tenta o
+ * caminho no singular). Usada pela rota do site e pela consulta da plataforma do cartório,
+ * para as duas falarem com o intermediário do mesmo jeito. O `caminho` devolvido já vem
+ * com o CPF mascarado: é o que pode ir para resposta e para a trilha.
+ */
+export async function chamarAdn(
+  ponte: { url: string; token: string }, pedido: PedidoAdn,
+): Promise<{ caminho: string; status: number; texto: string }> {
+  const qs = new URLSearchParams();
+  if (pedido.lote) qs.set('lote', 'true');
+  if (pedido.cnpj) qs.set('cnpjConsulta', pedido.cnpj);
+  if (pedido.cpf) qs.set(pedido.parametroCpf ?? 'cpfConsulta', pedido.cpf);
+  const sufixo = `/DFe/${pedido.nsu}${qs.size ? `?${qs}` : ''}`;
+  const chamar = async (caminho: string) => {
+    const r = await fetch(`${ponte.url}/adn/${pedido.certId}${caminho}`, { headers: { authorization: `Bearer ${ponte.token}` } });
+    return { caminho: pedido.cpf ? caminho.replace(pedido.cpf, mascararCpf(pedido.cpf)) : caminho, status: r.status, texto: await r.text() };
+  };
+  const r = await chamar(`/contribuintes${sufixo}`);
+  return r.status === 404 ? chamar(`/contribuinte${sufixo}`) : r;
+}
