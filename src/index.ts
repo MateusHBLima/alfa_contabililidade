@@ -35,7 +35,7 @@ import { SessaoItc, ErroItc, camposDoItem, aliquotaInterestadual, type Resultado
 import { conversar, ErroAssistente, MODELO_PADRAO } from './assistente/assistente';
 import { montarEntradas200, dataBr } from './questor/leiaute200';
 import { notaParaEntrada } from './questor/entrada';
-import { ClienteSyn, configSyn, ErroSyn, extrairDadoId } from './questor/syn';
+import { ClienteSyn, configSyn, ErroSyn, extrairDadoId, GRUPO_ENTRADAS, GRUPOS_SYN, gruposPedidos } from './questor/syn';
 
 type Env = {
   DB: D1Database;
@@ -101,6 +101,7 @@ type Env = {
   QUESTOR_SYN_EMAIL?: string;
   QUESTOR_SYN_CODIGO?: string;
   QUESTOR_CNPJ_ESCRITORIO?: string;
+  QUESTOR_SYN_INTERVALO_MS?: string;
   // Os certificados ligados no wrangler.jsonc (`mtls_certificates`) chegam como
   // MTLS_<id no cofre>. São lidos pelo nome em src/captura/captura.ts.
 };
@@ -3824,32 +3825,51 @@ app.get('/api/empresas/:id/questor/acesso', async (c) => {
   exigir(c.get('sessao'), 'questor.enviar');
   const empresa = await c.get('repo').obterEmpresa(c.req.param('id'));
   if (!empresa) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const grupo = Number(c.req.query('grupo') ?? GRUPO_ENTRADAS);
+  if (!(grupo in GRUPOS_SYN)) return c.json({ erro: 'grupo inválido', validos: Object.keys(GRUPOS_SYN).map(Number) }, 400);
   const s = clienteSyn(c);
   if ('resposta' in s) return s.resposta;
   try {
-    const r = await s.cliente.buscarAcesso(empresa.cnpj);
+    const r = await s.cliente.buscarAcesso(empresa.cnpj, grupo);
     return c.json({ status: r.status, resposta: r.corpo });
   } catch (e) { return erroDoSyn(c, e); }
 });
 
-/** Pede ao Questor acesso para mandar as entradas desta empresa. */
+/**
+ * Pede ao Questor acesso desta empresa. Corpo opcional `{ grupos: 'todos' | number[] }`;
+ * sem corpo, só entradas (200). Um grupo recusado não impede os outros; o resultado
+ * de cada grupo volta na resposta e o resumo fica na trilha.
+ */
 app.post('/api/empresas/:id/questor/acesso', async (c) => {
   exigir(c.get('sessao'), 'questor.enviar');
   const repo = c.get('repo');
   const empresa = await repo.obterEmpresa(c.req.param('id'));
   if (!empresa) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const corpo = (await c.req.json().catch(() => ({}))) as { grupos?: unknown };
+  const grupos = gruposPedidos(corpo?.grupos);
+  if (!grupos) return c.json({ erro: 'grupo inválido', validos: Object.keys(GRUPOS_SYN).map(Number) }, 400);
   const s = clienteSyn(c);
   if ('resposta' in s) return s.resposta;
-  try {
-    const r = await s.cliente.solicitarAcesso(empresa.cnpj);
-    await repo.auditoria().registrar({
-      tenantId: repo.contexto.sessao.tenantId, usuarioId: repo.contexto.sessao.usuarioId,
-      usuarioEmail: repo.contexto.sessao.email, acao: 'exportar', entidade: 'empresa', entidadeId: empresa.id,
-      valorDepois: `Questor SYN · pedido de acesso (entradas) · HTTP ${r.status}`, origem: 'manual',
-      ip: repo.contexto.ip, requestId: repo.contexto.requestId,
-    });
-    return c.json({ status: r.status, resposta: r.corpo });
-  } catch (e) { return erroDoSyn(c, e); }
+
+  const resultados: { grupo: number; nome: string; status: number; resposta?: unknown; erro?: string }[] = [];
+  for (const grupo of grupos) {
+    try {
+      const r = await s.cliente.solicitarAcesso(empresa.cnpj, grupo);
+      resultados.push({ grupo, nome: GRUPOS_SYN[grupo]!, status: r.status, resposta: r.corpo });
+    } catch (e) {
+      if (!(e instanceof ErroSyn)) throw e;
+      resultados.push({ grupo, nome: GRUPOS_SYN[grupo]!, status: e.status, erro: e.message });
+    }
+  }
+  const aceitos = resultados.filter((r) => !r.erro).length;
+  await repo.auditoria().registrar({
+    tenantId: repo.contexto.sessao.tenantId, usuarioId: repo.contexto.sessao.usuarioId,
+    usuarioEmail: repo.contexto.sessao.email, acao: 'exportar', entidade: 'empresa', entidadeId: empresa.id,
+    valorDepois: `Questor SYN · pedido de acesso (${grupos.map((g) => GRUPOS_SYN[g]).join(', ')}) · ${aceitos} de ${grupos.length} aceitos`,
+    origem: 'manual', ip: repo.contexto.ip, requestId: repo.contexto.requestId,
+  });
+  if (!aceitos) return c.json({ erro: resultados[0]?.erro ?? 'o Questor recusou', resultados }, 502);
+  return c.json({ status: 200, aceitos, resultados, resposta: resultados.length === 1 ? resultados[0]!.resposta : undefined });
 });
 
 /** Manda UMA nota ao Questor pelo SYN. Cada envio fica registrado; reenviar cria outra linha. */

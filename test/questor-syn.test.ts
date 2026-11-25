@@ -8,7 +8,7 @@ import { gerarHashSenha } from '../src/auth/senha';
 import app from '../src/index';
 import { montarEntradas200, lerExtrasDoXml, textoCampo, cnpjFormatado, type NotaEntrada } from '../src/questor/leiaute200';
 import { naturezaDoItem } from '../src/questor/entrada';
-import { configSyn, extrairToken, extrairDadoId } from '../src/questor/syn';
+import { configSyn, extrairToken, extrairDadoId, gruposPedidos, ClienteSyn } from '../src/questor/syn';
 
 /**
  * Questor SYN (25/11): a nota vai ao Questor com a natureza inteira (1556008), item por
@@ -135,7 +135,7 @@ describe('rotas do Questor SYN', () => {
   const CONFIG = {
     QUESTOR_SYN_URL: 'https://syn.exemplo.test', QUESTOR_SYN_CNPJ: '57.873.413/0001-06',
     QUESTOR_SYN_EMAIL: 'erp@exemplo.test', QUESTOR_SYN_CODIGO: 'codigo-secreto-de-teste',
-    QUESTOR_CNPJ_ESCRITORIO: '11.444.777/0001-61',
+    QUESTOR_CNPJ_ESCRITORIO: '11.444.777/0001-61', QUESTOR_SYN_INTERVALO_MS: '0',
   };
   let extra: Record<string, unknown> = {};
   const ambiente = () => ({
@@ -267,6 +267,64 @@ describe('rotas do Questor SYN', () => {
     const s = await req(`/api/empresas/${empresaId}/questor/acesso`);
     expect(await s.json()).toMatchObject({ status: 200, resposta: { situacao: 'Pendente' } });
     expect(corpos[1].url).toContain('/api/v2/dadosescritorio/erp/solicitaracesso/busca?CnpjCliente=11.222.333%2F0001-81');
+  });
+
+  it('acesso total: pede todos os grupos com um token só, e um grupo recusado não impede os outros', async () => {
+    extra = CONFIG;
+    const chamadas: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      chamadas.push({ url, body: init.body ? JSON.parse(String(init.body)) : null });
+      if (url.endsWith('gerartoken')) return new Response('"tok"', { status: 200 });
+      const grupo = JSON.parse(String(init.body)).grupoLayout;
+      return grupo === 210
+        ? new Response(JSON.stringify({ mensagem: 'grupo não disponível' }), { status: 400 })
+        : new Response(JSON.stringify({ success: true, data: { id: 1000 + grupo } }), { status: 200 });
+    }));
+    const r = await req(`/api/empresas/${empresaId}/questor/acesso`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grupos: 'todos' }),
+    });
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as any;
+    expect(j.aceitos).toBe(8);
+    expect(j.resultados.map((x: any) => x.grupo)).toEqual([1, 100, 200, 201, 202, 203, 210, 300, 301]);
+    expect(j.resultados.find((x: any) => x.grupo === 210)).toMatchObject({ status: 400, erro: expect.stringContaining('grupo não disponível') });
+    expect(chamadas.filter((x) => x.url.endsWith('gerartoken'))).toHaveLength(1);
+    expect(chamadas.filter((x) => x.url.endsWith('solicitaracesso')).map((x) => x.body)).toContainEqual(
+      { cnpjCliente: '11.222.333/0001-81', cnpjEscritorio: '11.444.777/0001-61', grupoLayout: 100 });
+    expect(db.consultar(`SELECT valor_depois FROM auditoria WHERE entidade = 'empresa' AND acao = 'exportar' ORDER BY rowid DESC LIMIT 1`))
+      .toEqual([{ valor_depois: 'Questor SYN · pedido de acesso (plano de contas ERP, lançamentos contábeis, entradas, saídas, pagamentos, recebimentos, grupo 210, lançamentos de inventário, bloco K) · 8 de 9 aceitos' }]);
+
+    // Lista escolhida e grupo inválido.
+    chamadas.length = 0;
+    const r2 = await req(`/api/empresas/${empresaId}/questor/acesso`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grupos: [201, 100] }),
+    });
+    expect(((await r2.json()) as any).resultados.map((x: any) => x.grupo)).toEqual([201, 100]);
+    const r3 = await req(`/api/empresas/${empresaId}/questor/acesso`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grupos: [200, 999] }),
+    });
+    expect(r3.status).toBe(400);
+    expect((await req(`/api/empresas/${empresaId}/questor/acesso?grupo=999`)).status).toBe(400);
+  });
+
+  it('gruposPedidos e o espaço entre as chamadas', async () => {
+    expect(gruposPedidos(undefined)).toEqual([200]);
+    expect(gruposPedidos('todos')).toHaveLength(9);
+    expect(gruposPedidos([200, '201', 200])).toEqual([200, 201]);
+    expect(gruposPedidos([])).toBeNull();
+    expect(gruposPedidos('tudo')).toBeNull();
+    const horas: number[] = [];
+    const cfg = { url: 'https://s.test', cnpjErp: '57873413000106', email: 'a@b', codigo: 'x', cnpjEscritorio: '11444777000161', intervaloMs: 120 };
+    const cli = new ClienteSyn(cfg, async (url) => {
+      horas.push(Date.now());
+      return new Response(url.endsWith('gerartoken') ? '"t"' : '{}', { status: 200 });
+    });
+    await cli.solicitarAcesso('11222333000181', 100);
+    await cli.solicitarAcesso('11222333000181', 201);
+    expect(horas).toHaveLength(3);
+    expect(horas[1]! - horas[0]!).toBeGreaterThanOrEqual(110);
+    expect(horas[2]! - horas[1]!).toBeGreaterThanOrEqual(110);
+    expect(configSyn({ ...CONFIG, QUESTOR_SYN_INTERVALO_MS: undefined } as any)).toMatchObject({ ok: true, cfg: { intervaloMs: 600 } });
   });
 
   it('sem a permissão, nada das rotas do Questor', async () => {
