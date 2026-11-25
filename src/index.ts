@@ -33,6 +33,9 @@ import { valoresFiscaisBind } from './nfe/importador';
 import { lerPaginasQuestor, conferirComQuestor, ErroQuestor } from './relatorios/questor';
 import { SessaoItc, ErroItc, camposDoItem, aliquotaInterestadual, type ResultadoItc } from './relatorios/itc';
 import { conversar, ErroAssistente, MODELO_PADRAO } from './assistente/assistente';
+import { montarEntradas200, dataBr } from './questor/leiaute200';
+import { notaParaEntrada } from './questor/entrada';
+import { ClienteSyn, configSyn, ErroSyn, extrairDadoId } from './questor/syn';
 
 type Env = {
   DB: D1Database;
@@ -87,6 +90,17 @@ type Env = {
    */
   ITC_USUARIO?: string;
   ITC_SENHA?: string;
+  /**
+   * Questor SYN (25/11): URL e CNPJ da Planee (variáveis no wrangler.jsonc); e-mail do
+   * cadastro e código de acesso são segredos no painel (QUESTOR_SYN_EMAIL,
+   * QUESTOR_SYN_CODIGO). QUESTOR_CNPJ_ESCRITORIO é o CNPJ da Alfa na licença do Questor.
+   * Ver src/questor/syn.ts.
+   */
+  QUESTOR_SYN_URL?: string;
+  QUESTOR_SYN_CNPJ?: string;
+  QUESTOR_SYN_EMAIL?: string;
+  QUESTOR_SYN_CODIGO?: string;
+  QUESTOR_CNPJ_ESCRITORIO?: string;
   // Os certificados ligados no wrangler.jsonc (`mtls_certificates`) chegam como
   // MTLS_<id no cofre>. São lidos pelo nome em src/captura/captura.ts.
 };
@@ -3750,6 +3764,167 @@ app.post('/api/empresas/:id/regras/desencontradas/corrigir', async (c) => {
     .object({ regras: z.array(z.object({ regraId: z.string(), valor: z.string() })).min(1).max(500) })
     .parse(await c.req.json().catch(() => ({})));
   return c.json({ ok: true, ...(await c.get('repo').corrigirRegrasDesencontradas(c.req.param('id'), corpo.regras)) });
+});
+
+// ------------------------------------------------------------------ Questor SYN
+
+/**
+ * 25/11 (Mateus: "o Questor tem que aceitar como a gente mandar"). O XML só leva o CFOP;
+ * pelo SYN a nota vai com a natureza inteira, item por item (src/questor/). Só quem tem
+ * `questor.enviar`. Nada aqui devolve o código de acesso nem o token.
+ */
+app.get('/api/questor/syn', (c) => {
+  exigir(c.get('sessao'), 'questor.enviar');
+  const cfg = configSyn(c.env);
+  return c.json(cfg.ok ? { configurado: true, url: cfg.cfg.url } : { configurado: false, falta: cfg.falta });
+});
+
+async function arquivoQuestorDaNota(c: any, notaId: string): Promise<
+  { resposta: Response } | { nota: any; empresa: any; arquivo: string; dataDocumentos: string }
+> {
+  const repo: Repo = c.get('repo');
+  const r = await repo.obterNotaComItens(notaId);
+  if (!r) return { resposta: c.json({ erro: 'nota não encontrada' }, 404) };
+  const empresa = await repo.obterEmpresa(r.nota.empresa_id);
+  if (!empresa) return { resposta: c.json({ erro: 'empresa fora do seu acesso' }, 404) };
+  const obj = await c.env.XML_ORIGINAL.get(r.nota.r2_original);
+  if (!obj) return { resposta: c.json({ erro: 'XML original não encontrado no arquivo' }, 500) };
+  const m = notaParaEntrada(r.nota, r.itens, await obj.text(), await repo.naturezasDaEmpresa(empresa.id), empresa.cnpj);
+  if (!m.ok) return { resposta: c.json({ erro: `não dá para mandar ao Questor: ${m.erro}` }, 422) };
+  const arquivo = montarEntradas200([m.entrada], await repo.regrasIcms(grupoIcms(empresa.regime)));
+  return { nota: r.nota, empresa, arquivo, dataDocumentos: dataBr(m.entrada.dataEmissao) };
+}
+
+/** O arquivo que iria ao Questor, sem mandar: para conferir antes. */
+app.get('/api/notas/:id/questor/arquivo', async (c) => {
+  exigir(c.get('sessao'), 'questor.enviar');
+  const a = await arquivoQuestorDaNota(c, c.req.param('id'));
+  if ('resposta' in a) return a.resposta;
+  return new Response(a.arquivo, {
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'content-disposition': `inline; filename="questor-entradas-${String(a.nota.numero ?? 'nota').replace(/\D/g, '')}.txt"`,
+    },
+  });
+});
+
+function clienteSyn(c: any): { cliente: ClienteSyn } | { resposta: Response } {
+  const cfg = configSyn(c.env);
+  if (!cfg.ok) return { resposta: c.json({ erro: 'O Questor SYN ainda não está configurado.', falta: cfg.falta }, 503) };
+  return { cliente: new ClienteSyn(cfg.cfg) };
+}
+
+function erroDoSyn(c: any, e: unknown) {
+  if (e instanceof ErroSyn) return c.json({ erro: e.message, status: e.status }, 502);
+  throw e;
+}
+
+/** Situação do pedido de acesso desta empresa no Questor (a Alfa aprova lá). */
+app.get('/api/empresas/:id/questor/acesso', async (c) => {
+  exigir(c.get('sessao'), 'questor.enviar');
+  const empresa = await c.get('repo').obterEmpresa(c.req.param('id'));
+  if (!empresa) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const s = clienteSyn(c);
+  if ('resposta' in s) return s.resposta;
+  try {
+    const r = await s.cliente.buscarAcesso(empresa.cnpj);
+    return c.json({ status: r.status, resposta: r.corpo });
+  } catch (e) { return erroDoSyn(c, e); }
+});
+
+/** Pede ao Questor acesso para mandar as entradas desta empresa. */
+app.post('/api/empresas/:id/questor/acesso', async (c) => {
+  exigir(c.get('sessao'), 'questor.enviar');
+  const repo = c.get('repo');
+  const empresa = await repo.obterEmpresa(c.req.param('id'));
+  if (!empresa) return c.json({ erro: 'empresa não encontrada' }, 404);
+  const s = clienteSyn(c);
+  if ('resposta' in s) return s.resposta;
+  try {
+    const r = await s.cliente.solicitarAcesso(empresa.cnpj);
+    await repo.auditoria().registrar({
+      tenantId: repo.contexto.sessao.tenantId, usuarioId: repo.contexto.sessao.usuarioId,
+      usuarioEmail: repo.contexto.sessao.email, acao: 'exportar', entidade: 'empresa', entidadeId: empresa.id,
+      valorDepois: `Questor SYN · pedido de acesso (entradas) · HTTP ${r.status}`, origem: 'manual',
+      ip: repo.contexto.ip, requestId: repo.contexto.requestId,
+    });
+    return c.json({ status: r.status, resposta: r.corpo });
+  } catch (e) { return erroDoSyn(c, e); }
+});
+
+/** Manda UMA nota ao Questor pelo SYN. Cada envio fica registrado; reenviar cria outra linha. */
+app.post('/api/notas/:id/questor/enviar', async (c) => {
+  exigir(c.get('sessao'), 'questor.enviar');
+  const repo = c.get('repo');
+  const a = await arquivoQuestorDaNota(c, c.req.param('id'));
+  if ('resposta' in a) return a.resposta;
+  const s = clienteSyn(c);
+  if ('resposta' in s) return s.resposta;
+
+  const sessao = c.get('sessao');
+  const id = crypto.randomUUID();
+  const agora = new Date().toISOString();
+  const sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(a.arquivo))))
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+  let situacao = 'enviado';
+  let dadoId: string | null = null;
+  let resumo = '';
+  let status = 200;
+  try {
+    const r = await s.cliente.inserirEntradas(a.empresa.cnpj, a.dataDocumentos, a.arquivo);
+    dadoId = extrairDadoId(r.corpo);
+    resumo = (typeof r.corpo === 'string' ? r.corpo : JSON.stringify(r.corpo)).slice(0, 500);
+  } catch (e) {
+    if (!(e instanceof ErroSyn)) throw e;
+    situacao = 'erro';
+    resumo = e.message.slice(0, 500);
+    status = 502;
+  }
+  await c.env.DB.prepare(
+    `INSERT INTO questor_envios (id, tenant_id, empresa_id, nota_id, data_documentos, dado_id, situacao, resposta,
+       arquivo_sha256, criado_por, criado_em) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+  ).bind(id, sessao.tenantId, a.empresa.id, a.nota.id, a.dataDocumentos, dadoId, situacao, resumo, sha, sessao.usuarioId, agora).run();
+  await repo.auditoria().registrar({
+    tenantId: sessao.tenantId, usuarioId: sessao.usuarioId, usuarioEmail: sessao.email,
+    acao: 'exportar', entidade: 'nota', entidadeId: a.nota.id,
+    valorDepois: `Questor SYN · ${situacao}${dadoId ? ` · dado ${dadoId}` : ''}`, origem: 'manual',
+    ip: repo.contexto.ip, requestId: repo.contexto.requestId,
+  });
+  return c.json({ id, situacao, dadoId, resposta: resumo }, status as 200);
+});
+
+/** Os envios desta nota ao Questor, do mais novo para o mais antigo. */
+app.get('/api/notas/:id/questor/envios', async (c) => {
+  exigir(c.get('sessao'), 'questor.enviar');
+  const nota = await c.get('repo').obterNotaComItens(c.req.param('id'));
+  if (!nota) return c.json({ erro: 'nota não encontrada' }, 404);
+  const { results } = await c.env.DB.prepare(
+    `SELECT e.id, e.data_documentos, e.dado_id, e.situacao, e.resposta, e.criado_em, e.atualizado_em, u.nome AS criado_por_nome
+       FROM questor_envios e LEFT JOIN usuarios u ON u.id = e.criado_por
+      WHERE e.tenant_id = ? AND e.nota_id = ? ORDER BY e.criado_em DESC`,
+  ).bind(c.get('sessao').tenantId, nota.nota.id).all();
+  return c.json(results);
+});
+
+/** Pergunta ao Questor como ficou um envio e guarda a resposta. */
+app.get('/api/questor/envios/:id', async (c) => {
+  exigir(c.get('sessao'), 'questor.enviar');
+  const sessao = c.get('sessao');
+  const envio = await c.env.DB.prepare('SELECT * FROM questor_envios WHERE tenant_id = ? AND id = ?')
+    .bind(sessao.tenantId, c.req.param('id')).first<any>();
+  if (!envio) return c.json({ erro: 'envio não encontrado' }, 404);
+  // a nota precisa estar no escopo de quem pergunta
+  if (!(await c.get('repo').obterNotaComItens(envio.nota_id))) return c.json({ erro: 'envio não encontrado' }, 404);
+  if (!envio.dado_id) return c.json({ ...envio, consulta: null });
+  const s = clienteSyn(c);
+  if ('resposta' in s) return s.resposta;
+  try {
+    const r = await s.cliente.buscarLog(envio.dado_id);
+    const resumo = (typeof r.corpo === 'string' ? r.corpo : JSON.stringify(r.corpo)).slice(0, 2000);
+    await c.env.DB.prepare('UPDATE questor_envios SET resposta = ?, atualizado_em = ? WHERE id = ?')
+      .bind(resumo, new Date().toISOString(), envio.id).run();
+    return c.json({ ...envio, consulta: r.corpo });
+  } catch (e) { return erroDoSyn(c, e); }
 });
 
 // ------------------------------------------------------------------ exportação
