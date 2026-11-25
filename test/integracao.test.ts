@@ -105,7 +105,7 @@ describe('as migrações aplicam num SQLite real', () => {
     const tabelas = db.consultar<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tabelas.length).toBe(38); // + naturezas_empresa (0036) // + links_acesso (0034) // + segmento_regras e aviso_item (0033) // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026), produto_atencao (0031), conversas do assistente (0032: conversa, mensagem, evento)
+    expect(tabelas.length).toBe(39); // + questor_envios (0038) // + naturezas_empresa (0036) // + links_acesso (0034) // + segmento_regras e aviso_item (0033) // + produtos_nao_fecharam (0017), regras_icms (0018), certificados (0020), captura_empresas, captura_caixa e captura_buscas (0021), apuracao_marcas (0026), produto_atencao (0031), conversas do assistente (0032: conversa, mensagem, evento)
     expect(db.consultar('SELECT 1 FROM tenants')).toHaveLength(1);
     expect(db.consultar('SELECT 1 FROM papeis')).toHaveLength(4); // + Somente leitura (0029)
   });

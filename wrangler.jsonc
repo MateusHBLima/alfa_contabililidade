@@ -53,7 +53,13 @@
     // Plataforma do cartório (24/11, Mateus): o ÚNICO certificado que ela pode usar para
     // buscar as notas do cartório na base nacional da NFS-e. É o e-CPF da contadora, que
     // tem a procuração do titular. O id não é segredo. Ver src/interno.ts.
-    "CARTORIO_CERT_ID": "04216890-9852-47a5-9b2b-58cc12480b5f"
+    "CARTORIO_CERT_ID": "04216890-9852-47a5-9b2b-58cc12480b5f",
+    // Questor SYN (25/11): produção. CNPJ da Planee, que fez o cadastro de ERP na Questor.
+    // O e-mail do cadastro e o código de acesso são SEGREDOS no painel
+    // (QUESTOR_SYN_EMAIL, QUESTOR_SYN_CODIGO). O CNPJ da Alfa na licença do Questor também
+    // pode ir no painel, como segredo QUESTOR_CNPJ_ESCRITORIO (não some no próximo deploy).
+    "QUESTOR_SYN_URL": "https://syn.questor.com.br",
+    "QUESTOR_SYN_CNPJ": "57.873.413/0001-06"
   },
 
   // Busca automática na SEF (01/10): a cada 15 minutos, uma empresa por vez.
