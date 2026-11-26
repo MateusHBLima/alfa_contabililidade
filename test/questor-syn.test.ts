@@ -123,6 +123,8 @@ describe('configuração e respostas do SYN', () => {
     expect(extrairToken({ data: { accessToken: 't2' } })).toBe('t2');
     expect(extrairDadoId({ dadoId: 42 })).toBe('42');
     expect(extrairDadoId({ data: { id: 'x-1' } })).toBe('x-1');
+    // Resposta real do SYN de produção (26/11).
+    expect(extrairDadoId({ success: true, data: { dadosId: 1448013 }, message: [] })).toBe('1448013');
   });
 });
 
@@ -325,6 +327,33 @@ describe('rotas do Questor SYN', () => {
     expect(horas[1]! - horas[0]!).toBeGreaterThanOrEqual(110);
     expect(horas[2]! - horas[1]!).toBeGreaterThanOrEqual(110);
     expect(configSyn({ ...CONFIG, QUESTOR_SYN_INTERVALO_MS: undefined } as any)).toMatchObject({ ok: true, cfg: { intervaloMs: 600 } });
+  });
+
+  it('envio gravado sem o id: a consulta acha o dadosId na resposta guardada e pergunta o status', async () => {
+    await req(`/api/empresas/${empresaId}/naturezas`, {
+      method: 'PUT', body: JSON.stringify({ naturezas: [
+        { cfop: '1556', complemento: '008', padrao: true }, { cfop: '1102', complemento: '002', padrao: true },
+        { cfop: '1403', complemento: '002', padrao: true },
+      ] }),
+    });
+    extra = CONFIG;
+    const chamadas: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      chamadas.push(url);
+      if (url.endsWith('/api/v2/erp/gerartoken')) return new Response('"tok"', { status: 200 });
+      if (url.endsWith('/api/v2/dados/inserir')) return new Response(JSON.stringify({ success: true, data: { dadosId: 1448013 }, message: [] }), { status: 200 });
+      return new Response(JSON.stringify({ success: true, data: [{ status: 'Importado' }] }), { status: 200 });
+    }));
+    const r = await req(`/api/notas/${notaId()}/questor/enviar`, { method: 'POST' });
+    const envio = (await r.json()) as any;
+    expect(envio.dadoId).toBe('1448013');
+    // Simula um envio antigo, gravado antes do conserto.
+    db.consultar(`UPDATE questor_envios SET dado_id = NULL WHERE id = '${envio.id}'`);
+    const s = (await (await req(`/api/questor/envios/${envio.id}`)).json()) as any;
+    expect(s.dado_id).toBe('1448013');
+    expect(s.consulta).toMatchObject({ data: [{ status: 'Importado' }] });
+    expect(chamadas.at(-1)).toContain('/api/v2/dados/buscar-log-e-status-dados?DadoId=1448013');
+    expect(db.consultar(`SELECT dado_id FROM questor_envios WHERE id = '${envio.id}'`)).toEqual([{ dado_id: '1448013' }]);
   });
 
   it('sem a permissão, nada das rotas do Questor', async () => {

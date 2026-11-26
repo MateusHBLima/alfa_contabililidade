@@ -200,7 +200,8 @@ export function extrairDadoId(corpo: unknown): string | null {
   if (typeof corpo === 'number' || (typeof corpo === 'string' && /^[\w-]{1,80}$/.test(corpo.trim()))) return String(corpo).trim();
   if (corpo && typeof corpo === 'object') {
     const o = corpo as Record<string, any>;
-    for (const k of ['dadoId', 'id', 'idDado', 'codigo', 'data', 'dados']) {
+    // O SYN de produção responde { success, data: { dadosId } } (envio de 26/11).
+    for (const k of ['dadosId', 'dadoId', 'id', 'idDado', 'codigo', 'data', 'dados']) {
       const v = o[k];
       if (typeof v === 'number' || (typeof v === 'string' && v.trim())) return String(v).trim();
       if (v && typeof v === 'object') { const t = extrairDadoId(v); if (t) return t; }

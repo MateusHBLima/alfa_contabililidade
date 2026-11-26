@@ -3935,6 +3935,16 @@ app.get('/api/questor/envios/:id', async (c) => {
   if (!envio) return c.json({ erro: 'envio não encontrado' }, 404);
   // a nota precisa estar no escopo de quem pergunta
   if (!(await c.get('repo').obterNotaComItens(envio.nota_id))) return c.json({ erro: 'envio não encontrado' }, 404);
+  if (!envio.dado_id && envio.resposta) {
+    // Envios gravados antes de o sistema conhecer o campo `dadosId`: o id está na resposta guardada.
+    let corpo: unknown = envio.resposta;
+    try { corpo = JSON.parse(envio.resposta); } catch { /* texto */ }
+    const achado = typeof corpo === 'object' ? extrairDadoId(corpo) : null;
+    if (achado) {
+      await c.env.DB.prepare('UPDATE questor_envios SET dado_id = ? WHERE id = ?').bind(achado, envio.id).run();
+      envio.dado_id = achado;
+    }
+  }
   if (!envio.dado_id) return c.json({ ...envio, consulta: null });
   const s = clienteSyn(c);
   if ('resposta' in s) return s.resposta;
